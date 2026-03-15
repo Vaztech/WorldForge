@@ -22,10 +22,10 @@ enum class EKnowledgeLevel : uint8
 UENUM(BlueprintType)
 enum class EWorldSize : uint8
 {
-    Small   UMETA(DisplayName = "Small 128x128"),
-    Medium  UMETA(DisplayName = "Medium 256x256"),
-    Large   UMETA(DisplayName = "Large 512x512"),
-    OMG     UMETA(DisplayName = "OMG 1024x1024")
+    Small   UMETA(DisplayName = "Small (128x128)"),
+    Medium  UMETA(DisplayName = "Medium (256x256)"),
+    Large   UMETA(DisplayName = "Large (512x512)"),
+    OMG     UMETA(DisplayName = "OMG (1024x1024)")
 };
 
 // Pre-history epoch identifiers
@@ -139,6 +139,8 @@ struct FWorldTileData
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FGameplayTag BiomeType;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float Elevation = 0.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float WaterDepth = 0.f;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) float Temperature = 0.5f;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) float Rainfall = 0.5f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TArray<FGameplayTag> ResourceTags;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 ControllingCivID = -1;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FWorldKnowledgeState KnowledgeState;
