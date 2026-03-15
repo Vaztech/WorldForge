@@ -1,88 +1,90 @@
 {
-	"FileVersion": 3,
-	"EngineAssociation": "5.7",
-	"Category": "",
-	"Description": "",
-	"Modules": [
-		{
-			"Name": "WorldForge",
-			"Type": "Runtime",
-			"LoadingPhase": "Default"
-		}
-	],
-	"Plugins": [
-		{
-			"Name": "ModelingToolsEditorMode",
-			"Enabled": true,
-			"TargetAllowList": [
-				"Editor"
-			]
-		},
-		{
-			"Name": "FastNoiseGenerator",
-			"Enabled": true,
-			"MarketplaceURL": "com.epicgames.launcher://ue/marketplace/content/527737f42da544e9abf8607a40495fbd"
-		},
-		{
-			"Name": "QuestSystem",
-			"Enabled": true,
-			"MarketplaceURL": "com.epicgames.launcher://ue/Fab/product/97225ffd-a042-4522-b72e-38a3926a25d4"
-		},
-		{
-			"Name": "SkyScape",
-			"Enabled": true
-		},
-		{
-			"Name": "ProceduralTerrainGenerator",
-			"Enabled": true,
-			"MarketplaceURL": "com.epicgames.launcher://ue/marketplace/content/2e707e78b69540aeb7464b7c4e0e9c7b"
-		},
-		{
-			"Name": "InventoryFrameworkPlugin",
-			"Enabled": true,
-			"MarketplaceURL": "com.epicgames.launcher:\n//ue/marketplace/product/a692a7bae5e74787b67abcd2164ed05e"
-		},
-		{
-			"Name": "PaperZD",
-			"Enabled": true,
-			"MarketplaceURL": "com.epicgames.launcher://ue/marketplace/content/c4b43502026047d89296cd7bffd92828"
-		},
-		{
-			"Name": "GameAnalytics",
-			"Enabled": true,
-			"MarketplaceURL": "com.epicgames.launcher://ue/marketplace/content/d070c3fab7b74c08bab3a89c9cbf4490"
-		},
-		{
-			"Name": "PCG",
-			"Enabled": true
-		},
-		{
-			"Name": "Buoyancy",
-			"Enabled": true
-		},
-		{
-			"Name": "PCGWaterInterop",
-			"Enabled": true
-		},
-		{
-			"Name": "GameFeatures",
-			"Enabled": true
-		},
-		{
-			"Name": "Water",
-			"Enabled": true
-		},
-		{
-			"Name": "AbilitySystemGameFeatureActions",
-			"Enabled": true
-		},
-		{
-			"Name": "ModularGameplay",
-			"Enabled": true
-		},
-		{
-			"Name": "DataRegistry",
-			"Enabled": true
-		}
-	]
+  "FileVersion": 3,
+  "EngineAssociation": "5.7",
+  "Category": "",
+  "Description": "",
+  "Modules": [
+    {
+      "Name": "WorldForge",
+      "Type": "Runtime",
+      "LoadingPhase": "Default"
+    }
+  ],
+  "Plugins": [
+    {
+      "Name": "ModelingToolsEditorMode",
+      "Enabled": true
+    },
+    {
+      "Name": "FastNoiseGenerator",
+      "Enabled": true
+    },
+    {
+      "Name": "QuestSystem",
+      "Enabled": true
+    },
+    {
+      "Name": "SkyScape",
+      "Enabled": true
+    },
+    {
+      "Name": "ProceduralTerrainGenerator",
+      "Enabled": true
+    },
+    {
+      "Name": "InventoryFrameworkPlugin",
+      "Enabled": true
+    },
+    {
+      "Name": "PaperZD",
+      "Enabled": true
+    },
+    {
+      "Name": "GameAnalytics",
+      "Enabled": true
+    },
+    {
+      "Name": "PCG",
+      "Enabled": true
+    },
+    {
+      "Name": "Buoyancy",
+      "Enabled": true
+    },
+    {
+      "Name": "PCGWaterInterop",
+      "Enabled": true
+    },
+    {
+      "Name": "GameFeatures",
+      "Enabled": true
+    },
+    {
+      "Name": "Water",
+      "Enabled": true
+    },
+    {
+      "Name": "AbilitySystemGameFeatureActions",
+      "Enabled": true
+    },
+    {
+      "Name": "ModularGameplay",
+      "Enabled": true
+    },
+    {
+      "Name": "DataRegistry",
+      "Enabled": true
+    },
+    {
+      "Name": "VisualStudioTools",
+      "Enabled": false,
+      "SupportedTargetPlatforms": [
+        "Win64"
+      ]
+    }
+  ],
+  "TargetPlatforms": [],
+  "AdditionalRootDirectories": [],
+  "AdditionalPluginDirectories": [],
+  "EpicSampleNameHash": ""
 }

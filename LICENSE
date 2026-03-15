@@ -1,21 +1,66 @@
-MIT License
+WorldForge License
 
 Copyright (c) 2026 Vaztech
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+All Rights Reserved.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+Ownership
+---------
+The WorldForge game, its source code, assets, design documents,
+and all related intellectual property are owned exclusively by
+Vaztech.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+No ownership rights are granted to users, contributors, or
+players except where explicitly stated in this license.
+
+Restrictions
+------------
+Unless explicitly permitted in writing by Vaztech, you may NOT:
+
+- Copy, redistribute, or sell the game or its source code
+- Create commercial derivatives of the game
+- Use game assets in other projects
+- Reverse engineer or redistribute proprietary systems
+- Publish modified versions of the core game
+
+Modding Permission
+------------------
+WorldForge supports community-created modifications ("mods").
+
+Users are allowed to create, distribute, and publish mods that:
+
+- Extend or modify gameplay
+- Add content such as items, races, maps, or scripts
+- Integrate with the official modding systems
+
+Mods must NOT:
+
+- Include or redistribute original game assets
+- Include proprietary source code from the game
+- Circumvent DRM or licensing systems
+- Be sold commercially without explicit written permission
+
+Mods must require an official copy of WorldForge to function.
+
+Mod creators retain ownership of the original content they
+create within their mods.
+
+Commercial Rights
+-----------------
+Only Vaztech may sell or commercially distribute WorldForge
+unless a separate written agreement is provided.
+
+Streaming and Content Creation
+------------------------------
+Players may freely stream, record, and publish gameplay videos,
+screenshots, and commentary related to WorldForge.
+
+Warranty
+--------
+This software is provided "as is", without warranty of any kind,
+express or implied.
+
+Contact
+-------
+Licensing inquiries:
+Vaztech
