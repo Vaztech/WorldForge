@@ -15,7 +15,9 @@ public class WorldForge : ModuleRules
 			"Engine",
 			"InputCore",
 			"EnhancedInput",
-			"GameplayTags"
+			"GameplayTags",
+			"Json",
+			"JsonUtilities"
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[] { });
