@@ -1,16 +1,20 @@
 #include "WorldGenPipeline.h"
 #include "../Core/WorldForgeRNG.h"
 #include "GameplayTagContainer.h"
+#include "../Civilization/CivilizationGenerator.h"
+#include "../Civilization/HistoricalSimulation.h"
+#include "../Economy/WorldEconomySimulation.h"
 
 void UWorldGenPipeline::GenerateWorld(
-    int64 InWorldSeed, FWorldGenConfig Config,
-    UWorldForgeRNG* RNG, UWorld* World)
+    int64 InWorldSeed,
+    FWorldGenConfig Config,
+    UWorldForgeRNG* RNG)
 {
     bComplete = false;
     CurrentConfig = Config;
     WorldSeed = InWorldSeed;
     RNGRef = RNG;
-    WorldRef = World;
+    WorldRef = GetOuter() ? GetOuter()->GetWorld() : nullptr;
     GridWidth = GetDimension(Config.WorldSize);
     GridHeight = GridWidth;
 
@@ -146,12 +150,70 @@ void UWorldGenPipeline::Step06_PCGDecorationPass() { UE_LOG(LogTemp, Log, TEXT("
 void UWorldGenPipeline::Step07_ApplyWorldDriver() { UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step07 -- TODO")); }
 void UWorldGenPipeline::Step08_SeedResources() { UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step08 -- TODO")); }
 
-// Steps 09-16: stubs
-void UWorldGenPipeline::Step09_PlaceCivilizations() { UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step09 -- TODO")); }
-void UWorldGenPipeline::Step10_GenerateCulturalDNA() { UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step10 -- TODO")); }
-void UWorldGenPipeline::Step11_GenerateEconomyLayer() { UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step11 -- TODO")); }
+// Steps 12,14,15,16: stubs
 void UWorldGenPipeline::Step12_GenerateCosmicRoster() { UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step12 -- TODO")); }
-void UWorldGenPipeline::Step13_RunPreHistory() { UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step13 -- TODO")); }
 void UWorldGenPipeline::Step14_AssignWorldTraits() { UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step14 -- TODO")); }
 void UWorldGenPipeline::Step15_RecordFinalState() { UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step15 -- TODO")); }
 void UWorldGenPipeline::Step16_FinalizeWorldMap() { UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step16 -- TODO")); }
+
+void UWorldGenPipeline::Step09_PlaceCivilizations()
+{
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step09: Placing civilizations..."));
+    if (!RNGRef) return;
+
+    UCivilizationGenerator* CivGen = NewObject<UCivilizationGenerator>(this);
+    Civilizations = CivGen->GenerateCivilizations(
+        CurrentConfig.StartingCivCount, WorldTiles, GridWidth, RNGRef);
+
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step09: %d civs placed"), Civilizations.Num());
+}
+
+void UWorldGenPipeline::Step10_GenerateCulturalDNA()
+{
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step10: Cultural DNA..."));
+    if (!RNGRef) return;
+
+    UCivilizationGenerator* CivGen = NewObject<UCivilizationGenerator>(this);
+    CivGen->GenerateCulturalDNA(Civilizations, WorldTiles, RNGRef);
+
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step10: Cultural DNA done for %d civs"), Civilizations.Num());
+}
+
+void UWorldGenPipeline::Step11_GenerateEconomyLayer()
+{
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step11: Economy layer..."));
+
+    if (!WorldRef)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[WorldGen] Step11: WorldRef null"));
+        return;
+    }
+
+    if (UWorldEconomySimulation* Econ = WorldRef->GetSubsystem<UWorldEconomySimulation>())
+    {
+        Econ->GenerateWorldEconomy(Civilizations, WorldTiles, Currencies, RNGRef);
+    }
+    else
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[WorldGen] Step11: UWorldEconomySimulation not found"));
+    }
+
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step11: %d currencies"), Currencies.Num());
+}
+
+void UWorldGenPipeline::Step13_RunPreHistory()
+{
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step13: Pre-history..."));
+    if (!RNGRef) return;
+
+    FHistoricalSimConfig SimCfg;
+    SimCfg.TotalYears = CurrentConfig.PreHistoryYears;
+    SimCfg.WarFrequency = CurrentConfig.WarFrequency;
+    SimCfg.DisasterFrequency = CurrentConfig.DisasterFrequency;
+    SimCfg.EconomicComplexity = CurrentConfig.EconomicComplexity;
+
+    UHistoricalSimulation* HistSim = NewObject<UHistoricalSimulation>(this);
+    HistSim->RunSimulation(SimCfg, Civilizations, WorldTiles, Currencies, HistoryLog, RNGRef);
+
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step13: %d events"), HistoryLog.Num());
+}

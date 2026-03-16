@@ -12,7 +12,7 @@
 class UWorld;
 class UWorldForgeRNG;
 
-UCLASS()
+UCLASS(BlueprintType)
 class WORLDFORGE_API UWorldGenPipeline : public UObject
 {
     GENERATED_BODY()
@@ -20,26 +20,27 @@ class WORLDFORGE_API UWorldGenPipeline : public UObject
 public:
     /**
      * Main entry point.
-     * RNG and World are passed explicitly -- UObject cannot safely call GetWorld().
+     * RNG is passed explicitly.
+     * World is resolved from the object's Outer so the function is Blueprint-friendly.
      * Create this object with NewObject<UWorldGenPipeline>(Owner) where Owner is an Actor or Subsystem.
      */
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|WorldGen")
     void GenerateWorld(
-        int64            WorldSeed,
-        FWorldGenConfig  Config,
-        UWorldForgeRNG* RNG,
-        UWorld* World
+        int64           WorldSeed,
+        FWorldGenConfig Config,
+        UWorldForgeRNG* RNG
     );
 
     // Results -- read after GenerateWorld() completes
-    const TArray<FWorldTileData>& GetWorldTiles()    const { return WorldTiles; }
+    const TArray<FWorldTileData>& GetWorldTiles() const { return WorldTiles; }
     const TArray<FCivilizationData>& GetCivilizations() const { return Civilizations; }
-    const TArray<FHistoryEventData>& GetHistoryLog()    const { return HistoryLog; }
-    const TArray<FCurrencyDefinition>& GetCurrencies()    const { return Currencies; }
-    const TArray<FGameplayTag>& GetWorldTraits()   const { return WorldTraits; }
+    const TArray<FHistoryEventData>& GetHistoryLog() const { return HistoryLog; }
+    const TArray<FCurrencyDefinition>& GetCurrencies() const { return Currencies; }
+    const TArray<FGameplayTag>& GetWorldTraits() const { return WorldTraits; }
 
-    int32 GetGridWidth()  const { return GridWidth; }
+    int32 GetGridWidth() const { return GridWidth; }
     int32 GetGridHeight() const { return GridHeight; }
-    bool  IsComplete()    const { return bComplete; }
+    bool  IsComplete() const { return bComplete; }
 
 private:
     void Step01_InitializeSeed();
@@ -60,7 +61,7 @@ private:
     void Step16_FinalizeWorldMap();
 
     int32 GetDimension(EWorldSize Size) const;
-    int32 TileIndex(int32 X, int32 Y)   const { return Y * GridWidth + X; }
+    int32 TileIndex(int32 X, int32 Y) const { return Y * GridWidth + X; }
 
     TArray<FWorldTileData>      WorldTiles;
     TArray<FCivilizationData>   Civilizations;

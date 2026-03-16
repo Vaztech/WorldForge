@@ -14,7 +14,7 @@
 //  4. Each branch is an isolated LCG stream — one branch per system.
 // ═══════════════════════════════════════════════════════════════════
 
-UCLASS()
+UCLASS(BlueprintType)
 class WORLDFORGE_API UWorldForgeRNG : public UGameInstanceSubsystem
 {
     GENERATED_BODY()
