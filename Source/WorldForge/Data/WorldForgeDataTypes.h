@@ -369,6 +369,21 @@ struct FNavCell
 };
 
 USTRUCT(BlueprintType)
+struct FActiveBuildTask
+{
+    GENERATED_BODY()
+
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) int32 TaskID = -1;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) int32 SettlementID = -1;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) FGameplayTag BuildingTag;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) FIntPoint OriginGridCell;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) int32 TotalBlocks = 0;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) int32 PlacedBlocks = 0;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) int32 AssignedAgentID = -1;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) bool bComplete = false;
+};
+
+USTRUCT(BlueprintType)
 struct FAgentData
 {
     GENERATED_BODY()

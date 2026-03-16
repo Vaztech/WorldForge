@@ -59,6 +59,9 @@ public:
     int32 GetTileCount() const { return WorldTiles.Num(); }
     bool IsInitialized() const { return bInitialized; }
 
+    // ---- Added accessors ----
+    const TArray<FWorldTileData>& GetWorldTiles() const { return WorldTiles; }
+    const TArray<FCivilizationData>& GetCivilizations() const { return Civilizations; }
     const TArray<FHistoryEventData>& GetHistoryLog() const { return HistoryLog; }
 
 private:
