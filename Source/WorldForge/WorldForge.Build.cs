@@ -18,6 +18,9 @@ public class WorldForge : ModuleRules
             "Json",
             "JsonUtilities",
             "ProceduralMeshComponent",
+            "NavigationSystem",
+            "AIModule",
+            "RenderCore",
         });
 
         PrivateDependencyModuleNames.AddRange(new string[]
@@ -27,14 +30,30 @@ public class WorldForge : ModuleRules
             "PCG",
         });
 
-        // Resolve project plugin directory safely (since this is not a plugin module)
-        string ProjectRoot = Path.GetFullPath(Path.Combine(ModuleDirectory, "../../"));
-        string PluginsDir = Path.Combine(ProjectRoot, "Plugins");
+        // PrivateIncludePaths: lets cpp files use flat includes
+        PrivateIncludePaths.AddRange(new string[]
+        {
+            ModuleDirectory,
+            Path.Combine(ModuleDirectory, "Colony"),
+            Path.Combine(ModuleDirectory, "Colony", "Processors"),
+            Path.Combine(ModuleDirectory, "Data"),
+            Path.Combine(ModuleDirectory, "World"),
+            Path.Combine(ModuleDirectory, "Economy"),
+            Path.Combine(ModuleDirectory, "Save"),
+            Path.Combine(ModuleDirectory, "Debug"),
+            Path.Combine(ModuleDirectory, "Voxel"),
+            Path.Combine(ModuleDirectory, "Visual"),
+            Path.Combine(ModuleDirectory, "Races"),
+            Path.Combine(ModuleDirectory, "Civilization"),
+        });
 
-        // PaperZD -- only add if plugin folder exists
-        string PaperZDPath = Path.Combine(PluginsDir, "PaperZD");
-        bool bPaperZDInstalled = Directory.Exists(PaperZDPath);
-        if (bPaperZDInstalled)
+        // Locate project Plugins directory
+        string ProjectRoot = Path.GetFullPath(Path.Combine(ModuleDirectory, "..", ".."));
+        string ProjectPluginsDir = Path.Combine(ProjectRoot, "Plugins");
+
+        // PaperZD -- only if plugin installed
+        string PaperZDPath = Path.Combine(ProjectPluginsDir, "PaperZD");
+        if (Directory.Exists(PaperZDPath))
         {
             PublicDependencyModuleNames.Add("PaperZD");
             PublicDefinitions.Add("WITH_PAPERZD=1");
@@ -44,13 +63,17 @@ public class WorldForge : ModuleRules
             PublicDefinitions.Add("WITH_PAPERZD=0");
         }
 
-        // Voxel Plugin -- only add if plugin folder exists
-        // Note: module name is 'Voxel' for the legacy free version
-        string VoxelPath = Path.Combine(PluginsDir, "VoxelPlugin");
-        bool bVoxelInstalled = Directory.Exists(VoxelPath);
-        if (bVoxelInstalled)
+        // Voxel Plugin -- only if installed
+        string VoxelPath = Path.Combine(ProjectPluginsDir, "VoxelPlugin");
+        if (Directory.Exists(VoxelPath))
         {
-            PublicDependencyModuleNames.Add("Voxel");
+            PublicDependencyModuleNames.AddRange(new string[]
+            {
+                "Voxel",
+                "VoxelGraph",
+                "VoxelHelpers"
+            });
+
             PublicDefinitions.Add("WITH_VOXEL_PLUGIN=1");
         }
         else

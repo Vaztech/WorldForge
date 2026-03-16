@@ -341,6 +341,20 @@ struct FReservationRecord
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 SettlementID = -1;
 };
 
+// Add in COLONY STRUCTS section of WorldForgeDataTypes.h -- BEFORE FAgentData
+
+/** 2D navigation cell. Phase 2: single elevation layer only. */
+USTRUCT(BlueprintType)
+struct FNavCell
+{
+    GENERATED_BODY()
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) FIntPoint GridPos;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) bool      bWalkable = true;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) float     PathCost = 1.0f;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) bool      bDangerZone = false;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) int32     OccupantID = -1;
+};
+
 USTRUCT(BlueprintType)
 struct FAgentData
 {
