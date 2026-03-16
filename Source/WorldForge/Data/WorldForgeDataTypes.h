@@ -102,6 +102,7 @@ USTRUCT(BlueprintType)
 struct FWorldKnowledgeState
 {
     GENERATED_BODY()
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 TileID = 0;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) EKnowledgeLevel KnowledgeLevel = EKnowledgeLevel::Unexplored;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 LastSurveyYear = -1;
@@ -118,6 +119,7 @@ USTRUCT(BlueprintType)
 struct FVoxelBiomeProfile
 {
     GENERATED_BODY()
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float NoiseFrequency = 0.02f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float NoiseAmplitude = 100.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 OctaveCount = 4;
@@ -135,6 +137,7 @@ USTRUCT(BlueprintType)
 struct FWorldTileData
 {
     GENERATED_BODY()
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 TileID = 0;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FGameplayTag BiomeType;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float Elevation = 0.f;
@@ -162,6 +165,7 @@ USTRUCT(BlueprintType)
 struct FCultureData
 {
     GENERATED_BODY()
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 CivID = 0;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float HierarchyTolerance = 50.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float OutgroupHostility = 50.f;
@@ -179,6 +183,7 @@ USTRUCT(BlueprintType)
 struct FHistoryEventData
 {
     GENERATED_BODY()
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 EventID = 0;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 Year = 0;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FGameplayTag EpochTag;
@@ -195,6 +200,7 @@ USTRUCT(BlueprintType)
 struct FCivilizationData
 {
     GENERATED_BODY()
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 CivID = 0;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FGameplayTag RaceType;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FGameplayTag GovernmentType;
@@ -216,6 +222,7 @@ USTRUCT(BlueprintType)
 struct FCurrencyTrustState
 {
     GENERATED_BODY()
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float MilitaryStability = 1.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float BackingStrength = 1.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float TradeReputation = 1.f;
@@ -230,6 +237,7 @@ USTRUCT(BlueprintType)
 struct FCurrencyDefinition
 {
     GENERATED_BODY()
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FGameplayTag CurrencyTag;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FText DisplayName;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FText PhysicalForm;
@@ -251,6 +259,7 @@ USTRUCT(BlueprintType)
 struct FPriceFixPolicy
 {
     GENERATED_BODY()
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FGameplayTag ItemTag;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 CivID = -1;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) EPriceFixType FixType = EPriceFixType::None;
@@ -264,6 +273,7 @@ USTRUCT(BlueprintType)
 struct FGovernmentEconomicProfile
 {
     GENERATED_BODY()
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FGameplayTag GovernmentType;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float BaseTaxRate = 0.15f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float TariffRate = 0.10f;
@@ -280,6 +290,7 @@ USTRUCT(BlueprintType)
 struct FMarketPrice
 {
     GENERATED_BODY()
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FGameplayTag ItemTag;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 SettlementID = -1;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float BaseAnchorValue = 1.f;
@@ -298,6 +309,7 @@ USTRUCT(BlueprintType)
 struct FSettlementMarket
 {
     GENERATED_BODY()
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 SettlementID = -1;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FGameplayTag PrimaryCurrency;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TArray<FGameplayTag> AcceptedCurrencies;
@@ -314,6 +326,7 @@ USTRUCT(BlueprintType)
 struct FSettlementState
 {
     GENERATED_BODY()
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 SettlementID = -1;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 WorldTileID = -1;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FString Name;
@@ -331,6 +344,7 @@ USTRUCT(BlueprintType)
 struct FReservationRecord
 {
     GENERATED_BODY()
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 ReservationID = -1;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 OwnerAgentID = -1;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 TargetID = -1;
@@ -341,24 +355,24 @@ struct FReservationRecord
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 SettlementID = -1;
 };
 
-// Add in COLONY STRUCTS section of WorldForgeDataTypes.h -- BEFORE FAgentData
-
 /** 2D navigation cell. Phase 2: single elevation layer only. */
 USTRUCT(BlueprintType)
 struct FNavCell
 {
     GENERATED_BODY()
+
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) FIntPoint GridPos;
-    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) bool      bWalkable = true;
-    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) float     PathCost = 1.0f;
-    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) bool      bDangerZone = false;
-    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) int32     OccupantID = -1;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) bool bWalkable = true;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) float PathCost = 1.0f;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) bool bDangerZone = false;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) int32 OccupantID = -1;
 };
 
 USTRUCT(BlueprintType)
 struct FAgentData
 {
     GENERATED_BODY()
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 AgentID = -1;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 SettlementID = -1;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) EAgentState State = EAgentState::Idle;
@@ -378,7 +392,8 @@ struct FAgentData
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) bool bInjured = false;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 ActiveReservationID = -1;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FGameplayTag CurrentJobTag;
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FIntPoint CurrentNavTarget;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FIntPoint CurrentGridPos = FIntPoint::ZeroValue;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FIntPoint CurrentNavTarget = FIntPoint::ZeroValue;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TMap<FName, float> EntityFavor;
 };
 
@@ -390,6 +405,7 @@ USTRUCT(BlueprintType)
 struct FSimulationEvent
 {
     GENERATED_BODY()
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite) FGameplayTag EventType;
     UPROPERTY(EditAnywhere, BlueprintReadWrite) int32 SettlementID = -1;
     UPROPERTY(EditAnywhere, BlueprintReadWrite) int32 AgentID = -1;
@@ -406,6 +422,7 @@ USTRUCT(BlueprintType)
 struct FWorldGenConfig
 {
     GENERATED_BODY()
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) EWorldSize WorldSize = EWorldSize::Medium;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 PreHistoryYears = 200;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float WarFrequency = 0.5f;
