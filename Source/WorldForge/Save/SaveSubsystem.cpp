@@ -1,4 +1,5 @@
 #include "SaveSubsystem.h"
+#include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "Kismet/GameplayStatics.h"
 #include "SettlementManager.h"
@@ -19,7 +20,7 @@ void USaveSubsystem::Initialize(FSubsystemCollectionBase& C)
     UE_LOG(LogTemp, Log, TEXT("[SaveSubsystem] Initialized."));
 }
 
-void USaveSubsystem::SaveGame(const FString& Slot, UWorld* W)
+void USaveSubsystem::SaveGame(const FString& Slot, UObject* WorldContextObject)
 {
     if (bSaveInProgress)
     {
@@ -27,15 +28,37 @@ void USaveSubsystem::SaveGame(const FString& Slot, UWorld* W)
         return;
     }
 
+    // Resolve world from the supplied context object if possible.
+    UWorld* W = nullptr;
+    if (GEngine && WorldContextObject)
+    {
+        W = GEngine->GetWorldFromContextObjectChecked(WorldContextObject);
+    }
+
+    // Fallback: if Blueprint left the world-context pin unconnected,
+    // use the GameInstance's active world.
+    if (!W && GetGameInstance())
+    {
+        W = GetGameInstance()->GetWorld();
+    }
+
     if (!W)
     {
         UE_LOG(LogTemp, Error, TEXT("[SaveSubsystem] World null!"));
+        OnSaveComplete.Broadcast(false);
         return;
     }
 
     bSaveInProgress = true;
 
     UWorldForgeSaveGame* Data = CollectWorldState(W, Slot);
+    if (!Data)
+    {
+        bSaveInProgress = false;
+        UE_LOG(LogTemp, Error, TEXT("[SaveSubsystem] Failed to collect world state for slot %s"), *Slot);
+        OnSaveComplete.Broadcast(false);
+        return;
+    }
 
     FAsyncSaveGameToSlotDelegate D;
     D.BindUObject(this, &USaveSubsystem::OnSaveCompleted);
@@ -45,10 +68,32 @@ void USaveSubsystem::SaveGame(const FString& Slot, UWorld* W)
     UE_LOG(LogTemp, Log, TEXT("[SaveSubsystem] Async save: %s"), *Slot);
 }
 
-void USaveSubsystem::LoadGame(const FString& Slot, UWorld* W)
+void USaveSubsystem::LoadGame(const FString& Slot, UObject* WorldContextObject)
 {
+    // Resolve world from the supplied context object if possible.
+    UWorld* W = nullptr;
+    if (GEngine && WorldContextObject)
+    {
+        W = GEngine->GetWorldFromContextObjectChecked(WorldContextObject);
+    }
+
+    // Fallback: if Blueprint left the world-context pin unconnected,
+    // use the GameInstance's active world.
+    if (!W && GetGameInstance())
+    {
+        W = GetGameInstance()->GetWorld();
+    }
+
+    if (!W)
+    {
+        UE_LOG(LogTemp, Error, TEXT("[SaveSubsystem] World null on load!"));
+        OnLoadComplete.Broadcast(false);
+        return;
+    }
+
     if (!UGameplayStatics::DoesSaveGameExist(Slot, 0))
     {
+        UE_LOG(LogTemp, Warning, TEXT("[SaveSubsystem] Save slot does not exist: %s"), *Slot);
         OnLoadComplete.Broadcast(false);
         return;
     }
@@ -61,6 +106,7 @@ void USaveSubsystem::LoadGame(const FString& Slot, UWorld* W)
     if (!Data)
     {
         bLoadInProgress = false;
+        UE_LOG(LogTemp, Error, TEXT("[SaveSubsystem] Failed to load save object from slot: %s"), *Slot);
         OnLoadComplete.Broadcast(false);
         return;
     }
@@ -70,7 +116,9 @@ void USaveSubsystem::LoadGame(const FString& Slot, UWorld* W)
     bLoadInProgress = false;
     OnLoadComplete.Broadcast(true);
 
-    UE_LOG(LogTemp, Log,
+    UE_LOG(
+        LogTemp,
+        Log,
         TEXT("[SaveSubsystem] Loaded: %s Step=%d"),
         *Slot,
         Data->SimStepNumber);
@@ -78,8 +126,18 @@ void USaveSubsystem::LoadGame(const FString& Slot, UWorld* W)
 
 UWorldForgeSaveGame* USaveSubsystem::CollectWorldState(UWorld* W, const FString& Slot)
 {
+    if (!W)
+    {
+        return nullptr;
+    }
+
     UWorldForgeSaveGame* S =
         Cast<UWorldForgeSaveGame>(UGameplayStatics::CreateSaveGameObject(UWorldForgeSaveGame::StaticClass()));
+
+    if (!S)
+    {
+        return nullptr;
+    }
 
     S->SlotName = Slot;
     S->SaveTimestamp = FDateTime::Now().ToString();

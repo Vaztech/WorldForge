@@ -12,6 +12,7 @@
 
 #include "EventBus.h"
 #include "SimulationTimeManager.h"
+#include "WorldForgeTags.h"
 #include "HAL/PlatformTime.h"
 
 void UProcessorManager::Initialize(FSubsystemCollectionBase& Collection)
@@ -149,7 +150,19 @@ void UProcessorManager::RegisterAgent(const FAgentData& A)
         }
     }
 
-    Agents.Add(A);
+    FAgentData NewAgent = A;
+
+    // Test-level fallback so agents created from Blueprint or other paths
+    // are still eligible for basic harvest jobs when no explicit skills
+    // were assigned before registration.
+    if (NewAgent.Skills.Num() == 0)
+    {
+        NewAgent.Skills.Add(TAG_Skill_Farming, 25.f);
+        NewAgent.Skills.Add(TAG_Skill_Hauling, 25.f);
+        NewAgent.Skills.Add(TAG_Skill_Mining, 25.f);
+    }
+
+    Agents.Add(NewAgent);
 }
 
 void UProcessorManager::SpawnTestAgent(int32 AgentID, int32 SettlementID, FIntPoint GridPos)
@@ -166,7 +179,13 @@ void UProcessorManager::SpawnTestAgent(int32 AgentID, int32 SettlementID, FIntPo
     Agent.CurrentGridPos = GridPos;
     Agent.CurrentNavTarget = GridPos;
 
+    // Minimal test bootstrap skills so fallback harvest jobs can be assigned.
+    Agent.Skills.Add(TAG_Skill_Farming, 25.f);
+    Agent.Skills.Add(TAG_Skill_Hauling, 25.f);
+    Agent.Skills.Add(TAG_Skill_Mining, 25.f);
+
     RegisterAgent(Agent);
+    RegisterSettlement(SettlementID);
 }
 
 void UProcessorManager::UnregisterAgent(int32 ID)
@@ -206,11 +225,21 @@ const FAgentData* UProcessorManager::GetAgent(int32 ID) const
 void UProcessorManager::RestoreAgents(const TArray<FAgentData>& Saved)
 {
     Agents = Saved;
+    ActiveSettlementIDs.Reset();
+
+    for (const FAgentData& Agent : Agents)
+    {
+        if (Agent.SettlementID >= 0 && !ActiveSettlementIDs.Contains(Agent.SettlementID))
+        {
+            ActiveSettlementIDs.Add(Agent.SettlementID);
+        }
+    }
 
     UE_LOG(
         LogTemp,
         Log,
-        TEXT("[ProcessorManager] Restored %d agents."),
-        Agents.Num()
+        TEXT("[ProcessorManager] Restored %d agents across %d settlement(s)."),
+        Agents.Num(),
+        ActiveSettlementIDs.Num()
     );
 }

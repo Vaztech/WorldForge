@@ -3,6 +3,34 @@
 #include "EventBus.h"
 #include "WorldForgeDataTypes.h"
 #include "WorldForgeTags.h"
+#include "ProcessorManager.h"
+#include "JobProcessor.h"
+
+// ====================================================================
+// INTERNAL FAILURE HANDLER
+// Safely releases an agent and clears any stale assigned job if a
+// production task cannot start or cannot proceed.
+// ====================================================================
+void UProductionProcessor::FailTaskAndReleaseAgent(
+    FActiveProductionTask& Task,
+    FAgentData& Agent,
+    UWorld* World)
+{
+    Task.bComplete = true;
+
+    Agent.State = EAgentState::Idle;
+    Agent.CurrentJobTag = FGameplayTag();
+    Agent.CurrentJobBuildingTag = FGameplayTag();
+    Agent.ActiveReservationID = -1;
+
+    if (UProcessorManager* PM = World ? World->GetSubsystem<UProcessorManager>() : nullptr)
+    {
+        if (UJobProcessor* JP = PM->GetTypedProcessor<UJobProcessor>())
+        {
+            JP->CancelJobsForAgent(Agent.AgentID, World);
+        }
+    }
+}
 
 // ====================================================================
 // MAIN PROCESS STEP
@@ -73,16 +101,13 @@ void UProductionProcessor::ProcessStep(
 
             if (!GetRecipe(Task->JobTag, Inputs, Outputs, RequiredProgress))
             {
-                // Invalid recipe → cancel task safely
-                Agent.State = EAgentState::Idle;
-                Task->bComplete = true;
-
                 UE_LOG(
                     LogTemp,
                     Warning,
                     TEXT("[ProductionProcessor] No recipe for %s"),
                     *Task->JobTag.ToString());
 
+                FailTaskAndReleaseAgent(*Task, Agent, World);
                 continue;
             }
 
@@ -102,8 +127,14 @@ void UProductionProcessor::ProcessStep(
 
             if (!bAllAvailable)
             {
-                // Cannot proceed this step; agent returns idle for now
-                Agent.State = EAgentState::Idle;
+                UE_LOG(
+                    LogTemp,
+                    Warning,
+                    TEXT("[ProductionProcessor] Missing inputs for %s, releasing agent %d"),
+                    *Task->JobTag.ToString(),
+                    Agent.AgentID);
+
+                FailTaskAndReleaseAgent(*Task, Agent, World);
                 continue;
             }
 
@@ -292,9 +323,13 @@ float UProductionProcessor::GetSkillModifier(
 {
     FGameplayTag SkillTag;
 
-    if (JobTag == TAG_Job_Cook || JobTag == TAG_Job_Harvest_Food)
+    if (JobTag == TAG_Job_Cook)
     {
         SkillTag = TAG_Skill_Cooking;
+    }
+    else if (JobTag == TAG_Job_Harvest_Food)
+    {
+        SkillTag = TAG_Skill_Farming;
     }
     else if (JobTag == TAG_Job_Craft)
     {

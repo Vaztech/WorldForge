@@ -92,6 +92,12 @@ private:
     // Returns a work speed modifier based on the agent's relevant skill.
     float GetSkillModifier(const FAgentData& Agent, FGameplayTag JobTag) const;
 
+    // Safely releases a failed production task and clears stale job state.
+    void FailTaskAndReleaseAgent(
+        FActiveProductionTask& Task,
+        FAgentData& Agent,
+        UWorld* World);
+
     // Completes a task:
     // - deposits outputs
     // - dispatches completion event

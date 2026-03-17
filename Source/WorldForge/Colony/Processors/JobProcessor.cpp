@@ -347,8 +347,20 @@ bool UJobProcessor::TryAssignQueuedJob(
 
     if (!Job)
     {
+        UE_LOG(
+            LogTemp,
+            Warning,
+            TEXT("[JobProcessor] Agent %d found NO suitable job (skills or availability)"),
+            Agent.AgentID);
         return false;
     }
+
+    UE_LOG(
+        LogTemp,
+        Log,
+        TEXT("[JobProcessor] Agent %d evaluating job %s"),
+        Agent.AgentID,
+        *Job->JobTag.ToString());
 
     int32 ReservationID = -1;
 
@@ -393,6 +405,16 @@ void UJobProcessor::AssignJobToAgent(
 
     Agent.State = EAgentState::MovingToTarget;
 
+    UE_LOG(
+        LogTemp,
+        Log,
+        TEXT("[JobProcessor] Agent %d assigned job %s -> Target (%d,%d) Step=%d"),
+        Agent.AgentID,
+        *Job.JobTag.ToString(),
+        Job.TargetGridPos.X,
+        Job.TargetGridPos.Y,
+        StepNumber);
+
     if (Job.TargetGridPos == Agent.CurrentGridPos)
     {
         OnAgentArrived(Agent, StepNumber, World);
@@ -433,6 +455,24 @@ void UJobProcessor::GenerateIdleHarvestJobs(
     const int32 WoodAmt = SM->GetStockpileAmount(SettlementID, TAG_Item_Wood);
     const int32 StoneAmt = SM->GetStockpileAmount(SettlementID, TAG_Item_Stone);
 
+    // Diagnostic log: show current stockpile levels whenever fallback job generation runs.
+    UE_LOG(
+        LogTemp,
+        Log,
+        TEXT("[JobProcessor] Idle job check Settlement=%d Step=%d Food=%d Wood=%d Stone=%d"),
+        SettlementID,
+        StepNumber,
+        FoodAmt,
+        WoodAmt,
+        StoneAmt);
+
+    // Temporary movement-validation patch:
+    // Use fixed distant targets so colonist movement is clearly visible in PIE.
+    // This keeps behavior deterministic and avoids near-spawn cells masking movement.
+    const FIntPoint FoodTestTarget(10, 10);
+    const FIntPoint WoodTestTarget(15, 10);
+    const FIntPoint StoneTestTarget(20, 10);
+
     if (FoodAmt < 50)
     {
         FJobRequest Job;
@@ -441,8 +481,30 @@ void UJobProcessor::GenerateIdleHarvestJobs(
         Job.JobTag = TAG_Job_Harvest_Food;
         Job.RequiredSkill = TAG_Skill_Farming;
         Job.Priority = (FoodAmt < 20) ? EJobPriority::High : EJobPriority::Normal;
-        Job.TargetGridPos = Nav ? Nav->GetRandomWalkableCell(SettlementID, StepNumber + 0) : FIntPoint(8, 8);
-        PostJob(Job);
+
+        // Temporary fixed target for movement testing.
+        Job.TargetGridPos = Nav && Nav->IsCellWalkable(SettlementID, FoodTestTarget)
+            ? FoodTestTarget
+            : FIntPoint(10, 10);
+
+        if (FJobRequest* J = PostJob(Job))
+        {
+            UE_LOG(
+                LogTemp,
+                Log,
+                TEXT("[JobProcessor] Posted job %s at (%d,%d) Step=%d"),
+                *J->JobTag.ToString(),
+                J->TargetGridPos.X,
+                J->TargetGridPos.Y,
+                StepNumber);
+        }
+    }
+    else
+    {
+        UE_LOG(
+            LogTemp,
+            Log,
+            TEXT("[JobProcessor] Skipping food harvest job: Food stockpile is sufficient."));
     }
 
     if (WoodAmt < 20)
@@ -453,8 +515,30 @@ void UJobProcessor::GenerateIdleHarvestJobs(
         Job.JobTag = TAG_Job_Harvest_Wood;
         Job.RequiredSkill = TAG_Skill_Hauling;
         Job.Priority = EJobPriority::Normal;
-        Job.TargetGridPos = Nav ? Nav->GetRandomWalkableCell(SettlementID, StepNumber + 1) : FIntPoint(16, 8);
-        PostJob(Job);
+
+        // Temporary fixed target for movement testing.
+        Job.TargetGridPos = Nav && Nav->IsCellWalkable(SettlementID, WoodTestTarget)
+            ? WoodTestTarget
+            : FIntPoint(15, 10);
+
+        if (FJobRequest* J = PostJob(Job))
+        {
+            UE_LOG(
+                LogTemp,
+                Log,
+                TEXT("[JobProcessor] Posted job %s at (%d,%d) Step=%d"),
+                *J->JobTag.ToString(),
+                J->TargetGridPos.X,
+                J->TargetGridPos.Y,
+                StepNumber);
+        }
+    }
+    else
+    {
+        UE_LOG(
+            LogTemp,
+            Log,
+            TEXT("[JobProcessor] Skipping wood harvest job: Wood stockpile is sufficient."));
     }
 
     if (StoneAmt < 20)
@@ -465,8 +549,30 @@ void UJobProcessor::GenerateIdleHarvestJobs(
         Job.JobTag = TAG_Job_Harvest_Stone;
         Job.RequiredSkill = TAG_Skill_Mining;
         Job.Priority = EJobPriority::Normal;
-        Job.TargetGridPos = Nav ? Nav->GetRandomWalkableCell(SettlementID, StepNumber + 2) : FIntPoint(24, 8);
-        PostJob(Job);
+
+        // Temporary fixed target for movement testing.
+        Job.TargetGridPos = Nav && Nav->IsCellWalkable(SettlementID, StoneTestTarget)
+            ? StoneTestTarget
+            : FIntPoint(20, 10);
+
+        if (FJobRequest* J = PostJob(Job))
+        {
+            UE_LOG(
+                LogTemp,
+                Log,
+                TEXT("[JobProcessor] Posted job %s at (%d,%d) Step=%d"),
+                *J->JobTag.ToString(),
+                J->TargetGridPos.X,
+                J->TargetGridPos.Y,
+                StepNumber);
+        }
+    }
+    else
+    {
+        UE_LOG(
+            LogTemp,
+            Log,
+            TEXT("[JobProcessor] Skipping stone harvest job: Stone stockpile is sufficient."));
     }
 }
 

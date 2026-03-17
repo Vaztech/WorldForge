@@ -113,6 +113,7 @@ void USimulationTimeManager::RestoreStepCount(int32 S, int32 D, int32 Y)
     StepNumber = S;
     CurrentDay = D;
     CurrentYear = Y;
+    Accumulator = 0.f;
 
     UE_LOG(
         LogTemp,
