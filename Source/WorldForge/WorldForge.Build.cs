@@ -21,6 +21,7 @@ public class WorldForge : ModuleRules
             "NavigationSystem",
             "AIModule",
             "RenderCore",
+            "GameplayTags",
         });
 
         PrivateDependencyModuleNames.AddRange(new string[]

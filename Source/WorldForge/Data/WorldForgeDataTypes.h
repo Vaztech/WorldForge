@@ -361,7 +361,7 @@ struct FNavCell
 {
     GENERATED_BODY()
 
-    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) FIntPoint GridPos;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) FIntPoint GridPos = FIntPoint::ZeroValue;
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) bool bWalkable = true;
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) float PathCost = 1.0f;
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) bool bDangerZone = false;
@@ -376,7 +376,7 @@ struct FActiveBuildTask
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) int32 TaskID = -1;
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) int32 SettlementID = -1;
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) FGameplayTag BuildingTag;
-    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) FIntPoint OriginGridCell;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) FIntPoint OriginGridCell = FIntPoint::ZeroValue;
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) int32 TotalBlocks = 0;
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) int32 PlacedBlocks = 0;
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) int32 AssignedAgentID = -1;

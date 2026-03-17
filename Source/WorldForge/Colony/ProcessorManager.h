@@ -19,15 +19,28 @@ public:
     UFUNCTION()
     void RunSimulationStep(int32 StepNumber);
 
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Processor")
     void RegisterSettlement(int32 ID);
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Processor")
     void RegisterAgent(const FAgentData& Agent);
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Processor")
     void UnregisterAgent(int32 AgentID);
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Processor")
+    void SpawnTestAgent(int32 AgentID, int32 SettlementID, FIntPoint GridPos);
 
     FAgentData* GetMutableAgent(int32 AgentID);
     const FAgentData* GetAgent(int32 AgentID) const;
 
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Processor")
     const TArray<FAgentData>& GetAllAgents() const { return Agents; }
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Processor")
     const TArray<float>& GetProcessorTimings() const { return ProcessorTimingsMs; }
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Processor")
     const TArray<FName>& GetProcessorNames() const { return ProcessorNames; }
 
     void RestoreAgents(const TArray<FAgentData>& Saved);
@@ -35,7 +48,9 @@ public:
 private:
     void InitializeProcessors();
 
-    TArray<UBaseProcessor*> OrderedProcessors;
+    UPROPERTY(Transient)
+    TArray<TObjectPtr<UBaseProcessor>> OrderedProcessors;
+
     TArray<FAgentData> Agents;
     TArray<int32> ActiveSettlementIDs;
     TArray<float> ProcessorTimingsMs;

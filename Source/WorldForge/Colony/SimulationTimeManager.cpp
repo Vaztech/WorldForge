@@ -1,4 +1,4 @@
-#include "SimulationTimeManager.h"
+﻿#include "SimulationTimeManager.h"
 
 void USimulationTimeManager::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -49,11 +49,24 @@ void USimulationTimeManager::Tick(float DeltaTime)
         StepNumber++;
         StepsThisFrame++;
 
+        if (StepNumber % 25 == 0)
+        {
+            UE_LOG(LogTemp, Log, TEXT("[SimTime] Step %d"), StepNumber);
+        }
+
         OnSimulationStep.Broadcast(StepNumber);
 
         if (StepNumber % StepsPerDay == 0)
         {
             CurrentDay++;
+
+            UE_LOG(
+                LogTemp,
+                Log,
+                TEXT("[SimTime] Day advanced to %d at Step=%d"),
+                CurrentDay,
+                StepNumber
+            );
 
             if (CurrentDay > DaysPerYear)
             {

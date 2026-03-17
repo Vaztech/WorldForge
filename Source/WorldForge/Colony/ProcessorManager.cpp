@@ -101,8 +101,9 @@ void UProcessorManager::RunSimulationStep(int32 StepNumber)
     {
         for (int32 i = 0; i < OrderedProcessors.Num(); i++)
         {
-            if (!OrderedProcessors[i])
+            if (!IsValid(OrderedProcessors[i]))
             {
+                UE_LOG(LogTemp, Warning, TEXT("[ProcessorManager] Invalid processor at index %d"), i);
                 continue;
             }
 
@@ -110,6 +111,17 @@ void UProcessorManager::RunSimulationStep(int32 StepNumber)
             OrderedProcessors[i]->ProcessStep(StepNumber, SID, Agents, World);
             ProcessorTimingsMs[i] += static_cast<float>((FPlatformTime::Seconds() - T0) * 1000.0);
         }
+    }
+
+    if (StepNumber % 25 == 0)
+    {
+        UE_LOG(
+            LogTemp,
+            Log,
+            TEXT("[ProcessorManager] Completed simulation step %d for %d settlement(s)."),
+            StepNumber,
+            ActiveSettlementIDs.Num()
+        );
     }
 
     if (UEventBus* Bus = World->GetSubsystem<UEventBus>())
@@ -138,6 +150,23 @@ void UProcessorManager::RegisterAgent(const FAgentData& A)
     }
 
     Agents.Add(A);
+}
+
+void UProcessorManager::SpawnTestAgent(int32 AgentID, int32 SettlementID, FIntPoint GridPos)
+{
+    FAgentData Agent;
+    Agent.AgentID = AgentID;
+    Agent.SettlementID = SettlementID;
+    Agent.State = EAgentState::Idle;
+    Agent.FoodNeed = 100.f;
+    Agent.SleepNeed = 100.f;
+    Agent.SocialNeed = 70.f;
+    Agent.SafetyNeed = 70.f;
+    Agent.PurposeNeed = 70.f;
+    Agent.CurrentGridPos = GridPos;
+    Agent.CurrentNavTarget = GridPos;
+
+    RegisterAgent(Agent);
 }
 
 void UProcessorManager::UnregisterAgent(int32 ID)
