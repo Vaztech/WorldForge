@@ -133,3 +133,21 @@ void UVoxelConstructionSystem::RestoreFromSave(const TArray<FActiveBuildTask>& S
         NextTaskID = FMath::Max(NextTaskID, T.TaskID + 1);
     }
 }
+
+// ====================================================================
+// NEW: Clean mutable accessor by agent ID (Phase 2 fix)
+// ====================================================================
+
+// Returns the active (non-complete) build task assigned to this agent.
+// Used by ConstructionProcessor to safely mutate tasks without const_cast.
+FActiveBuildTask* UVoxelConstructionSystem::GetMutableTaskForAgent(int32 AgentID)
+{
+    for (FActiveBuildTask& T : ActiveTasks)
+    {
+        if (T.AssignedAgentID == AgentID && !T.bComplete)
+        {
+            return &T;
+        }
+    }
+    return nullptr;
+}

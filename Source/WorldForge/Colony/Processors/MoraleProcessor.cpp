@@ -7,5 +7,12 @@ void UMoraleProcessor::ProcessStep(
     UWorld* World
 )
 {
-    // TODO: Implement MoraleProcessor logic.
+    // Phase 2 stub:
+    // Morale simulation is intentionally deferred.
+    // Keep parameters explicitly unused to avoid warnings while preserving
+    // the fixed-step processor interface.
+    (void)Step;
+    (void)SettlementID;
+    (void)Agents;
+    (void)World;
 }

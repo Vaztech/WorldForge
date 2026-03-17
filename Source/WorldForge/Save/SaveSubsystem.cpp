@@ -9,6 +9,10 @@
 #include "WorldMapSubsystem.h"
 #include "WorldEconomySimulation.h"
 
+// Phase 2 additions
+#include "JobProcessor.h"
+#include "ProductionProcessor.h"
+
 void USaveSubsystem::Initialize(FSubsystemCollectionBase& C)
 {
     Super::Initialize(C);
@@ -17,25 +21,42 @@ void USaveSubsystem::Initialize(FSubsystemCollectionBase& C)
 
 void USaveSubsystem::SaveGame(const FString& Slot, UWorld* W)
 {
-    if (bSaveInProgress) { UE_LOG(LogTemp, Warning, TEXT("[SaveSubsystem] Save in progress!")); return; }
-    if (!W) { UE_LOG(LogTemp, Error, TEXT("[SaveSubsystem] World null!")); return; }
+    if (bSaveInProgress)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[SaveSubsystem] Save in progress!"));
+        return;
+    }
+
+    if (!W)
+    {
+        UE_LOG(LogTemp, Error, TEXT("[SaveSubsystem] World null!"));
+        return;
+    }
 
     bSaveInProgress = true;
+
     UWorldForgeSaveGame* Data = CollectWorldState(W, Slot);
 
     FAsyncSaveGameToSlotDelegate D;
     D.BindUObject(this, &USaveSubsystem::OnSaveCompleted);
 
     UGameplayStatics::AsyncSaveGameToSlot(Data, Slot, 0, D);
+
     UE_LOG(LogTemp, Log, TEXT("[SaveSubsystem] Async save: %s"), *Slot);
 }
 
 void USaveSubsystem::LoadGame(const FString& Slot, UWorld* W)
 {
-    if (!UGameplayStatics::DoesSaveGameExist(Slot, 0)) { OnLoadComplete.Broadcast(false); return; }
+    if (!UGameplayStatics::DoesSaveGameExist(Slot, 0))
+    {
+        OnLoadComplete.Broadcast(false);
+        return;
+    }
 
     bLoadInProgress = true;
-    UWorldForgeSaveGame* Data = Cast<UWorldForgeSaveGame>(UGameplayStatics::LoadGameFromSlot(Slot, 0));
+
+    UWorldForgeSaveGame* Data =
+        Cast<UWorldForgeSaveGame>(UGameplayStatics::LoadGameFromSlot(Slot, 0));
 
     if (!Data)
     {
@@ -45,15 +66,21 @@ void USaveSubsystem::LoadGame(const FString& Slot, UWorld* W)
     }
 
     DistributeLoadedState(Data, W);
+
     bLoadInProgress = false;
     OnLoadComplete.Broadcast(true);
 
-    UE_LOG(LogTemp, Log, TEXT("[SaveSubsystem] Loaded: %s Step=%d"), *Slot, Data->SimStepNumber);
+    UE_LOG(LogTemp, Log,
+        TEXT("[SaveSubsystem] Loaded: %s Step=%d"),
+        *Slot,
+        Data->SimStepNumber);
 }
 
 UWorldForgeSaveGame* USaveSubsystem::CollectWorldState(UWorld* W, const FString& Slot)
 {
-    UWorldForgeSaveGame* S = Cast<UWorldForgeSaveGame>(UGameplayStatics::CreateSaveGameObject(UWorldForgeSaveGame::StaticClass()));
+    UWorldForgeSaveGame* S =
+        Cast<UWorldForgeSaveGame>(UGameplayStatics::CreateSaveGameObject(UWorldForgeSaveGame::StaticClass()));
+
     S->SlotName = Slot;
     S->SaveTimestamp = FDateTime::Now().ToString();
 
@@ -66,10 +93,41 @@ UWorldForgeSaveGame* USaveSubsystem::CollectWorldState(UWorld* W, const FString&
         S->GridHeight = WM->GetGridHeight();
     }
 
-    if (USettlementManager* SM = W->GetSubsystem<USettlementManager>()) S->Settlements = SM->GetAllSettlements();
-    if (UProcessorManager* PM = W->GetSubsystem<UProcessorManager>()) S->AllAgents = PM->GetAllAgents();
-    if (UReservationSystem* RS = W->GetSubsystem<UReservationSystem>()) S->ActiveReservations = RS->GetAllReservations();
-    if (UVoxelConstructionSystem* VC = W->GetSubsystem<UVoxelConstructionSystem>()) S->ActiveBuildTasks = VC->GetAllTasks();
+    if (USettlementManager* SM = W->GetSubsystem<USettlementManager>())
+    {
+        S->Settlements = SM->GetAllSettlements();
+    }
+
+    if (UProcessorManager* PM = W->GetSubsystem<UProcessorManager>())
+    {
+        S->AllAgents = PM->GetAllAgents();
+
+        // =========================
+        // Phase 2: Save Job Queue
+        // =========================
+        if (UJobProcessor* JP = PM->GetTypedProcessor<UJobProcessor>())
+        {
+            S->ActiveJobRequests = JP->GetJobsForSave();
+        }
+
+        // =========================
+        // Phase 2: Save Production Tasks
+        // =========================
+        if (UProductionProcessor* PP = PM->GetTypedProcessor<UProductionProcessor>())
+        {
+            S->ActiveProductionTasks = PP->GetAllTasksForSave();
+        }
+    }
+
+    if (UReservationSystem* RS = W->GetSubsystem<UReservationSystem>())
+    {
+        S->ActiveReservations = RS->GetAllReservations();
+    }
+
+    if (UVoxelConstructionSystem* VC = W->GetSubsystem<UVoxelConstructionSystem>())
+    {
+        S->ActiveBuildTasks = VC->GetAllTasks();
+    }
 
     if (USimulationTimeManager* ST = W->GetSubsystem<USimulationTimeManager>())
     {
@@ -89,13 +147,54 @@ UWorldForgeSaveGame* USaveSubsystem::CollectWorldState(UWorld* W, const FString&
 
 void USaveSubsystem::DistributeLoadedState(UWorldForgeSaveGame* S, UWorld* W)
 {
-    if (!S || !W) return;
+    if (!S || !W)
+    {
+        return;
+    }
 
-    if (USettlementManager* SM = W->GetSubsystem<USettlementManager>()) SM->RestoreFromSave(S->Settlements);
-    if (UProcessorManager* PM = W->GetSubsystem<UProcessorManager>()) PM->RestoreAgents(S->AllAgents);
-    if (UReservationSystem* RS = W->GetSubsystem<UReservationSystem>()) RS->RestoreFromSave(S->ActiveReservations);
-    if (UVoxelConstructionSystem* VC = W->GetSubsystem<UVoxelConstructionSystem>()) VC->RestoreFromSave(S->ActiveBuildTasks);
-    if (USimulationTimeManager* ST = W->GetSubsystem<USimulationTimeManager>()) ST->RestoreStepCount(S->SimStepNumber, S->SimCurrentDay, S->SimCurrentYear);
+    if (USettlementManager* SM = W->GetSubsystem<USettlementManager>())
+    {
+        SM->RestoreFromSave(S->Settlements);
+    }
+
+    if (UProcessorManager* PM = W->GetSubsystem<UProcessorManager>())
+    {
+        PM->RestoreAgents(S->AllAgents);
+
+        // =========================
+        // Phase 2: Restore Job Queue
+        // =========================
+        if (UJobProcessor* JP = PM->GetTypedProcessor<UJobProcessor>())
+        {
+            JP->RestoreJobQueue(S->ActiveJobRequests);
+        }
+
+        // =========================
+        // Phase 2: Restore Production Tasks
+        // =========================
+        if (UProductionProcessor* PP = PM->GetTypedProcessor<UProductionProcessor>())
+        {
+            PP->RestoreFromSave(S->ActiveProductionTasks);
+        }
+    }
+
+    if (UReservationSystem* RS = W->GetSubsystem<UReservationSystem>())
+    {
+        RS->RestoreFromSave(S->ActiveReservations);
+    }
+
+    if (UVoxelConstructionSystem* VC = W->GetSubsystem<UVoxelConstructionSystem>())
+    {
+        VC->RestoreFromSave(S->ActiveBuildTasks);
+    }
+
+    if (USimulationTimeManager* ST = W->GetSubsystem<USimulationTimeManager>())
+    {
+        ST->RestoreStepCount(
+            S->SimStepNumber,
+            S->SimCurrentDay,
+            S->SimCurrentYear);
+    }
 }
 
 void USaveSubsystem::OnSaveCompleted(const FString& Slot, const int32, bool bOK)

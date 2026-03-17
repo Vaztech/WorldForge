@@ -214,12 +214,13 @@ TArray<FIntPoint> UNavigationContext::GetNeighbors(FIntPoint Position, int32 Gri
     return Neighbors;
 }
 
-// ====================================================================
-// NEW: Deterministic walkable cell selection
-// ====================================================================
-
+// Returns a deterministic walkable cell for the given settlement.
+// Phase 2 fix: harvest/work jobs need a valid TargetGridPos so agents
+// do not all fall back to (0,0).
 FIntPoint UNavigationContext::GetRandomWalkableCell(
-    int32 SettlementID, int32 Seed) const
+    int32 SettlementID,
+    int32 Seed
+) const
 {
     const TMap<FIntPoint, FNavCell>* G = SettlementGrids.Find(SettlementID);
     if (!G || G->Num() == 0)
@@ -227,7 +228,7 @@ FIntPoint UNavigationContext::GetRandomWalkableCell(
         return FIntPoint(0, 0);
     }
 
-    // Collect all walkable cells
+    // Collect all currently walkable cells for this settlement.
     TArray<FIntPoint> Walkable;
     Walkable.Reserve(G->Num());
 
@@ -244,9 +245,7 @@ FIntPoint UNavigationContext::GetRandomWalkableCell(
         return FIntPoint(0, 0);
     }
 
-    // Deterministic selection using seed
-    const int32 SafeSeed = Seed >= 0 ? Seed : -Seed; // safer than Abs for edge cases
-    const int32 Index = SafeSeed % Walkable.Num();
-
-    return Walkable[Index];
+    // Deterministic selection based only on the provided seed.
+    // No randomness is introduced here.
+    return Walkable[FMath::Abs(Seed) % Walkable.Num()];
 }

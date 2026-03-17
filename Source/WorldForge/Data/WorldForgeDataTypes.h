@@ -1,4 +1,5 @@
 #pragma once
+
 #include "CoreMinimal.h"
 #include "GameplayTagContainer.h"
 #include "WorldForgeDataTypes.generated.h"
@@ -7,7 +8,7 @@
 // ENUMS
 // ═══════════════════════════════════════════════════════════════════
 
-// Fog of war knowledge levels per world tile
+// Fog of war knowledge levels per world tile.
 UENUM(BlueprintType)
 enum class EKnowledgeLevel : uint8
 {
@@ -18,7 +19,7 @@ enum class EKnowledgeLevel : uint8
     Live          UMETA(DisplayName = "Live")
 };
 
-// Colony world size options
+// Colony world size options used during world generation.
 UENUM(BlueprintType)
 enum class EWorldSize : uint8
 {
@@ -28,7 +29,7 @@ enum class EWorldSize : uint8
     OMG     UMETA(DisplayName = "OMG (1024x1024)")
 };
 
-// Pre-history epoch identifiers
+// Pre-history epoch identifiers used by the historical simulation.
 UENUM(BlueprintType)
 enum class EPreHistoryEpoch : uint8
 {
@@ -38,7 +39,7 @@ enum class EPreHistoryEpoch : uint8
     Stabilization  UMETA(DisplayName = "Stabilization 1500-2000yr")
 };
 
-// Colonist simulation state machine — all 14 states
+// Colonist simulation state machine — all 14 states required by Phase 2.
 UENUM(BlueprintType)
 enum class EAgentState : uint8
 {
@@ -58,7 +59,7 @@ enum class EAgentState : uint8
     Dead
 };
 
-// Reservation types — all 5 from Architecture v3.1
+// Reservation types used by the reservation system.
 UENUM(BlueprintType)
 enum class EReservationType : uint8
 {
@@ -69,7 +70,7 @@ enum class EReservationType : uint8
     InteractionSlot
 };
 
-// Price fix policy types — all 8
+// Price-fix policy types used by economy/world systems.
 UENUM(BlueprintType)
 enum class EPriceFixType : uint8
 {
@@ -83,7 +84,7 @@ enum class EPriceFixType : uint8
     Requisition
 };
 
-// Market building tier
+// Settlement market tier / sophistication level.
 UENUM(BlueprintType)
 enum class EMarketTier : uint8
 {
@@ -125,7 +126,10 @@ struct FVoxelBiomeProfile
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 OctaveCount = 4;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) bool bEnableCaves = true;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float CaveThreshold = 0.3f;
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) bool bSmoothSDF = true;  // ALWAYS true
+
+    // Phase rule: WorldForge uses smooth SDF terrain only.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) bool bSmoothSDF = true;
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TArray<FGameplayTag> SurfaceMaterials;
 };
 
@@ -148,12 +152,15 @@ struct FWorldTileData
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 ControllingCivID = -1;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FWorldKnowledgeState KnowledgeState;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FVoxelBiomeProfile VoxelProfile;
+
+    // World/cosmic influence fields used by higher-level simulation layers.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float Sacredness = 0.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float Corruption = 0.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float FearPressure = 0.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float DreamInstability = 0.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float CommercePressure = 0.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float VoidProximity = 0.f;
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TArray<int32> HistoryEventIDs;
 };
 
@@ -355,7 +362,7 @@ struct FReservationRecord
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 SettlementID = -1;
 };
 
-/** 2D navigation cell. Phase 2: single elevation layer only. */
+/** 2D navigation cell. Phase 2 uses a single elevation layer only. */
 USTRUCT(BlueprintType)
 struct FNavCell
 {
@@ -368,6 +375,8 @@ struct FNavCell
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) int32 OccupantID = -1;
 };
 
+// Active construction work tracked separately from jobs.
+// ConstructionProcessor mutates these while the job layer handles assignment/movement.
 USTRUCT(BlueprintType)
 struct FActiveBuildTask
 {
@@ -383,6 +392,60 @@ struct FActiveBuildTask
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) bool bComplete = false;
 };
 
+// Job priority ordering used by the job queue manager.
+// Higher numeric value = higher priority.
+UENUM(BlueprintType)
+enum class EJobPriority : uint8
+{
+    Emergency = 4 UMETA(DisplayName = "Emergency"),
+    High = 3 UMETA(DisplayName = "High"),
+    Normal = 2 UMETA(DisplayName = "Normal"),
+    Low = 1 UMETA(DisplayName = "Low"),
+    Idle = 0 UMETA(DisplayName = "Idle")
+};
+
+// Job queue entry posted by systems and consumed by UJobProcessor.
+// This is the assign -> move -> arrive part of the loop.
+USTRUCT(BlueprintType)
+struct FJobRequest
+{
+    GENERATED_BODY()
+
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) int32 JobID = -1;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) int32 SettlementID = -1;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) FGameplayTag JobTag;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) FGameplayTag RequiredSkill;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) FGameplayTag TargetItemTag;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) FGameplayTag TargetBuildingTag;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) FIntPoint TargetGridPos = FIntPoint::ZeroValue;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) int32 TargetID = -1;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) EJobPriority Priority = EJobPriority::Normal;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) int32 AssignedAgentID = -1;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) bool bAssigned = false;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) int32 PostedOnStep = 0;
+};
+
+// Active work task executed after arrival.
+// ProductionProcessor owns progression/completion for these tasks.
+USTRUCT(BlueprintType)
+struct FActiveProductionTask
+{
+    GENERATED_BODY()
+
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) int32 TaskID = -1;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) int32 SettlementID = -1;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) FGameplayTag JobTag;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) FGameplayTag BuildingTag;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) int32 AssignedAgentID = -1;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) float Progress = 0.f;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) float RequiredProgress = 10.f;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) TMap<FGameplayTag, int32> InputsConsumed;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) TMap<FGameplayTag, int32> OutputItems;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) bool bInputsReserved = false;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) bool bComplete = false;
+};
+
+// Runtime colonist/agent state used by processors every fixed simulation step.
 USTRUCT(BlueprintType)
 struct FAgentData
 {
@@ -392,23 +455,42 @@ struct FAgentData
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 SettlementID = -1;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) EAgentState State = EAgentState::Idle;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FGameplayTag RaceTag;
+
+    // Core need values.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float FoodNeed = 100.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float SleepNeed = 100.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float SocialNeed = 60.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float SafetyNeed = 80.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float PurposeNeed = 70.f;
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float MoodScore = 50.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TArray<FString> RecentThoughts;
+
+    // Skill tags drive job weighting and production speed.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TMap<FGameplayTag, float> Skills;
+
+    // Ethics values affect compliance/refusal systems.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float EthicsPacifism = 50.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float EthicsCompassion = 50.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float EthicsHonour = 50.f;
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float Health = 100.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) bool bInjured = false;
+
+    // Reservation link used by the reservation system.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 ActiveReservationID = -1;
+
+    // Current job tag assigned by JobProcessor.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FGameplayTag CurrentJobTag;
+
+    // Current building context for production/build jobs.
+    // Phase 2 patch: required so processors know which building the current job belongs to.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FGameplayTag CurrentJobBuildingTag;
+
+    // Deterministic grid-based movement state.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FIntPoint CurrentGridPos = FIntPoint::ZeroValue;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FIntPoint CurrentNavTarget = FIntPoint::ZeroValue;
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TMap<FName, float> EntityFavor;
 };
 
