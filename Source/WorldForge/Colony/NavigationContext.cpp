@@ -41,7 +41,6 @@ TArray<FIntPoint> UNavigationContext::FindPath(
     FIntPoint Goal
 ) const
 {
-    // Start == Goal returns one-node path -- caller treats as already there
     if (Start == Goal)
     {
         return { Goal };
@@ -94,7 +93,7 @@ TArray<FIntPoint> UNavigationContext::FindPath(
                 Cursor = CameFrom[Cursor];
             }
 
-            Path.Insert(Cursor, 0); // Cursor is now Start
+            Path.Insert(Cursor, 0);
             return Path;
         }
 
@@ -204,8 +203,8 @@ TArray<FIntPoint> UNavigationContext::GetNeighbors(FIntPoint Position, int32 Gri
     {
         const FIntPoint Candidate = Position + Direction;
         if (
-            Candidate.X >= 0 && Candidate.X < GridWidth
-            && Candidate.Y >= 0 && Candidate.Y < GridHeight
+            Candidate.X >= 0 && Candidate.X < GridWidth &&
+            Candidate.Y >= 0 && Candidate.Y < GridHeight
             )
         {
             Neighbors.Add(Candidate);
@@ -213,4 +212,41 @@ TArray<FIntPoint> UNavigationContext::GetNeighbors(FIntPoint Position, int32 Gri
     }
 
     return Neighbors;
+}
+
+// ====================================================================
+// NEW: Deterministic walkable cell selection
+// ====================================================================
+
+FIntPoint UNavigationContext::GetRandomWalkableCell(
+    int32 SettlementID, int32 Seed) const
+{
+    const TMap<FIntPoint, FNavCell>* G = SettlementGrids.Find(SettlementID);
+    if (!G || G->Num() == 0)
+    {
+        return FIntPoint(0, 0);
+    }
+
+    // Collect all walkable cells
+    TArray<FIntPoint> Walkable;
+    Walkable.Reserve(G->Num());
+
+    for (const auto& Pair : *G)
+    {
+        if (Pair.Value.bWalkable)
+        {
+            Walkable.Add(Pair.Key);
+        }
+    }
+
+    if (Walkable.Num() == 0)
+    {
+        return FIntPoint(0, 0);
+    }
+
+    // Deterministic selection using seed
+    const int32 SafeSeed = Seed >= 0 ? Seed : -Seed; // safer than Abs for edge cases
+    const int32 Index = SafeSeed % Walkable.Num();
+
+    return Walkable[Index];
 }
