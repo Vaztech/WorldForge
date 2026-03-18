@@ -37,6 +37,8 @@ public:
     UFUNCTION(BlueprintPure, Category = "WorldForge|Processor")
     const TArray<FAgentData>& GetAllAgents() const { return Agents; }
 
+    const TArray<FAgentData>& GetAgentsForSettlement(int32 SettlementID) const;
+
     UFUNCTION(BlueprintPure, Category = "WorldForge|Processor")
     const TArray<float>& GetProcessorTimings() const { return ProcessorTimingsMs; }
 
@@ -81,4 +83,6 @@ private:
     TArray<int32> ActiveSettlementIDs;
     TArray<float> ProcessorTimingsMs;
     TArray<FName> ProcessorNames;
+
+    mutable TArray<FAgentData> SettlementAgentScratch;
 };

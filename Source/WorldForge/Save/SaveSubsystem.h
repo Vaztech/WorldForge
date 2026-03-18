@@ -2,6 +2,7 @@
 #include "CoreMinimal.h"
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "WorldForgeSaveGame.h"
+#include "WorldEconomySimulation.h"
 #include "SaveSubsystem.generated.h"
 
 class UObject;

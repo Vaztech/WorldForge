@@ -1,10 +1,10 @@
 ﻿#pragma once
 
 #include "CoreMinimal.h"
-#include "GameplayTagContainer.h"              
+#include "GameplayTagContainer.h"
 #include "NativeGameplayTags.h"
-#include "Kismet/BlueprintFunctionLibrary.h"  
-#include "WorldForgeTags.generated.h"         
+#include "Kismet/BlueprintFunctionLibrary.h"
+#include "WorldForgeTags.generated.h"
 
 // ====================================================================
 // WorldForgeTags -- all gameplay tags used in C++ logic.
@@ -46,6 +46,15 @@ UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Skill_Cooking);
 UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Skill_Crafting);
 UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Skill_Hauling);
 UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Skill_Building);
+
+// ---- Currency tags -------------------------------------------------
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Currency_Barter);
+
+// ---- Economy narrative pattern tags --------------------------------
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Economy_Pattern_Famine);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Economy_Pattern_CurrencyFreefall);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Economy_Pattern_Boom);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Economy_Pattern_Monopoly);
 
 // ---- Simulation event tags -----------------------------------------
 UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Sim_Event_NeedFoodCritical);
@@ -147,6 +156,23 @@ public:
 
     UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Skill")
     static FGameplayTag GetSkillBuildingTag();
+
+    // ---- Currency tags ---------------------------------------------
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Currency")
+    static FGameplayTag GetCurrencyBarterTag();
+
+    // ---- Economy pattern tags --------------------------------------
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Economy")
+    static FGameplayTag GetEconomyPatternFamineTag();
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Economy")
+    static FGameplayTag GetEconomyPatternCurrencyFreefallTag();
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Economy")
+    static FGameplayTag GetEconomyPatternBoomTag();
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Economy")
+    static FGameplayTag GetEconomyPatternMonopolyTag();
 
     // ---- Simulation event tags -------------------------------------
     UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Event")

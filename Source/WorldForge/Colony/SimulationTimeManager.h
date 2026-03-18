@@ -56,6 +56,9 @@ public:
     UFUNCTION(BlueprintCallable)
     float GetSimSpeed() const { return SimSpeedMultiplier; }
 
+    UFUNCTION(BlueprintCallable)
+    float GetStepInterval() const { return FixedStepInterval; }
+
     UPROPERTY(BlueprintAssignable)
     FOnSimulationStep OnSimulationStep;
 

@@ -280,22 +280,26 @@ bool UProductionProcessor::GetRecipe(
 
     if (JobTag == TAG_Job_Harvest_Food)
     {
-        OutOutputs.Add(TAG_Item_Food, 5);
-        OutRequiredProgress = 12.f;
+        // Reduced from 5 to 1 to avoid runaway food stockpiles and allow
+        // demand pressure to affect market prices.
+        OutOutputs.Add(TAG_Item_Food, 1);
+        OutRequiredProgress = 16.f;
         return true;
     }
 
     if (JobTag == TAG_Job_Harvest_Wood)
     {
-        OutOutputs.Add(TAG_Item_Wood, 4);
-        OutRequiredProgress = 10.f;
+        // Reduced from 4 to 1 to slow raw material flooding.
+        OutOutputs.Add(TAG_Item_Wood, 1);
+        OutRequiredProgress = 14.f;
         return true;
     }
 
     if (JobTag == TAG_Job_Harvest_Stone)
     {
-        OutOutputs.Add(TAG_Item_Stone, 4);
-        OutRequiredProgress = 15.f;
+        // Reduced from 4 to 1 and kept slightly slower than wood.
+        OutOutputs.Add(TAG_Item_Stone, 1);
+        OutRequiredProgress = 18.f;
         return true;
     }
 

@@ -71,6 +71,8 @@ public:
     UFUNCTION(BlueprintPure, Category = "WorldForge|Simulation|Jobs")
     int32 GetAssignedJobCount(int32 SettlementID) const;
 
+    FGameplayTag GetSkillTagForJob(FGameplayTag JobTag) const;
+
     // ===============================
     // Public API (C++ only)
     // ===============================

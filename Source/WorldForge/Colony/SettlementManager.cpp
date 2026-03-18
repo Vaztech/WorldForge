@@ -105,6 +105,15 @@ FSettlementState USettlementManager::GetSettlementState(int32 ID) const
     return S ? *S : FSettlementState();
 }
 
+void USettlementManager::SetPlayerCurrency(int32 SettlementID, FGameplayTag CurrencyTag)
+{
+    FSettlementState* S = GetMutableSettlement(SettlementID);
+    if (S)
+    {
+        S->PlayerCurrencyTag = CurrencyTag;
+    }
+}
+
 FSettlementState* USettlementManager::GetMutableSettlement(int32 ID)
 {
     for (FSettlementState& S : Settlements)

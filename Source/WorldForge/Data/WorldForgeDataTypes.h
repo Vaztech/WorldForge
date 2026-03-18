@@ -95,6 +95,30 @@ enum class EMarketTier : uint8
     BlackMarket
 };
 
+// Phase 3A: trust component used for queued trust deltas.
+UENUM(BlueprintType)
+enum class ETrustComponent : uint8
+{
+    MilitaryStability,
+    BackingStrength,
+    TradeReputation,
+    CosmicFavor,
+    PoliticalCohesion,
+    GovernmentCredibility
+};
+
+// Job priority ordering used by the job queue manager.
+// Higher numeric value = higher priority.
+UENUM(BlueprintType)
+enum class EJobPriority : uint8
+{
+    Emergency = 4 UMETA(DisplayName = "Emergency"),
+    High = 3 UMETA(DisplayName = "High"),
+    Normal = 2 UMETA(DisplayName = "Normal"),
+    Low = 1 UMETA(DisplayName = "Low"),
+    Idle = 0 UMETA(DisplayName = "Idle")
+};
+
 // ═══════════════════════════════════════════════════════════════════
 // FOG OF WAR
 // ═══════════════════════════════════════════════════════════════════
@@ -325,6 +349,98 @@ struct FSettlementMarket
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) EMarketTier MarketTier = EMarketTier::None;
 };
 
+// Minimal compile-safe trade flow state needed by FEconomySaveState.
+// If this struct already exists elsewhere in your project, remove this copy
+// and include the canonical header instead.
+USTRUCT(BlueprintType)
+struct FTradeFlowState
+{
+    GENERATED_BODY()
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 RouteID = -1;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 OriginID = -1;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 DestID = -1;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float OfficialCapacity = 0.0f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float UnofficialCapacity = 0.0f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float SafetyFactor = 1.0f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float TaxFactor = 1.0f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float DiplomaticMod = 1.0f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TMap<FGameplayTag, float> OfficialFlows;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TMap<FGameplayTag, float> BlackMarketFlows;
+};
+
+USTRUCT(BlueprintType)
+struct FMarketPriceArray
+{
+    GENERATED_BODY()
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    TArray<FMarketPrice> Items;
+};
+
+USTRUCT(BlueprintType)
+struct FFloatHistoryArray
+{
+    GENERATED_BODY()
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    TArray<float> Values;
+};
+
+USTRUCT(BlueprintType)
+struct FSettlementPriceHistory
+{
+    GENERATED_BODY()
+
+    // ItemTag -> last N prices
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    TMap<FGameplayTag, FFloatHistoryArray> ItemHistory;
+};
+
+USTRUCT(BlueprintType)
+struct FCurrencyTrustDelta
+{
+    GENERATED_BODY()
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FGameplayTag CurrencyTag;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) ETrustComponent Component = ETrustComponent::MilitaryStability;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float Delta = 0.0f;
+};
+
+USTRUCT(BlueprintType)
+struct FEconomySaveState
+{
+    GENERATED_BODY()
+
+    // SettlementID -> price array
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    TMap<int32, FMarketPriceArray> SettlementPrices;
+
+    // SettlementID -> (ItemTag -> history array)
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    TMap<int32, FSettlementPriceHistory> PriceHistory;
+
+    // Live currency trust states (keyed by CurrencyTag)
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    TMap<FGameplayTag, FCurrencyTrustState> CurrencyTrust;
+
+    // Currency definitions (keyed by CurrencyTag)
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    TMap<FGameplayTag, FCurrencyDefinition> AllCurrencies;
+
+    // Government profiles (keyed by CivID)
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    TMap<int32, FGovernmentEconomicProfile> CivGovernments;
+
+    // Trade routes (keyed by RouteID)
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    TMap<int32, FTradeFlowState> TradeRoutes;
+
+    // Pending trust deltas that were queued but not yet applied
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    TArray<FCurrencyTrustDelta> PendingTrustDeltas;
+};
+
 // ═══════════════════════════════════════════════════════════════════
 // COLONY SIMULATION
 // ═══════════════════════════════════════════════════════════════════
@@ -339,6 +455,13 @@ struct FSettlementState
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FString Name;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 Population = 0;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float MoraleSummary = 50.f;
+
+    // Phase 3A: player currency stub until diplomacy/economy expands.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FGameplayTag PlayerCurrencyTag;
+
+    // -1 = player-controlled settlement; AI settlements use owning civ id.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 OwnerCivID = -1;
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float ThreatLevel = 0.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TMap<FGameplayTag, int32> Stockpiles;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TArray<FGameplayTag> CompletedBuildings;
@@ -390,18 +513,6 @@ struct FActiveBuildTask
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) int32 PlacedBlocks = 0;
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) int32 AssignedAgentID = -1;
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) bool bComplete = false;
-};
-
-// Job priority ordering used by the job queue manager.
-// Higher numeric value = higher priority.
-UENUM(BlueprintType)
-enum class EJobPriority : uint8
-{
-    Emergency = 4 UMETA(DisplayName = "Emergency"),
-    High = 3 UMETA(DisplayName = "High"),
-    Normal = 2 UMETA(DisplayName = "Normal"),
-    Low = 1 UMETA(DisplayName = "Low"),
-    Idle = 0 UMETA(DisplayName = "Idle")
 };
 
 // Job queue entry posted by systems and consumed by UJobProcessor.

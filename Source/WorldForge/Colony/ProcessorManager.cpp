@@ -56,6 +56,8 @@ void UProcessorManager::Deinitialize()
         }
     }
 
+    SettlementAgentScratch.Reset();
+
     Super::Deinitialize();
 }
 
@@ -220,6 +222,21 @@ const FAgentData* UProcessorManager::GetAgent(int32 ID) const
     }
 
     return nullptr;
+}
+
+const TArray<FAgentData>& UProcessorManager::GetAgentsForSettlement(int32 SettlementID) const
+{
+    SettlementAgentScratch.Reset();
+
+    for (const FAgentData& Agent : Agents)
+    {
+        if (Agent.SettlementID == SettlementID)
+        {
+            SettlementAgentScratch.Add(Agent);
+        }
+    }
+
+    return SettlementAgentScratch;
 }
 
 void UProcessorManager::RestoreAgents(const TArray<FAgentData>& Saved)

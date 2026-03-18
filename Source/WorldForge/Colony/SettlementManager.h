@@ -48,6 +48,9 @@ public:
     UFUNCTION(BlueprintCallable, Category = "WorldForge|Settlement")
     TArray<int32> GetAllSettlementIDs() const;
 
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Settlement")
+    void SetPlayerCurrency(int32 SettlementID, FGameplayTag CurrencyTag);
+
     FSettlementState* GetMutableSettlement(int32 ID);
     const FSettlementState* GetSettlement(int32 ID) const;
 

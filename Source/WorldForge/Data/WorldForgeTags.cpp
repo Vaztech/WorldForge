@@ -31,6 +31,15 @@ UE_DEFINE_GAMEPLAY_TAG(TAG_Skill_Crafting, "WorldForge.Skill.Crafting");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Skill_Hauling, "WorldForge.Skill.Hauling");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Skill_Building, "WorldForge.Skill.Building");
 
+// ---- Currency tags -------------------------------------------------
+UE_DEFINE_GAMEPLAY_TAG(TAG_Currency_Barter, "WorldForge.Currency.Barter");
+
+// ---- Economy narrative pattern tags --------------------------------
+UE_DEFINE_GAMEPLAY_TAG(TAG_Economy_Pattern_Famine, "WorldForge.Economy.Pattern.Famine");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Economy_Pattern_CurrencyFreefall, "WorldForge.Economy.Pattern.CurrencyFreefall");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Economy_Pattern_Boom, "WorldForge.Economy.Pattern.Boom");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Economy_Pattern_Monopoly, "WorldForge.Economy.Pattern.Monopoly");
+
 // ---- Simulation event tags -----------------------------------------
 UE_DEFINE_GAMEPLAY_TAG(TAG_Sim_Event_NeedFoodCritical, "WorldForge.Sim.Event.NeedFoodCritical");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Sim_Event_NeedCritical, "WorldForge.Sim.Event.NeedCritical");
@@ -173,6 +182,33 @@ FGameplayTag UWorldForgeTagLibrary::GetSkillHaulingTag()
 FGameplayTag UWorldForgeTagLibrary::GetSkillBuildingTag()
 {
     return TAG_Skill_Building;
+}
+
+// ---- Currency tags -------------------------------------------------
+FGameplayTag UWorldForgeTagLibrary::GetCurrencyBarterTag()
+{
+    return TAG_Currency_Barter;
+}
+
+// ---- Economy pattern tags ------------------------------------------
+FGameplayTag UWorldForgeTagLibrary::GetEconomyPatternFamineTag()
+{
+    return TAG_Economy_Pattern_Famine;
+}
+
+FGameplayTag UWorldForgeTagLibrary::GetEconomyPatternCurrencyFreefallTag()
+{
+    return TAG_Economy_Pattern_CurrencyFreefall;
+}
+
+FGameplayTag UWorldForgeTagLibrary::GetEconomyPatternBoomTag()
+{
+    return TAG_Economy_Pattern_Boom;
+}
+
+FGameplayTag UWorldForgeTagLibrary::GetEconomyPatternMonopolyTag()
+{
+    return TAG_Economy_Pattern_Monopoly;
 }
 
 // ---- Simulation event tags -----------------------------------------

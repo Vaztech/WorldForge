@@ -28,6 +28,8 @@ public:
     UPROPERTY(SaveGame) TArray<FCurrencyDefinition>          AllCurrencies;
     UPROPERTY(SaveGame) TArray<FGovernmentEconomicProfile>   AllGovernments;
 
+    UPROPERTY(SaveGame) FEconomySaveState EconomySaveState;
+
     // ====================================================================
     // COLONY STATE
     // ====================================================================

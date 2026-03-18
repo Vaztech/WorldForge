@@ -611,6 +611,41 @@ int32 UJobProcessor::GetAssignedJobCount(int32 SettlementID) const
     return JobQueue.GetAssignedCount(SettlementID);
 }
 
+FGameplayTag UJobProcessor::GetSkillTagForJob(FGameplayTag JobTag) const
+{
+    if (JobTag == TAG_Job_Harvest_Food)
+    {
+        return TAG_Skill_Farming;
+    }
+
+    if (JobTag == TAG_Job_Harvest_Wood)
+    {
+        return TAG_Skill_Hauling;
+    }
+
+    if (JobTag == TAG_Job_Harvest_Stone)
+    {
+        return TAG_Skill_Mining;
+    }
+
+    if (JobTag == TAG_Job_Cook)
+    {
+        return TAG_Skill_Farming;
+    }
+
+    if (JobTag == TAG_Job_Craft)
+    {
+        return TAG_Skill_Hauling;
+    }
+
+    if (JobTag == TAG_Job_Build)
+    {
+        return TAG_Skill_Hauling;
+    }
+
+    return FGameplayTag();
+}
+
 // Returns all jobs in the internal queue.
 const TArray<FJobRequest>& UJobProcessor::GetAllJobs() const
 {

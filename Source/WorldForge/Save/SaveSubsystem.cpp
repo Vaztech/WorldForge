@@ -200,6 +200,12 @@ UWorldForgeSaveGame* USaveSubsystem::CollectWorldState(UWorld* W, const FString&
         S->AllGovernments = EC->GetAllGovernments();
     }
 
+    // Phase 3A: economy state
+    if (UWorldEconomySimulation* Econ = W->GetSubsystem<UWorldEconomySimulation>())
+    {
+        S->EconomySaveState = Econ->GetEconomySaveState();
+    }
+
     return S;
 }
 
@@ -252,6 +258,12 @@ void USaveSubsystem::DistributeLoadedState(UWorldForgeSaveGame* S, UWorld* W)
             S->SimStepNumber,
             S->SimCurrentDay,
             S->SimCurrentYear);
+    }
+
+    // Phase 3A: economy state
+    if (UWorldEconomySimulation* Econ = W->GetSubsystem<UWorldEconomySimulation>())
+    {
+        Econ->RestoreEconomyFromSave(S->EconomySaveState);
     }
 }
 
