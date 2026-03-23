@@ -1,4 +1,4 @@
-#include "VoxelConstructionSystem.h"
+﻿#include "VoxelConstructionSystem.h"
 #include "Engine/World.h"
 #include "SettlementManager.h"
 #include "EventBus.h"
@@ -43,13 +43,40 @@ bool UVoxelConstructionSystem::PlaceNextBlock(int32 TaskID, UWorld* World)
 
     T->PlacedBlocks++;
 
+    // ================================
+    // MODIFIED: grid-based placement
+    // ================================
     if (UVoxelWorldManager* V = World ? World->GetSubsystem<UVoxelWorldManager>() : nullptr)
     {
-        const float CS = 200.f;
+        // ADDED: layer logic (unchanged behavior)
         const int32 Layer = (T->PlacedBlocks - 1) / 4;
 
+        // ADDED: index within layer
+        const int32 BlockIndexWithinLayer = (T->PlacedBlocks - 1) % 4;
+
+        // ADDED: 2x2 footprint
+        FIntPoint LocalOffset = FIntPoint::ZeroValue;
+
+        switch (BlockIndexWithinLayer)
+        {
+        case 0: LocalOffset = FIntPoint(0, 0); break; // ADDED
+        case 1: LocalOffset = FIntPoint(1, 0); break; // ADDED
+        case 2: LocalOffset = FIntPoint(0, 1); break; // ADDED
+        case 3: LocalOffset = FIntPoint(1, 1); break; // ADDED
+        default: break;
+        }
+
+        // ADDED: apply offset
+        const FIntPoint BuildGridCell(
+            T->OriginGridCell.X + LocalOffset.X,
+            T->OriginGridCell.Y + LocalOffset.Y
+        );
+
+        // MODIFIED: use grid cell
+        const FVector WorldPos = V->GridToWorld(BuildGridCell, Layer);
+
         V->PlaceVoxelBlock(
-            FVector(T->OriginGridCell.X * CS, T->OriginGridCell.Y * CS, Layer * 100.f),
+            WorldPos,
             FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Voxel.Material.Stone"))));
     }
 
@@ -86,6 +113,10 @@ void UVoxelConstructionSystem::FinalizeBuilding(const FActiveBuildTask& T, UWorl
         *T.BuildingTag.ToString(), T.SettlementID);
 }
 
+// ================================
+// RESTORED FUNCTIONS (CRITICAL)
+// ================================
+
 bool UVoxelConstructionSystem::IsTaskComplete(int32 ID) const
 {
     for (const FActiveBuildTask& T : ActiveTasks)
@@ -99,7 +130,8 @@ bool UVoxelConstructionSystem::HasActiveTask(int32 SID, FGameplayTag Tag) const
 {
     for (const FActiveBuildTask& T : ActiveTasks)
     {
-        if (T.SettlementID == SID && T.BuildingTag == Tag && !T.bComplete) return true;
+        if (T.SettlementID == SID && T.BuildingTag == Tag && !T.bComplete)
+            return true;
     }
     return false;
 }
@@ -113,33 +145,6 @@ FActiveBuildTask* UVoxelConstructionSystem::GetMutableTask(int32 ID)
     return nullptr;
 }
 
-int32 UVoxelConstructionSystem::GetBlockCount(FGameplayTag Tag) const
-{
-    const FString S = Tag.ToString();
-    if (S.Contains(TEXT("Stockpile"))) return 8;
-    if (S.Contains(TEXT("Kitchen"))) return 16;
-    if (S.Contains(TEXT("Carpenter"))) return 20;
-    if (S.Contains(TEXT("Barracks"))) return 24;
-    if (S.Contains(TEXT("Shrine"))) return 12;
-    return 10;
-}
-
-void UVoxelConstructionSystem::RestoreFromSave(const TArray<FActiveBuildTask>& Saved)
-{
-    ActiveTasks = Saved;
-    NextTaskID = 0;
-    for (const FActiveBuildTask& T : ActiveTasks)
-    {
-        NextTaskID = FMath::Max(NextTaskID, T.TaskID + 1);
-    }
-}
-
-// ====================================================================
-// NEW: Clean mutable accessor by agent ID (Phase 2 fix)
-// ====================================================================
-
-// Returns the active (non-complete) build task assigned to this agent.
-// Used by ConstructionProcessor to safely mutate tasks without const_cast.
 FActiveBuildTask* UVoxelConstructionSystem::GetMutableTaskForAgent(int32 AgentID)
 {
     for (FActiveBuildTask& T : ActiveTasks)
@@ -150,4 +155,28 @@ FActiveBuildTask* UVoxelConstructionSystem::GetMutableTaskForAgent(int32 AgentID
         }
     }
     return nullptr;
+}
+
+int32 UVoxelConstructionSystem::GetBlockCount(FGameplayTag Tag) const
+{
+    const FString S = Tag.ToString();
+
+    if (S.Contains(TEXT("Stockpile"))) return 8;
+    if (S.Contains(TEXT("Kitchen"))) return 16;
+    if (S.Contains(TEXT("Carpenter"))) return 20;
+    if (S.Contains(TEXT("Barracks"))) return 24;
+    if (S.Contains(TEXT("Shrine"))) return 12;
+
+    return 10;
+}
+
+void UVoxelConstructionSystem::RestoreFromSave(const TArray<FActiveBuildTask>& Saved)
+{
+    ActiveTasks = Saved;
+
+    NextTaskID = 0;
+    for (const FActiveBuildTask& T : ActiveTasks)
+    {
+        NextTaskID = FMath::Max(NextTaskID, T.TaskID + 1);
+    }
 }

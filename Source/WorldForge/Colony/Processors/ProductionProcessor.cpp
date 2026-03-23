@@ -63,12 +63,36 @@ void UProductionProcessor::ProcessStep(
 
     for (FAgentData& Agent : Agents)
     {
-        // Only process agents in this settlement who are actively working
+        // Only process agents in this settlement
         if (Agent.SettlementID != SettlementID)
         {
             continue;
         }
 
+        // Skip dead / incapacitated agents
+        if (Agent.State == EAgentState::Dead || Agent.State == EAgentState::Incapacitated)
+        {
+            continue;
+        }
+
+        // CHANGE MADE:
+        // Allow Carrying to persist for one full simulation step so the visual system
+        // has time to read Agent.State == Carrying and play the Carry animation.
+        // On the next production tick, we safely return the agent to Idle.
+        if (Agent.State == EAgentState::Carrying)
+        {
+            Agent.State = EAgentState::Idle;
+
+            UE_LOG(
+                LogTemp,
+                Warning,
+                TEXT("[ProductionProcessor] Agent %d EXITED CARRY STATE"),
+                Agent.AgentID);
+
+            continue;
+        }
+
+        // Only process agents who are actively working
         if (Agent.State != EAgentState::Working)
         {
             continue;
@@ -368,7 +392,7 @@ float UProductionProcessor::GetSkillModifier(
 // Finalizes a production task:
 // - deposits outputs to stockpile
 // - dispatches completion event
-// - resets agent work state
+// - sets Carrying state briefly so visuals can play Carry
 // ====================================================================
 void UProductionProcessor::CompleteTask(
     FActiveProductionTask& Task,
@@ -408,13 +432,28 @@ void UProductionProcessor::CompleteTask(
         Bus->Dispatch(Event);
     }
 
-    // Mark task complete and reset agent
+    // Mark task complete
     Task.bComplete = true;
 
-    Agent.State = EAgentState::Idle;
+    // CHANGE MADE:
+    // Previously the agent went straight to Idle here, which meant the visual
+    // system never saw EAgentState::Carrying and could never play the Carry
+    // animation. We now enter Carrying for one simulation step, and ProcessStep()
+    // will return the agent to Idle on the next production tick.
+    Agent.State = EAgentState::Carrying;
+
+    // Clear stale job/task context so the agent is free to resume normal flow
+    // after the brief Carrying visual state.
     Agent.CurrentJobTag = FGameplayTag();
     Agent.CurrentJobBuildingTag = FGameplayTag();
     Agent.ActiveReservationID = -1;
+
+    // Debug log to confirm the Carrying state is actually being entered.
+    UE_LOG(
+        LogTemp,
+        Warning,
+        TEXT("[ProductionProcessor] Agent %d ENTERED CARRY STATE"),
+        Task.AssignedAgentID);
 
     UE_LOG(
         LogTemp,

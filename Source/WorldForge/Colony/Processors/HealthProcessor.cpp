@@ -31,7 +31,12 @@ void UHealthProcessor::ProcessStep(
         // Otherwise, agents slowly recover up to max health.
         if (Agent.FoodNeed <= 0.f)
         {
-            Agent.Health -= 2.f;
+            // CHANGE MADE:
+            // Starvation damage was previously far too aggressive at 2.0 health per step,
+            // which caused synchronized mass deaths once multiple agents hit zero food need.
+            // Reduced to 0.25 so starvation is still dangerous, but agents now have time
+            // to recover or reach food before the entire colony collapses at once.
+            Agent.Health -= 0.25f;
         }
         else if (Agent.Health < 100.f)
         {

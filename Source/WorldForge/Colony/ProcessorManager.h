@@ -5,6 +5,9 @@
 #include "BaseProcessor.h"
 #include "ProcessorManager.generated.h"
 
+class UCultureDriftSystem;             // ADDED
+class UCivilizationResilienceSystem;   // ADDED
+
 UCLASS(BlueprintType)
 class WORLDFORGE_API UProcessorManager : public UWorldSubsystem
 {
@@ -85,4 +88,7 @@ private:
     TArray<FName> ProcessorNames;
 
     mutable TArray<FAgentData> SettlementAgentScratch;
+
+    UPROPERTY() UCultureDriftSystem* CultureDrift = nullptr;                 // ADDED
+    UPROPERTY() UCivilizationResilienceSystem* CivResilience = nullptr;      // ADDED
 };

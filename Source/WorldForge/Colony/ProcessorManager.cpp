@@ -1,4 +1,4 @@
-#include "ProcessorManager.h"
+﻿#include "ProcessorManager.h"
 
 #include "Processors/NeedsProcessor.h"
 #include "Processors/JobProcessor.h"
@@ -10,10 +10,19 @@
 #include "Processors/IncidentProcessor.h"
 #include "Processors/EconomicProcessor.h"
 
+#include "ColonistVisualManager.h"   // NEW: spawn visual actors when agents are registered
 #include "EventBus.h"
 #include "SimulationTimeManager.h"
 #include "WorldForgeTags.h"
 #include "HAL/PlatformTime.h"
+#include "CultureDriftSystem.h"                // ADDED
+#include "CivilizationResilienceSystem.h"      // ADDED
+
+// =====================================================
+// CHANGE MADE:
+// Required for FGameplayTag::RequestGameplayTag
+// =====================================================
+#include "GameplayTagContainer.h"
 
 void UProcessorManager::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -22,6 +31,15 @@ void UProcessorManager::Initialize(FSubsystemCollectionBase& Collection)
     Super::Initialize(Collection);
 
     InitializeProcessors();
+
+    // ADDED
+    // Cache Section B world-level systems.
+    // These are invoked after colony processors and before EventBus flush.
+    if (UWorld* World = GetWorld())
+    {
+        CultureDrift = World->GetSubsystem<UCultureDriftSystem>();
+        CivResilience = World->GetSubsystem<UCivilizationResilienceSystem>();
+    }
 
     UE_LOG(
         LogTemp,
@@ -57,6 +75,10 @@ void UProcessorManager::Deinitialize()
     }
 
     SettlementAgentScratch.Reset();
+
+    // ADDED
+    CultureDrift = nullptr;
+    CivResilience = nullptr;
 
     Super::Deinitialize();
 }
@@ -114,6 +136,19 @@ void UProcessorManager::RunSimulationStep(int32 StepNumber)
             OrderedProcessors[i]->ProcessStep(StepNumber, SID, Agents, World);
             ProcessorTimingsMs[i] += static_cast<float>((FPlatformTime::Seconds() - T0) * 1000.0);
         }
+
+        // ADDED
+        // Section B world-level systems must run after all colony processors
+        // and before EventBus flush so queued events land in the same flush.
+        if (CultureDrift)
+        {
+            CultureDrift->OnSimStep(StepNumber, SID, Agents, World);
+        }
+
+        if (CivResilience)
+        {
+            CivResilience->OnSimStep(StepNumber, SID, Agents, World);
+        }
     }
 
     if (StepNumber % 25 == 0)
@@ -154,6 +189,18 @@ void UProcessorManager::RegisterAgent(const FAgentData& A)
 
     FAgentData NewAgent = A;
 
+    // =====================================================
+    // CHANGE MADE:
+    // Ensure agent always has a valid RaceTag for visual system.
+    // Without this, Blueprint resolves None → no sprite renders.
+    // =====================================================
+    if (!NewAgent.RaceTag.IsValid())
+    {
+        NewAgent.RaceTag = FGameplayTag::RequestGameplayTag(
+            FName("WorldForge.Race.Dwarf")
+        );
+    }
+
     // Test-level fallback so agents created from Blueprint or other paths
     // are still eligible for basic harvest jobs when no explicit skills
     // were assigned before registration.
@@ -165,6 +212,18 @@ void UProcessorManager::RegisterAgent(const FAgentData& A)
     }
 
     Agents.Add(NewAgent);
+    RegisterSettlement(NewAgent.SettlementID);
+
+    // NEW:
+    // Automatically make sure visual actors exist for this settlement as soon as
+    // agents are registered. This removes the need for a separate Blueprint call.
+    if (UWorld* World = GetWorld())
+    {
+        if (UColonistVisualManager* VisualManager = World->GetSubsystem<UColonistVisualManager>())
+        {
+            VisualManager->SpawnColonistActors(NewAgent.SettlementID);
+        }
+    }
 }
 
 void UProcessorManager::SpawnTestAgent(int32 AgentID, int32 SettlementID, FIntPoint GridPos)
@@ -185,6 +244,14 @@ void UProcessorManager::SpawnTestAgent(int32 AgentID, int32 SettlementID, FIntPo
     Agent.Skills.Add(TAG_Skill_Farming, 25.f);
     Agent.Skills.Add(TAG_Skill_Hauling, 25.f);
     Agent.Skills.Add(TAG_Skill_Mining, 25.f);
+
+    // =====================================================
+    // CHANGE MADE:
+    // Assign default race so test agents render correctly
+    // =====================================================
+    Agent.RaceTag = FGameplayTag::RequestGameplayTag(
+        FName("WorldForge.Race.Dwarf")
+    );
 
     RegisterAgent(Agent);
     RegisterSettlement(SettlementID);

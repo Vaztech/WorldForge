@@ -10,6 +10,10 @@
 void UDebugSimulationSystem::Initialize(FSubsystemCollectionBase& C)
 {
     Super::Initialize(C);
+
+    // CHANGE:
+    // No architecture change here.
+    // This subsystem still reads from existing world subsystems only.
     UE_LOG(LogTemp, Log, TEXT("[DebugSim] Initialized. 11 overlays ready."));
 }
 
@@ -35,7 +39,13 @@ void UDebugSimulationSystem::OnSimulationStep(int32 S, int32)
 
 FString UDebugSimulationSystem::GetLowestNeedLabel(int32 ID) const
 {
-    if (UProcessorManager* PM = GetWorld()->GetSubsystem<UProcessorManager>())
+    UWorld* World = GetWorld();
+    if (!World)
+    {
+        return TEXT("?");
+    }
+
+    if (UProcessorManager* PM = World->GetSubsystem<UProcessorManager>())
     {
         if (const FAgentData* A = PM->GetAgent(ID))
         {
@@ -62,6 +72,9 @@ FString UDebugSimulationSystem::GetLowestNeedLabel(int32 ID) const
 
             if (A->PurposeNeed < M)
             {
+                // CHANGE:
+                // Fixed the displayed numeric value when Purpose is the lowest need.
+                M = A->PurposeNeed;
                 L = TEXT("Purpose");
             }
 
@@ -74,15 +87,19 @@ FString UDebugSimulationSystem::GetLowestNeedLabel(int32 ID) const
 
 FLinearColor UDebugSimulationSystem::GetNeedColor(int32 ID) const
 {
-    if (UProcessorManager* PM = GetWorld()->GetSubsystem<UProcessorManager>())
+    UWorld* World = GetWorld();
+    if (!World)
+    {
+        return FLinearColor::White;
+    }
+
+    if (UProcessorManager* PM = World->GetSubsystem<UProcessorManager>())
     {
         if (const FAgentData* A = PM->GetAgent(ID))
         {
             const float M = FMath::Min(
                 FMath::Min(A->FoodNeed, A->SleepNeed),
-                FMath::Min(
-                    FMath::Min(A->SafetyNeed, A->SocialNeed),
-                    A->PurposeNeed));
+                FMath::Min(FMath::Min(A->SafetyNeed, A->SocialNeed), A->PurposeNeed));
 
             if (M < 20.f)
             {
@@ -103,7 +120,13 @@ FLinearColor UDebugSimulationSystem::GetNeedColor(int32 ID) const
 
 FString UDebugSimulationSystem::GetAgentTaskLabel(int32 ID) const
 {
-    if (UProcessorManager* PM = GetWorld()->GetSubsystem<UProcessorManager>())
+    UWorld* World = GetWorld();
+    if (!World)
+    {
+        return TEXT("?");
+    }
+
+    if (UProcessorManager* PM = World->GetSubsystem<UProcessorManager>())
     {
         if (const FAgentData* A = PM->GetAgent(ID))
         {
@@ -120,7 +143,14 @@ TArray<FString> UDebugSimulationSystem::GetReservationSummary(int32 SID) const
 {
     TArray<FString> Lines;
 
-    if (UReservationSystem* RS = GetWorld()->GetSubsystem<UReservationSystem>())
+    UWorld* World = GetWorld();
+    if (!World)
+    {
+        Lines.Add(TEXT("World unavailable"));
+        return Lines;
+    }
+
+    if (UReservationSystem* RS = World->GetSubsystem<UReservationSystem>())
     {
         for (const FReservationRecord& R : RS->GetAllReservations())
         {
@@ -149,7 +179,14 @@ TArray<FString> UDebugSimulationSystem::GetStockpileSummary(int32 SID) const
 {
     TArray<FString> Lines;
 
-    if (USettlementManager* SM = GetWorld()->GetSubsystem<USettlementManager>())
+    UWorld* World = GetWorld();
+    if (!World)
+    {
+        Lines.Add(TEXT("World unavailable"));
+        return Lines;
+    }
+
+    if (USettlementManager* SM = World->GetSubsystem<USettlementManager>())
     {
         const FSettlementState S = SM->GetSettlementState(SID);
 
@@ -170,7 +207,13 @@ TArray<FString> UDebugSimulationSystem::GetStockpileSummary(int32 SID) const
 
 FString UDebugSimulationSystem::GetBuildingStateLabel(FGameplayTag Tag, int32 SID) const
 {
-    if (USettlementManager* SM = GetWorld()->GetSubsystem<USettlementManager>())
+    UWorld* World = GetWorld();
+    if (!World)
+    {
+        return TEXT("Not Built");
+    }
+
+    if (USettlementManager* SM = World->GetSubsystem<USettlementManager>())
     {
         if (SM->HasBuilding(SID, Tag))
         {
@@ -178,7 +221,7 @@ FString UDebugSimulationSystem::GetBuildingStateLabel(FGameplayTag Tag, int32 SI
         }
     }
 
-    if (UVoxelConstructionSystem* V = GetWorld()->GetSubsystem<UVoxelConstructionSystem>())
+    if (UVoxelConstructionSystem* V = World->GetSubsystem<UVoxelConstructionSystem>())
     {
         if (V->HasActiveTask(SID, Tag))
         {
@@ -201,7 +244,13 @@ FString UDebugSimulationSystem::GetInspectionReport() const
         return TEXT("No colonist selected.");
     }
 
-    if (UProcessorManager* PM = GetWorld()->GetSubsystem<UProcessorManager>())
+    UWorld* World = GetWorld();
+    if (!World)
+    {
+        return TEXT("Not found");
+    }
+
+    if (UProcessorManager* PM = World->GetSubsystem<UProcessorManager>())
     {
         if (const FAgentData* A = PM->GetAgent(SelectedAgentID))
         {
@@ -221,7 +270,13 @@ FString UDebugSimulationSystem::GetInspectionReport() const
 
 FString UDebugSimulationSystem::GetJobQueueSummary(int32 SettlementID) const
 {
-    if (UProcessorManager* PM = GetWorld()->GetSubsystem<UProcessorManager>())
+    UWorld* World = GetWorld();
+    if (!World)
+    {
+        return TEXT("ProcessorManager not found.");
+    }
+
+    if (UProcessorManager* PM = World->GetSubsystem<UProcessorManager>())
     {
         int32 Idle = 0;
         int32 Working = 0;
@@ -249,8 +304,6 @@ FString UDebugSimulationSystem::GetJobQueueSummary(int32 SettlementID) const
             }
             else
             {
-                // Includes moving plus other non-idle/non-working living states
-                // such as Eating, Sleeping, Recovering, ReservingTarget, etc.
                 Active++;
             }
         }
@@ -280,7 +333,13 @@ FString UDebugSimulationSystem::GetJobQueueSummary(int32 SettlementID) const
 
 FString UDebugSimulationSystem::GetMoraleReport(int32 ID) const
 {
-    if (UProcessorManager* PM = GetWorld()->GetSubsystem<UProcessorManager>())
+    UWorld* World = GetWorld();
+    if (!World)
+    {
+        return TEXT("?");
+    }
+
+    if (UProcessorManager* PM = World->GetSubsystem<UProcessorManager>())
     {
         if (const FAgentData* A = PM->GetAgent(ID))
         {
@@ -295,7 +354,14 @@ TArray<FString> UDebugSimulationSystem::GetRecentEventLog() const
 {
     TArray<FString> Lines;
 
-    if (UEventBus* Bus = GetWorld()->GetSubsystem<UEventBus>())
+    UWorld* World = GetWorld();
+    if (!World)
+    {
+        Lines.Add(TEXT("World unavailable"));
+        return Lines;
+    }
+
+    if (UEventBus* Bus = World->GetSubsystem<UEventBus>())
     {
         for (const FSimulationEvent& E : Bus->GetRecentEvents())
         {
@@ -315,16 +381,45 @@ TArray<FString> UDebugSimulationSystem::GetProcessorTimingReport() const
     TArray<FString> Lines;
     Lines.Add(FString::Printf(TEXT("Step %d"), LastStepNumber));
 
-    if (UProcessorManager* PM = GetWorld()->GetSubsystem<UProcessorManager>())
+    UWorld* World = GetWorld();
+    if (!World)
+    {
+        Lines.Add(TEXT("World unavailable"));
+        return Lines;
+    }
+
+    if (UProcessorManager* PM = World->GetSubsystem<UProcessorManager>())
     {
         const TArray<float>& T = PM->GetProcessorTimings();
         const TArray<FName>& N = PM->GetProcessorNames();
 
-        for (int32 i = 0; i < T.Num(); i++)
+        // CHANGE:
+        // Added a bounds-safe loop in case names/timings ever get out of sync.
+        const int32 Count = FMath::Min(T.Num(), N.Num());
+        for (int32 i = 0; i < Count; i++)
         {
             Lines.Add(FString::Printf(TEXT("%s: %.3fms"), *N[i].ToString(), T[i]));
         }
     }
 
     return Lines;
+}
+
+UDebugSimulationSystem* UDebugSimulationBlueprintLibrary::GetDebugSimulationSystem(const UObject* WorldContextObject)
+{
+    // CHANGE:
+    // Explicit Blueprint helper to fetch the subsystem instance using any valid world context.
+    // This is the minimal fallback when the engine does not surface the auto-generated getter node.
+    if (!WorldContextObject)
+    {
+        return nullptr;
+    }
+
+    UWorld* World = WorldContextObject->GetWorld();
+    if (!World)
+    {
+        return nullptr;
+    }
+
+    return World->GetSubsystem<UDebugSimulationSystem>();
 }

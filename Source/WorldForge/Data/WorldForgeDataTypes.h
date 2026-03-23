@@ -641,3 +641,308 @@ struct FWorldGenConfig
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 StartingCivCount = 4;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int64 MasterSeed = 12345;
 };
+
+// ADDED
+// WorldForgeDataTypes.h -- Phase 3B additions
+// Append to bottom of file. Do NOT duplicate Phase 3A structs already present.
+
+// ADDED
+// ── Cultural DNA axis indices ─────────────────────────────────────────────
+enum ECulturalAxis : int32
+{
+    CA_Hierarchy = 0,
+    CA_OutgroupHostility = 1,
+    CA_LaborEthics = 2,
+    CA_Militarism = 3,
+    CA_MagicReverence = 4,
+    CA_Individualism = 5,
+    CA_TheologicalRigid = 6,
+    CA_EconomicOpenness = 7,
+    CA_ExpansionDrive = 8,
+    CA_CosmicDevotion = 9,
+    CA_MAX = 10
+};
+
+// ADDED
+// ── Phase 3B: Civilization resilience ────────────────────────────────────
+UENUM()
+enum class ECivilizationCollapseType : uint8
+{
+    None,
+    Fragmentation,
+    Diaspora,
+    RefugeState,
+    SplinterKingdom,
+    UndergroundRetreat,
+    ReligiousContinuation,
+    EconomicCollapse
+};
+
+// ADDED
+USTRUCT()
+struct FResilienceRecord
+{
+    GENERATED_BODY()
+
+    UPROPERTY(SaveGame) int32 CivID = -1;
+    UPROPERTY(SaveGame) int32 ConsecutiveLowHealthTicks = 0;
+    UPROPERTY(SaveGame) bool bHasCollapsed = false;
+    UPROPERTY(SaveGame) ECivilizationCollapseType CollapseType = ECivilizationCollapseType::None;
+    UPROPERTY(SaveGame) int32 CollapseStepNumber = -1;
+};
+
+// ADDED
+USTRUCT()
+struct FResilienceSaveState
+{
+    GENERATED_BODY()
+
+    UPROPERTY(SaveGame) TArray<FResilienceRecord> Records;
+};
+
+// ADDED
+// ── Phase 3B: Overworld ───────────────────────────────────────────────────
+USTRUCT()
+struct FCargoItem
+{
+    GENERATED_BODY()
+
+    UPROPERTY(SaveGame) FGameplayTag ItemTag;
+    UPROPERTY(SaveGame) int32 Quantity = 0;
+    UPROPERTY(SaveGame) float PricePerUnit = 1.0f;
+};
+
+// ADDED
+USTRUCT()
+struct FCaravanData
+{
+    GENERATED_BODY()
+
+    UPROPERTY(SaveGame) int32 CaravanID = -1;
+    UPROPERTY(SaveGame) int32 OriginSettlementID = -1;
+    UPROPERTY(SaveGame) int32 DestSettlementID = -1;
+    UPROPERTY(SaveGame) int32 StepsUntilArrival = 0;
+    UPROPERTY(SaveGame) TArray<FCargoItem> Cargo;
+    UPROPERTY(SaveGame) float PaymentAmount = 0.0f;
+    UPROPERTY(SaveGame) FGameplayTag PaymentCurrencyTag;
+    UPROPERTY(SaveGame) bool bOutbound = true;
+};
+
+// ADDED
+UENUM()
+enum class EOutpostType : uint8
+{
+    Resource,
+    MilitaryFort,
+    TradePost,
+    NavalPort,
+    SkyAnchor,
+    MarketOutpost,
+    DiplomaticMission,
+    ShrineOutpost,
+    ForwardBase
+};
+
+// ADDED
+USTRUCT()
+struct FOutpostData
+{
+    GENERATED_BODY()
+
+    UPROPERTY(SaveGame) int32 OutpostID = -1;
+    UPROPERTY(SaveGame) EOutpostType OutpostType = EOutpostType::Resource;
+    UPROPERTY(SaveGame) int32 OwnerSettlementID = -1;
+    UPROPERTY(SaveGame) FIntPoint WorldGridCell;
+    UPROPERTY(SaveGame) int32 StaffCount = 0;
+    UPROPERTY(SaveGame) int32 StepsWithoutSupply = 0;
+    UPROPERTY(SaveGame) bool bActive = true;
+    UPROPERTY(SaveGame) float FlowRateMod = 1.0f;
+};
+
+// ADDED
+USTRUCT()
+struct FOverworldSaveState
+{
+    GENERATED_BODY()
+
+    UPROPERTY(SaveGame) TArray<FCaravanData> ActiveCaravans;
+    UPROPERTY(SaveGame) TArray<FOutpostData> ActiveOutposts;
+    UPROPERTY(SaveGame) int32 NextCaravanID = 0;
+    UPROPERTY(SaveGame) int32 NextOutpostID = 0;
+};
+
+// ADDED
+// ── Phase 3B: Diplomacy ───────────────────────────────────────────────────
+UENUM()
+enum class EDiplomaticActionType : uint8
+{
+    DeclareWar,
+    ProposePeace,
+    TradeAgreement,
+    CurrencyPegging,
+    EconomicAid,
+    CurrencyWar,
+    TradeEmbargo,
+    SpyMission,
+    CulturalExchange,
+    MilitaryAlliance,
+    Vassalize,
+    OpenBorders,
+    RequestTribute,
+    HonorDebt,
+    MarriageAlliance,
+    JointExpedition
+};
+
+// ADDED
+USTRUCT()
+struct FDiplomaticTreaty
+{
+    GENERATED_BODY()
+
+    UPROPERTY(SaveGame) int32 CivA = -1;
+    UPROPERTY(SaveGame) int32 CivB = -1;
+    UPROPERTY(SaveGame) EDiplomaticActionType TreatyType = EDiplomaticActionType::TradeAgreement;
+    UPROPERTY(SaveGame) int32 ExpiryStep = -1;
+    UPROPERTY(SaveGame) float FlowRateMod = 1.0f;
+    UPROPERTY(SaveGame) bool bActive = true;
+};
+
+// ADDED
+USTRUCT()
+struct FDiplomacySaveState
+{
+    GENERATED_BODY()
+
+    UPROPERTY(SaveGame) TMap<int64, float> RelationshipScores;
+    UPROPERTY(SaveGame) TArray<FDiplomaticTreaty> ActiveTreaties;
+    UPROPERTY(SaveGame) TArray<int32> EmbargoedCivIDs;
+    UPROPERTY(SaveGame) TMap<int64, FGameplayTag> PeggedCurrencyPairs;
+};
+
+// ADDED
+// ── Phase 3B: Naval ───────────────────────────────────────────────────────
+UENUM()
+enum class EShipType : uint8
+{
+    Raft,
+    RiverBarge,
+    ScoutSloop
+};
+
+// ADDED
+USTRUCT()
+struct FShipData
+{
+    GENERATED_BODY()
+
+    UPROPERTY(SaveGame) int32 ShipID = -1;
+    UPROPERTY(SaveGame) EShipType ShipType = EShipType::Raft;
+    UPROPERTY(SaveGame) int32 OwnerSettlementID = -1;
+    UPROPERTY(SaveGame) float BaseSpeed = 1.0f;
+    UPROPERTY(SaveGame) int32 CargoCap = 50;
+    UPROPERTY(SaveGame) int32 OriginSettlementID = -1;
+    UPROPERTY(SaveGame) int32 DestSettlementID = -1;
+    UPROPERTY(SaveGame) int32 StepsUntilArrival = 0;
+    UPROPERTY(SaveGame) TArray<FCargoItem> Cargo;
+    UPROPERTY(SaveGame) bool bInTransit = false;
+};
+
+// ADDED
+USTRUCT()
+struct FNavalSaveState
+{
+    GENERATED_BODY()
+
+    UPROPERTY(SaveGame) TArray<FShipData> ActiveShips;
+    UPROPERTY(SaveGame) TArray<int32> BlockadedPortSettlementIDs;
+    UPROPERTY(SaveGame) int32 NextShipID = 0;
+};
+
+// ADDED
+// ── Phase 3B: Cosmic ──────────────────────────────────────────────────────
+UENUM()
+enum class ECosmicEntityStatus : uint8
+{
+    Dormant,
+    Emerging,
+    Active,
+    Fading,
+    Gone
+};
+
+// ADDED
+USTRUCT()
+struct FCosmicEntityState
+{
+    GENERATED_BODY()
+
+    UPROPERTY(SaveGame) int32 EntityID = -1;
+    UPROPERTY(SaveGame) FGameplayTag EntityTag;
+    UPROPERTY(SaveGame) ECosmicEntityStatus Status = ECosmicEntityStatus::Dormant;
+    UPROPERTY(SaveGame) float TotalPower = 0.0f;
+
+    UPROPERTY(SaveGame) float FearPower = 0.0f;
+    UPROPERTY(SaveGame) float AffinityPower = 0.0f;
+    UPROPERTY(SaveGame) float CatastrophePower = 0.0f;
+    UPROPERTY(SaveGame) float AnchorPower = 0.0f;
+    UPROPERTY(SaveGame) float BeliefPower = 0.0f;
+    UPROPERTY(SaveGame) float IrritationPower = 0.0f;
+
+    UPROPERTY(SaveGame) float FearDecayRate = 0.001f;
+    UPROPERTY(SaveGame) float AffinityDecayRate = 0.001f;
+    UPROPERTY(SaveGame) float CatastropheDecayRate = 0.002f;
+    UPROPERTY(SaveGame) float AnchorDecayRate = 0.0005f;
+    UPROPERTY(SaveGame) float BeliefDecayRate = 0.001f;
+    UPROPERTY(SaveGame) float IrritationDecayRate = 0.003f;
+
+    UPROPERTY(SaveGame) float EmergenceThreshold = 10.0f;
+    UPROPERTY(SaveGame) float FadeThreshold = 1.0f;
+    UPROPERTY(SaveGame) TArray<FGameplayTag> DomainTags;
+    UPROPERTY(SaveGame) int32 FlowBoostStepsRemaining = 0;
+    UPROPERTY(SaveGame) int32 FlowDrainStepsRemaining = 0;
+    UPROPERTY(SaveGame) float FlowBoostMultiplier = 1.0f;
+};
+
+// ADDED
+USTRUCT()
+struct FAnchorRecord
+{
+    GENERATED_BODY()
+
+    UPROPERTY(SaveGame) int32 AnchorID = -1;
+    UPROPERTY(SaveGame) int32 SettlementID = -1;
+    UPROPERTY(SaveGame) FIntPoint GridPosition;
+    UPROPERTY(SaveGame) FGameplayTag BoundEntityTag;
+    UPROPERTY(SaveGame) float PowerPerSimDay = 0.1f;
+};
+
+// ADDED
+USTRUCT()
+struct FNarrativePressureState
+{
+    GENERATED_BODY()
+
+    UPROPERTY(SaveGame) float War = 0.0f;
+    UPROPERTY(SaveGame) float Exploration = 0.0f;
+    UPROPERTY(SaveGame) float Mysticism = 0.0f;
+    UPROPERTY(SaveGame) float Fear = 0.0f;
+    UPROPERTY(SaveGame) float Commerce = 0.0f;
+    UPROPERTY(SaveGame) float Art = 0.0f;
+    UPROPERTY(SaveGame) float CosmicUnstable = 0.0f;
+
+    static constexpr float Threshold = 100.0f;
+};
+
+// ADDED
+USTRUCT()
+struct FCosmicSaveState
+{
+    GENERATED_BODY()
+
+    UPROPERTY(SaveGame) TArray<FCosmicEntityState> EntityStates;
+    UPROPERTY(SaveGame) TArray<FAnchorRecord> AnchorRecords;
+    UPROPERTY(SaveGame) FNarrativePressureState NarrativePressure;
+    UPROPERTY(SaveGame) int32 NextEntityID = 0;
+    UPROPERTY(SaveGame) int32 NextAnchorID = 0;
+};

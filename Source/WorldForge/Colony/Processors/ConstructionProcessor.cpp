@@ -24,8 +24,35 @@ void UConstructionProcessor::ProcessStep(
 
     for (FAgentData& Agent : Agents)
     {
+        // Only process agents in this settlement.
+        if (Agent.SettlementID != SettlementID)
+        {
+            continue;
+        }
+
+        // ADDED:
+        // If this agent already has an active construction task assigned,
+        // force the agent into the expected build state/job for V-H automatic
+        // placement validation. This is the smallest bridge needed so the
+        // existing construction task can actually advance block-by-block.
+        FActiveBuildTask* Task = VCS->GetMutableTaskForAgent(Agent.AgentID);
+        if (Task && !Task->bComplete)
+        {
+            // ADDED:
+            // Preserve existing architecture: the construction system remains
+            // the source of truth for active build tasks. We only ensure the
+            // assigned agent is in the build job/state required by the current
+            // ConstructionProcessor filters.
+            Agent.State = EAgentState::Working;
+            Agent.CurrentJobTag = TAG_Job_Build;
+
+            // ADDED:
+            // Keep the building tag synchronized for any existing debug/UI use.
+            Agent.CurrentJobBuildingTag = Task->BuildingTag;
+        }
+
         // Only process working agents in this settlement.
-        if (Agent.SettlementID != SettlementID || Agent.State != EAgentState::Working)
+        if (Agent.State != EAgentState::Working)
         {
             continue;
         }
@@ -36,8 +63,9 @@ void UConstructionProcessor::ProcessStep(
             continue;
         }
 
-        // Get the active mutable build task for this agent.
-        FActiveBuildTask* Task = VCS->GetMutableTaskForAgent(Agent.AgentID);
+        // MODIFIED:
+        // Reuse the active mutable build task lookup after the state/job bridge.
+        Task = VCS->GetMutableTaskForAgent(Agent.AgentID);
         if (!Task)
         {
             continue;

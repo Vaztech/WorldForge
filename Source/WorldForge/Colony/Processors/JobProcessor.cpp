@@ -15,6 +15,7 @@
 // 1. Generating jobs if needed
 // 2. Updating agent movement
 // 3. Assigning jobs to idle agents
+// 4. Falling back to a clean Idle state when no valid job exists
 // ====================================================================
 void UJobProcessor::ProcessStep(
     int32 StepNumber,
@@ -80,7 +81,7 @@ void UJobProcessor::ProcessStep(
         // Priority:
         // 1. Critical needs
         // 2. Existing queued jobs
-        // 3. Otherwise remain idle
+        // 3. Otherwise enter a clean Idle fallback state
         // ============================================================
         if (HandleCriticalNeeds(Agent, SettlementID, StepNumber, World))
         {
@@ -92,11 +93,18 @@ void UJobProcessor::ProcessStep(
             continue;
         }
 
-        // Ensure agent returns to Idle if nothing assigned
-        if (Agent.State != EAgentState::Idle)
-        {
-            Agent.State = EAgentState::Idle;
-        }
+        // ------------------------------------------------------------
+        // FALLBACK: no suitable job found
+        //
+        // This replaces warning spam with stable behavior:
+        // - clear any stale task state
+        // - ensure the agent is safely idle
+        // - allow future steps to re-evaluate new jobs
+        // ------------------------------------------------------------
+        Agent.State = EAgentState::Idle;
+        Agent.CurrentJobTag = FGameplayTag();
+        Agent.CurrentJobBuildingTag = FGameplayTag();
+        Agent.ActiveReservationID = -1;
     }
 }
 
@@ -345,13 +353,13 @@ bool UJobProcessor::TryAssignQueuedJob(
         Agent,
         SettlementID);
 
+    // ------------------------------------------------------------
+    // No valid job available:
+    // - do not warn every tick
+    // - let caller place the agent into fallback Idle behavior
+    // ------------------------------------------------------------
     if (!Job)
     {
-        UE_LOG(
-            LogTemp,
-            Warning,
-            TEXT("[JobProcessor] Agent %d found NO suitable job (skills or availability)"),
-            Agent.AgentID);
         return false;
     }
 
@@ -466,37 +474,65 @@ void UJobProcessor::GenerateIdleHarvestJobs(
         WoodAmt,
         StoneAmt);
 
-    // Temporary movement-validation patch:
-    // Use fixed distant targets so colonist movement is clearly visible in PIE.
-    // This keeps behavior deterministic and avoids near-spawn cells masking movement.
-    const FIntPoint FoodTestTarget(10, 10);
-    const FIntPoint WoodTestTarget(15, 10);
-    const FIntPoint StoneTestTarget(20, 10);
+    // CHANGE MADE:
+    // The old fallback targets used either fixed coordinates or a very small random
+    // offset range around the same anchor cells. That still produced visible vertical
+    // stacks and tight clustering because many agents were effectively being sent into
+    // the same narrow area.
+    //
+    // This helper now:
+    // 1. uses a wider spread radius,
+    // 2. randomizes X and Y independently,
+    // 3. tries multiple times to find a walkable cell,
+    // 4. falls back safely to the original base cell if no candidate succeeds.
+    auto GetSpreadTarget = [&](int32 BaseX, int32 BaseY) -> FIntPoint
+        {
+            const int32 MaxAttempts = 6;
+
+            for (int32 Attempt = 0; Attempt < MaxAttempts; ++Attempt)
+            {
+                const int32 OffsetX = FMath::RandRange(-6, 6);
+                const int32 OffsetY = FMath::RandRange(-6, 6);
+
+                const FIntPoint Candidate(BaseX + OffsetX, BaseY + OffsetY);
+
+                if (Nav && Nav->IsCellWalkable(SettlementID, Candidate))
+                {
+                    return Candidate;
+                }
+            }
+
+            // Safe fallback if NavigationContext is missing or no candidate succeeded.
+            return FIntPoint(BaseX, BaseY);
+        };
 
     if (FoodAmt < 50)
     {
-        FJobRequest Job;
-        Job.SettlementID = SettlementID;
-        Job.PostedOnStep = StepNumber;
-        Job.JobTag = TAG_Job_Harvest_Food;
-        Job.RequiredSkill = TAG_Skill_Farming;
-        Job.Priority = (FoodAmt < 20) ? EJobPriority::High : EJobPriority::Normal;
-
-        // Temporary fixed target for movement testing.
-        Job.TargetGridPos = Nav && Nav->IsCellWalkable(SettlementID, FoodTestTarget)
-            ? FoodTestTarget
-            : FIntPoint(10, 10);
-
-        if (FJobRequest* J = PostJob(Job))
+        // CHANGE MADE:
+        // Post multiple fallback food jobs so more colonists can work at once and
+        // the group does not bottleneck around a single posted target.
+        for (int32 i = 0; i < 3; ++i)
         {
-            UE_LOG(
-                LogTemp,
-                Log,
-                TEXT("[JobProcessor] Posted job %s at (%d,%d) Step=%d"),
-                *J->JobTag.ToString(),
-                J->TargetGridPos.X,
-                J->TargetGridPos.Y,
-                StepNumber);
+            FJobRequest Job;
+            Job.SettlementID = SettlementID;
+            Job.PostedOnStep = StepNumber;
+            Job.JobTag = TAG_Job_Harvest_Food;
+            Job.RequiredSkill = TAG_Skill_Farming;
+            Job.Priority = (FoodAmt < 20) ? EJobPriority::High : EJobPriority::Normal;
+
+            Job.TargetGridPos = GetSpreadTarget(10, 10);
+
+            if (FJobRequest* J = PostJob(Job))
+            {
+                UE_LOG(
+                    LogTemp,
+                    Log,
+                    TEXT("[JobProcessor] Posted job %s at (%d,%d) Step=%d"),
+                    *J->JobTag.ToString(),
+                    J->TargetGridPos.X,
+                    J->TargetGridPos.Y,
+                    StepNumber);
+            }
         }
     }
     else
@@ -509,28 +545,30 @@ void UJobProcessor::GenerateIdleHarvestJobs(
 
     if (WoodAmt < 20)
     {
-        FJobRequest Job;
-        Job.SettlementID = SettlementID;
-        Job.PostedOnStep = StepNumber;
-        Job.JobTag = TAG_Job_Harvest_Wood;
-        Job.RequiredSkill = TAG_Skill_Hauling;
-        Job.Priority = EJobPriority::Normal;
-
-        // Temporary fixed target for movement testing.
-        Job.TargetGridPos = Nav && Nav->IsCellWalkable(SettlementID, WoodTestTarget)
-            ? WoodTestTarget
-            : FIntPoint(15, 10);
-
-        if (FJobRequest* J = PostJob(Job))
+        // CHANGE MADE:
+        // Post multiple fallback wood jobs with wider-spread targets.
+        for (int32 i = 0; i < 2; ++i)
         {
-            UE_LOG(
-                LogTemp,
-                Log,
-                TEXT("[JobProcessor] Posted job %s at (%d,%d) Step=%d"),
-                *J->JobTag.ToString(),
-                J->TargetGridPos.X,
-                J->TargetGridPos.Y,
-                StepNumber);
+            FJobRequest Job;
+            Job.SettlementID = SettlementID;
+            Job.PostedOnStep = StepNumber;
+            Job.JobTag = TAG_Job_Harvest_Wood;
+            Job.RequiredSkill = TAG_Skill_Hauling;
+            Job.Priority = EJobPriority::Normal;
+
+            Job.TargetGridPos = GetSpreadTarget(15, 10);
+
+            if (FJobRequest* J = PostJob(Job))
+            {
+                UE_LOG(
+                    LogTemp,
+                    Log,
+                    TEXT("[JobProcessor] Posted job %s at (%d,%d) Step=%d"),
+                    *J->JobTag.ToString(),
+                    J->TargetGridPos.X,
+                    J->TargetGridPos.Y,
+                    StepNumber);
+            }
         }
     }
     else
@@ -543,28 +581,30 @@ void UJobProcessor::GenerateIdleHarvestJobs(
 
     if (StoneAmt < 20)
     {
-        FJobRequest Job;
-        Job.SettlementID = SettlementID;
-        Job.PostedOnStep = StepNumber;
-        Job.JobTag = TAG_Job_Harvest_Stone;
-        Job.RequiredSkill = TAG_Skill_Mining;
-        Job.Priority = EJobPriority::Normal;
-
-        // Temporary fixed target for movement testing.
-        Job.TargetGridPos = Nav && Nav->IsCellWalkable(SettlementID, StoneTestTarget)
-            ? StoneTestTarget
-            : FIntPoint(20, 10);
-
-        if (FJobRequest* J = PostJob(Job))
+        // CHANGE MADE:
+        // Post multiple fallback stone jobs with wider-spread targets.
+        for (int32 i = 0; i < 2; ++i)
         {
-            UE_LOG(
-                LogTemp,
-                Log,
-                TEXT("[JobProcessor] Posted job %s at (%d,%d) Step=%d"),
-                *J->JobTag.ToString(),
-                J->TargetGridPos.X,
-                J->TargetGridPos.Y,
-                StepNumber);
+            FJobRequest Job;
+            Job.SettlementID = SettlementID;
+            Job.PostedOnStep = StepNumber;
+            Job.JobTag = TAG_Job_Harvest_Stone;
+            Job.RequiredSkill = TAG_Skill_Mining;
+            Job.Priority = EJobPriority::Normal;
+
+            Job.TargetGridPos = GetSpreadTarget(20, 10);
+
+            if (FJobRequest* J = PostJob(Job))
+            {
+                UE_LOG(
+                    LogTemp,
+                    Log,
+                    TEXT("[JobProcessor] Posted job %s at (%d,%d) Step=%d"),
+                    *J->JobTag.ToString(),
+                    J->TargetGridPos.X,
+                    J->TargetGridPos.Y,
+                    StepNumber);
+            }
         }
     }
     else

@@ -29,6 +29,11 @@ public class WorldForge : ModuleRules
             "NavigationSystem",        // Nav system (used by NavigationContext)
             "AIModule",                // AI helpers (pathing, etc.)
             "RenderCore",              // Low-level rendering access
+
+            "Paper2D", // CHANGE MADE:
+                       // Required for UPaperFlipbook and all Paper2D types.
+                       // Needed because SpriteCharacterComponent.h now uses
+                       // UPaperFlipbook in a reflected multicast delegate.
         });
 
         // =========================

@@ -1,0 +1,403 @@
+# WorldForge — Phase 3A System Audit
+
+This document lists all reviewed source files and describes their responsibilities within the WorldForge architecture.
+
+Purpose:
+
+* Confirm Phase 3A readiness
+* Provide system-level clarity before Phase 3B
+* Serve as a reference for future development phases
+
+---
+
+# 📦 Core Data Layer
+
+## WorldForgeDataTypes.h
+
+**System:** Global Data Definitions (All Systems)
+
+**Responsibility:**
+
+* Defines all core simulation structs and enums
+* Serves as the **single source of truth** for:
+
+  * Economy
+  * Civilization
+  * Colony simulation
+  * Events
+  * Save data
+
+**Key Structures:**
+
+* Economy:
+
+  * `FEconomySaveState`
+  * `FCurrencyDefinition`
+  * `FCurrencyTrustState`
+  * `FCurrencyTrustDelta`
+  * `FMarketPrice`
+  * `FSettlementMarket`
+* Civilization:
+
+  * `FCivilizationData`
+  * `FCultureData`
+* Simulation:
+
+  * `FSettlementState`
+  * `FAgentData`
+  * `FSimulationEvent`
+* Construction:
+
+  * `FActiveBuildTask`
+
+**Phase 3B Additions Already Present:**
+
+* Resilience:
+
+  * `FResilienceRecord`
+* Overworld:
+
+  * `FCaravanData`
+  * `FOutpostData`
+* Diplomacy:
+
+  * `FDiplomaticTreaty`
+* Naval:
+
+  * `FShipData`
+* Cosmic:
+
+  * `FCosmicEntityState`
+
+**Status:** ✅ Fully compliant and future-ready
+
+---
+
+# 🏘️ Settlement System
+
+## SettlementManager.h / SettlementManager.cpp
+
+**System:** Colony / Settlement Management
+
+**Responsibility:**
+
+* Manages all settlement-level state
+* Handles:
+
+  * Stockpiles (resource storage)
+  * Buildings (completed structures)
+  * Population
+  * Player currency assignment
+
+**Key Functions:**
+
+* `CreateSettlement()`
+* `AddToStockpile() / ConsumeFromStockpile()`
+* `AddBuilding()`
+* `SetPlayerCurrency()`
+* `RestoreFromSave()`
+
+**Notes:**
+
+* Acts as the **bridge between economy and colony systems**
+* Required for:
+
+  * Construction completion
+  * Economy transactions
+  * Save/Load integrity
+
+**Status:** ✅ Stable and correct
+
+---
+
+# ⚙️ Simulation Core
+
+## ProcessorManager.h / ProcessorManager.cpp
+
+**System:** Simulation Orchestrator
+
+**Responsibility:**
+
+* Controls execution order of all simulation processors
+* Manages:
+
+  * Agent registration
+  * Settlement registration
+  * Simulation step execution
+
+**Processor Execution Order:**
+
+1. Needs
+2. Job
+3. Reservation
+4. Construction
+5. Production
+6. Morale
+7. Health
+8. Incident
+9. Economic
+
+**Phase 3B Hooks (Already Integrated):**
+
+* `CultureDriftSystem`
+* `CivilizationResilienceSystem`
+
+**Critical Execution Flow:**
+
+```
+Processors
+→ CultureDrift
+→ CivilizationResilience
+→ EventBus Flush
+```
+
+**Why This Matters:**
+
+* Ensures events generated during simulation are processed in the same frame
+* Prevents desync in Phase 3B systems
+
+**Status:** ✅ Correct and future-proof
+
+---
+
+# 💾 Save / Load System
+
+## SaveSubsystem.cpp
+
+**System:** Persistence
+
+**Responsibility:**
+
+* Serializes and restores full world state
+* Handles async save/load operations
+
+**Save Includes:**
+
+* World tiles and civilizations
+* Settlements
+* Agents
+* Job queue
+* Production tasks
+* Reservations
+* Construction tasks
+* Simulation time
+* Economy state
+
+**Critical Phase 3A Integration:**
+
+* `EconomySaveState` stored and restored
+
+**Key Functions:**
+
+* `CollectWorldState()`
+* `DistributeLoadedState()`
+
+**Restore Order:**
+
+1. Settlements
+2. Agents
+3. Reservations
+4. Construction
+5. Simulation Time
+6. Economy
+
+**Why This Matters:**
+
+* Prevents invalid references and desync
+* Required for Phase 3A Reality Gate
+
+**Status:** ✅ Correct and compliant
+
+---
+
+# 🌍 World & Civilization System
+
+## WorldMapSubsystem (Referenced)
+
+**System:** World Simulation
+
+**Responsibility:**
+
+* Stores:
+
+  * World tiles
+  * Civilization data
+  * Historical events
+
+**Required API:**
+
+* `GetCivilizations()`
+* `GetMutableCivilizations()`
+
+**Used By:**
+
+* Economy system
+* Culture system (Phase 3B)
+* Diplomacy system
+
+**Status:** ✅ Required interfaces confirmed
+
+---
+
+# 💰 Economy System
+
+## WorldEconomySimulation (Referenced)
+
+**System:** Economy Simulation
+
+**Responsibility:**
+
+* Handles:
+
+  * Currency definitions
+  * Market pricing
+  * Trade flows
+  * Trust system
+  * Black market logic
+
+**Critical API (Confirmed Present):**
+
+* `QueueTrustDelta()`
+* `ProcessCaravanTransaction()`
+* `NotifyRouteClosed()`
+* `DrainNarrativeReports()`
+* `GetEconomySaveState()`
+* `RestoreEconomyFromSave()`
+
+**Dependencies:**
+
+* SettlementManager
+* WorldMapSubsystem
+* SaveSubsystem
+
+**Status:** ✅ Structurally complete (runtime validation pending)
+
+---
+
+# 🔁 Event System
+
+## EventBus (Referenced)
+
+**System:** Simulation Events
+
+**Responsibility:**
+
+* Dispatches and queues simulation events
+* Flushes events at end of simulation step
+
+**Key Functions:**
+
+* `Dispatch()`
+* `FlushPendingEvents()`
+* `GetRecentEvents()`
+
+**Integration Point:**
+
+* Called AFTER all processors and Phase 3B systems
+
+**Status:** ✅ Correct integration point
+
+---
+
+# 🏗️ Construction System
+
+## VoxelConstructionSystem (Referenced)
+
+**System:** Building Construction
+
+**Responsibility:**
+
+* Tracks active build tasks
+* Places voxel blocks over time
+* Finalizes buildings into SettlementManager
+
+**Key Flow:**
+
+```
+ConstructionProcessor
+→ PlaceNextBlock()
+→ VoxelWorldManager
+→ PlaceVoxelBlock()
+```
+
+**Status:** ✅ Fully functional (V-H complete)
+
+---
+
+# 🧱 Build Configuration
+
+## WorldForge.Build.cs
+
+**System:** Module Configuration
+
+**Responsibility:**
+
+* Defines module dependencies
+* Configures include paths
+* Enables plugin integrations
+
+**Key Dependencies:**
+
+* GameplayTags
+* Json / JsonUtilities
+* NavigationSystem
+* ProceduralMeshComponent
+* Paper2D
+
+**Plugin Support:**
+
+* PaperZD (optional)
+* Voxel Plugin (optional)
+
+**Status:** ✅ Complete and correct
+
+---
+
+# ⚠️ Known Issues (Deferred)
+
+## GameplayTag Missing
+
+* `WorldForge.Voxel.Material.Stone`
+
+**Impact:**
+
+* Runtime ensure triggered
+* Blocks render with no material
+
+**Resolution:**
+
+* Will be fixed in Phase 3B–H tag tree implementation
+
+---
+
+# 🚨 Phase 3A Reality Gate Status
+
+## ✅ Completed
+
+* API structure
+* Save/Load integration
+* Processor order
+* Data definitions
+
+## ❌ Pending Validation
+
+* Price movement (≠ 1.0)
+* Black market activation
+* Trust delta persistence
+* PlayerCurrencyTag initialization at runtime
+
+---
+
+# 🧭 Summary
+
+| System              | Status              |
+| ------------------- | ------------------- |
+| Data Layer          | ✅ Complete          |
+| Settlement System   | ✅ Complete          |
+| Processor System    | ✅ Correct           |
+| Save/Load           | ✅ Correct           |
+| Economy (Structure) | ✅ Ready             |
+| Economy (Runtime)   | ⚠️ Needs validation |
+| Construction (V-H)  | ✅ Complete          |
+
+---

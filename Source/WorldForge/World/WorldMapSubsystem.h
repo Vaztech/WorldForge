@@ -64,6 +64,8 @@ public:
     const TArray<FCivilizationData>& GetCivilizations() const { return Civilizations; }
     const TArray<FHistoryEventData>& GetHistoryLog() const { return HistoryLog; }
 
+    TArray<FCivilizationData>& GetMutableCivilizations() { return Civilizations; } // ADDED
+
 private:
     void TickLivingWorld();
 
