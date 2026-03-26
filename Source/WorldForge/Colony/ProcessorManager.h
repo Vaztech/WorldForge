@@ -7,6 +7,10 @@
 
 class UCultureDriftSystem;             // ADDED
 class UCivilizationResilienceSystem;   // ADDED
+class UOverworldSubsystem;             // ADDED
+class UDiplomacySubsystem;             // ADDED
+class UNavalSystem;                    // ADDED
+class UCosmicSimulationSubsystem;      // ADDED
 
 UCLASS(BlueprintType)
 class WORLDFORGE_API UProcessorManager : public UWorldSubsystem
@@ -91,4 +95,8 @@ private:
 
     UPROPERTY() UCultureDriftSystem* CultureDrift = nullptr;                 // ADDED
     UPROPERTY() UCivilizationResilienceSystem* CivResilience = nullptr;      // ADDED
+    UPROPERTY() UOverworldSubsystem* Overworld = nullptr;                    // ADDED
+    UPROPERTY() UDiplomacySubsystem* Diplomacy = nullptr;                    // ADDED
+    UPROPERTY() UNavalSystem* Naval = nullptr;                               // ADDED
+    UPROPERTY() UCosmicSimulationSubsystem* CosmicSim = nullptr;             // ADDED
 };

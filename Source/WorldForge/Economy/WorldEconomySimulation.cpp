@@ -786,7 +786,10 @@ void UWorldEconomySimulation::CheckCurrencyCollapse()
 	{
 		FCurrencyDefinition& Currency = Pair.Value;
 
-		if (Currency.CurrentAnchorValue < Currency.BaseAnchorValue * 0.05f)
+		// MODIFIED:
+		// Raise collapse sensitivity from 5% to 25% of base anchor value
+		// so real long-run trust failures can actually surface in H2.
+		if (Currency.CurrentAnchorValue < Currency.BaseAnchorValue * 0.25f)
 		{
 			if (!Currency.bInCrisis)
 			{
@@ -830,13 +833,18 @@ void UWorldEconomySimulation::ScanNarrativePatterns(int32 SettlementID, int32 Cu
 				int32 HighCount = 0;
 				for (const float HistoricalPrice : *FoodHistory)
 				{
-					if (HistoricalPrice > Price.BaseAnchorValue * 3.0f)
+					// MODIFIED:
+					// Lower famine trigger from 300% of base to 180% of base
+					// so real market stress can surface as narrative.
+					if (HistoricalPrice > Price.BaseAnchorValue * 1.8f)
 					{
 						++HighCount;
 					}
 				}
 
-				if (HighCount >= 3)
+				// MODIFIED:
+				// Require 2 qualifying samples instead of 3.
+				if (HighCount >= 2)
 				{
 					TryAddNarrativeReport(
 						TAG_Economy_Pattern_Famine,
@@ -875,7 +883,11 @@ void UWorldEconomySimulation::ScanNarrativePatterns(int32 SettlementID, int32 Cu
 		}
 	}
 
-	if (BoomCount >= 5)
+	// MODIFIED:
+	// You currently track only 3 commodities (Food/Wood/Stone),
+	// so a boom threshold of 5 is unreachable. Set to 2 so the
+	// existing sim can legitimately surface boom narratives.
+	if (BoomCount >= 2)
 	{
 		TryAddNarrativeReport(
 			TAG_Economy_Pattern_Boom,
@@ -1100,6 +1112,81 @@ bool UWorldEconomySimulation::HasBlackMarket(FGameplayTag ItemTag, int32 Settlem
 		});
 
 	return Price && Price->BlackMarketPrice > 0.0f;
+}
+
+// ADDED
+void UWorldEconomySimulation::ProcessCaravanTransaction(
+	int32 BuyerSettlementID,
+	int32 SellerSettlementID,
+	int32 CaravanID)
+{
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	USettlementManager* SettlementManager = World->GetSubsystem<USettlementManager>();
+	if (!SettlementManager)
+	{
+		return;
+	}
+
+	const FSettlementState* BuyerSettlement = SettlementManager->GetSettlement(BuyerSettlementID);
+	const FSettlementState* SellerSettlement = SettlementManager->GetSettlement(SellerSettlementID);
+
+	if (!BuyerSettlement || !SellerSettlement)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[EconomySim] Caravan transaction skipped. Invalid settlement(s). Caravan=%d Buyer=%d Seller=%d"),
+			CaravanID,
+			BuyerSettlementID,
+			SellerSettlementID);
+		return;
+	}
+
+	// ADDED
+	// Recompute destination supply pressure from the stockpile state AFTER cargo delivery.
+	// This intentionally does not touch prices directly. UpdatePriceDiscovery() will react
+	// on the next economy tick, preserving determinism required by the guide.
+	for (const FGameplayTag& ItemTag : TrackedItems)
+	{
+		FMarketPrice& Price = GetOrCreatePrice(BuyerSettlementID, ItemTag);
+
+		const float CurrentStock = FMath::Max(
+			0.0f,
+			static_cast<float>(SettlementManager->GetStockpileAmount(BuyerSettlementID, ItemTag)));
+
+		const float ExpectedDemand = FMath::Max(
+			1.0f,
+			static_cast<float>(BuyerSettlement->Population) * Price.PriceElasticity * 0.5f);
+
+		Price.SupplyPressure = FMath::Clamp(
+			CurrentStock / ExpectedDemand,
+			0.0f,
+			3.0f);
+	}
+
+	// ADDED
+	// Apply/log currency exchange using existing settlement currency state.
+	// PaymentAmount is not yet available inside EconomySimulation because caravan ownership
+	// remains in the future Overworld subsystem. Keep this deterministic and log the rate now.
+	const FGameplayTag BuyerCurrency = BuyerSettlement->PlayerCurrencyTag;
+	const FGameplayTag SellerCurrency = SellerSettlement->PlayerCurrencyTag;
+	const float ExchangeRate = GetExchangeRate(BuyerCurrency, SellerCurrency);
+
+	UE_LOG(LogTemp, Log,
+		TEXT("[EconomySim] Caravan transaction processed. Caravan=%d Buyer=%d Seller=%d BuyerCur=%s SellerCur=%s Rate=%.4f"),
+		CaravanID,
+		BuyerSettlementID,
+		SellerSettlementID,
+		*BuyerCurrency.ToString(),
+		*SellerCurrency.ToString(),
+		ExchangeRate);
+
+	// ADDED
+	// Keep legacy arrays in sync in case callers inspect economy state before next full tick.
+	RebuildArraysFromLookupMaps();
 }
 
 // ── Phase 3B notification stubs ────────────────────────────────────

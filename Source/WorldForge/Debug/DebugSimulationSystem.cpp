@@ -6,6 +6,11 @@
 #include "ReservationSystem.h"
 #include "EventBus.h"
 #include "VoxelConstructionSystem.h"
+#include "OverworldSubsystem.h"              // ADDED
+#include "DiplomacySubsystem.h"              // ADDED
+#include "NavalSystem.h"                     // ADDED
+#include "CosmicSimulationSubsystem.h"       // ADDED
+#include "WorldMapSubsystem.h" // ADDED
 
 void UDebugSimulationSystem::Initialize(FSubsystemCollectionBase& C)
 {
@@ -14,7 +19,7 @@ void UDebugSimulationSystem::Initialize(FSubsystemCollectionBase& C)
     // CHANGE:
     // No architecture change here.
     // This subsystem still reads from existing world subsystems only.
-    UE_LOG(LogTemp, Log, TEXT("[DebugSim] Initialized. 11 overlays ready."));
+    UE_LOG(LogTemp, Log, TEXT("[DebugSim] Initialized. 14 overlays ready.")); // MODIFIED
 }
 
 void UDebugSimulationSystem::SetActiveOverlay(EDebugOverlay O)
@@ -29,7 +34,7 @@ void UDebugSimulationSystem::ToggleOverlay(EDebugOverlay O)
 
 void UDebugSimulationSystem::CycleToNextOverlay()
 {
-    ActiveOverlay = static_cast<EDebugOverlay>((static_cast<int32>(ActiveOverlay) + 1) % 12);
+    ActiveOverlay = static_cast<EDebugOverlay>((static_cast<int32>(ActiveOverlay) + 1) % 15); // MODIFIED
 }
 
 void UDebugSimulationSystem::OnSimulationStep(int32 S, int32)
@@ -402,6 +407,169 @@ TArray<FString> UDebugSimulationSystem::GetProcessorTimingReport() const
         }
     }
 
+    return Lines;
+}
+
+TArray<FString> UDebugSimulationSystem::GetNavalSummary() const
+{
+    TArray<FString> Lines;
+
+    UWorld* World = GetWorld();
+    if (!World)
+    {
+        Lines.Add(TEXT("World unavailable"));
+        return Lines;
+    }
+
+    if (UNavalSystem* Naval = World->GetSubsystem<UNavalSystem>())
+    {
+        const TArray<FShipData>& Ships = Naval->GetActiveShips();
+
+        Lines.Add(FString::Printf(TEXT("Ships Active=%d"), Ships.Num())); // ADDED
+
+        for (const FShipData& Ship : Ships)
+        {
+            Lines.Add(FString::Printf(
+                TEXT("Ship%d %d->%d Cargo=%d ETA=%d Blockaded=%s"),
+                Ship.ShipID,
+                Ship.OriginSettlementID,
+                Ship.DestSettlementID,
+                Ship.Cargo.Num(),
+                Ship.StepsUntilArrival,
+                Naval->IsBlockaded(Ship.DestSettlementID) ? TEXT("Yes") : TEXT("No")));
+        }
+
+        if (Ships.Num() == 0)
+        {
+            Lines.Add(TEXT("No active ships"));
+        }
+
+        return Lines;
+    }
+
+    Lines.Add(TEXT("NavalSystem unavailable"));
+    return Lines;
+}
+
+TArray<FString> UDebugSimulationSystem::GetCosmicSummary() const
+{
+    TArray<FString> Lines;
+
+    UWorld* World = GetWorld();
+    if (!World)
+    {
+        Lines.Add(TEXT("World unavailable"));
+        return Lines;
+    }
+
+    if (UCosmicSimulationSubsystem* Cosmic = World->GetSubsystem<UCosmicSimulationSubsystem>())
+    {
+        const FNarrativePressureState& Pressure = Cosmic->GetNarrativePressure();
+
+        // ADDED
+        // H2 keeps this summary string-based and display-only.
+        Lines.Add(FString::Printf(
+            TEXT("Pressure War=%.1f Commerce=%.1f Fear=%.1f Cosmic=%.1f"),
+            Pressure.War,
+            Pressure.Commerce,
+            Pressure.Fear,
+            Pressure.CosmicUnstable));
+
+        // ADDED
+        // Summary for known domains using existing query API.
+        const TArray<FGameplayTag> ProbeTags =
+        {
+            FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Cosmic.Domain.War")), false),
+            FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Cosmic.Domain.Commerce")), false),
+            FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Cosmic.Domain.Fear")), false),
+            FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Cosmic.Domain.Water")), false)
+        };
+
+        bool bAnyFound = false;
+        for (const FGameplayTag& Tag : ProbeTags)
+        {
+            if (!Tag.IsValid())
+            {
+                continue;
+            }
+
+            const FCosmicEntityState* State = Cosmic->GetEntityState(Tag);
+            if (!State)
+            {
+                continue;
+            }
+
+            bAnyFound = true;
+            Lines.Add(FString::Printf(
+                TEXT("%s Status=%d Power=%.2f"),
+                *Tag.ToString(),
+                static_cast<int32>(State->Status),
+                State->TotalPower));
+        }
+
+        if (!bAnyFound)
+        {
+            Lines.Add(TEXT("No registered cosmic entities found"));
+        }
+
+        return Lines;
+    }
+
+    Lines.Add(TEXT("CosmicSimulationSubsystem unavailable"));
+    return Lines;
+}
+
+TArray<FString> UDebugSimulationSystem::GetDiplomacySummary() const
+{
+    TArray<FString> Lines;
+
+    UWorld* World = GetWorld();
+    if (!World)
+    {
+        Lines.Add(TEXT("World unavailable"));
+        return Lines;
+    }
+
+    if (UDiplomacySubsystem* Diplomacy = World->GetSubsystem<UDiplomacySubsystem>())
+    {
+        // ADDED
+        // H2 stays minimal: summarize pair relationships across current civilizations.
+        if (UWorldMapSubsystem* WM = World->GetSubsystem<UWorldMapSubsystem>())
+        {
+            const TArray<FCivilizationData>& Civs = WM->GetCivilizations();
+
+            if (Civs.Num() < 2)
+            {
+                Lines.Add(TEXT("Not enough civilizations"));
+                return Lines;
+            }
+
+            for (int32 i = 0; i < Civs.Num(); ++i)
+            {
+                for (int32 j = i + 1; j < Civs.Num(); ++j)
+                {
+                    const int32 CivA = Civs[i].CivID;
+                    const int32 CivB = Civs[j].CivID;
+                    const float Rel = Diplomacy->GetRelationship(CivA, CivB);
+
+                    Lines.Add(FString::Printf(
+                        TEXT("Civ%d<->Civ%d Rel=%.1f War=%s Embargo=%s"),
+                        CivA,
+                        CivB,
+                        Rel,
+                        Diplomacy->IsAtWar(CivA, CivB) ? TEXT("Yes") : TEXT("No"),
+                        Diplomacy->IsEmbargoActive(CivA, CivB) ? TEXT("Yes") : TEXT("No")));
+                }
+            }
+
+            return Lines;
+        }
+
+        Lines.Add(TEXT("WorldMapSubsystem unavailable"));
+        return Lines;
+    }
+
+    Lines.Add(TEXT("DiplomacySubsystem unavailable"));
     return Lines;
 }
 

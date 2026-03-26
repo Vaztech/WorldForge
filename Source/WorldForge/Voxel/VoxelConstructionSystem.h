@@ -21,6 +21,16 @@ public:
     UFUNCTION(BlueprintCallable)
     int32 StartBuildTask(int32 SID, FGameplayTag BuildTag, FIntPoint Origin, int32 AgentID);
 
+    // Starts a custom construction task using an explicit list of grid cells
+    // instead of the legacy prefab footprint logic.
+    // This is the minimal Section I entry point for player-authored shapes.
+    int32 StartCustomBuildTask(
+        int32 SID,
+        const TArray<FIntPoint>& Blocks,
+        FGameplayTag MaterialTag,
+        int32 AgentID
+    );
+
     bool PlaceNextBlock(int32 TaskID, UWorld* World);
     bool IsTaskComplete(int32 TaskID) const;
     bool HasActiveTask(int32 SID, FGameplayTag BuildTag) const;
@@ -37,6 +47,20 @@ private:
     void FinalizeBuilding(const FActiveBuildTask& Task, UWorld* World);
 
     int32 GetBlockCount(FGameplayTag BuildTag) const;
+
+    // Resolve which stockpile item should gate this build.
+    // For now this is intentionally minimal and deterministic:
+    // voxel wood -> Item.Wood
+    // everything else defaults to Item.Stone
+    FGameplayTag ResolveRequiredStockpileItem(FGameplayTag MaterialTag) const;
+
+    // Returns true only if settlement has enough material in stockpile
+    // to create the task up front.
+    bool HasEnoughStockpileForTask(
+        int32 SettlementID,
+        FGameplayTag MaterialTag,
+        int32 RequiredUnits,
+        UWorld* World) const;
 
     TArray<FActiveBuildTask> ActiveTasks;
 

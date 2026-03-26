@@ -65,6 +65,8 @@ public class WorldForge : ModuleRules
             Path.Combine(ModuleDirectory, "Visual"),
             Path.Combine(ModuleDirectory, "Races"),
             Path.Combine(ModuleDirectory, "Civilization"),
+            Path.Combine(ModuleDirectory, "Overworld"),
+            Path.Combine(ModuleDirectory, "Cosmic"), // ADDED
         });
 
         // =========================

@@ -62,8 +62,11 @@ public:
     UPROPERTY(BlueprintAssignable)
     FOnSimulationStep OnSimulationStep;
 
+    // MODIFIED:
+    // Faster default fixed-step cadence for long-run validation.
+    // Was 0.2f (5 steps/sec), now 0.1f (10 steps/sec).
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Simulation")
-    float FixedStepInterval = 0.2f;
+    float FixedStepInterval = 0.1f;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Simulation")
     int32 StepsPerDay = 50;
@@ -71,9 +74,12 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Simulation")
     int32 DaysPerYear = 100;
 
-    // Max steps fired per render frame. Prevents spiral on hitches.
+    // MODIFIED:
+    // Raise the per-frame cap so time acceleration can actually advance the sim
+    // without hitting the limiter too early during fast-forward tests.
+    // Was 10.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Simulation")
-    int32 MaxStepsPerFrame = 10;
+    int32 MaxStepsPerFrame = 100;
 
     int32 GetTotalStepCount() const { return StepNumber; }
     void RestoreStepCount(int32 Step, int32 Day, int32 Year);

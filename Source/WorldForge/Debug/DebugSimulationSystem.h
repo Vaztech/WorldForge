@@ -24,7 +24,10 @@ enum class EDebugOverlay : uint8
     JobQueueDisplay,
     MoraleBreakdown,
     IncidentEventLog,
-    ProcessorTiming
+    ProcessorTiming,
+    NavalSummary,        // ADDED
+    CosmicSummary,       // ADDED
+    DiplomacySummary     // ADDED
 };
 
 /*
@@ -112,6 +115,15 @@ public:
 
     UFUNCTION(BlueprintPure, Category = "WorldForge|Debug|Timing")
     TArray<FString> GetProcessorTimingReport() const;
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Debug|Naval")
+    TArray<FString> GetNavalSummary() const; // ADDED
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Debug|Cosmic")
+    TArray<FString> GetCosmicSummary() const; // ADDED
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Debug|Diplomacy")
+    TArray<FString> GetDiplomacySummary() const; // ADDED
 
     UFUNCTION(BlueprintCallable, Category = "WorldForge|Debug|Timing")
     void OnSimulationStep(int32 StepNumber, int32 SID);

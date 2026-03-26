@@ -6,7 +6,7 @@
 #include "../Data/WorldForgeDataTypes.h"
 #include "VoxelWorldManager.generated.h"
 
-UCLASS(BlueprintType)
+UCLASS(BlueprintType, Blueprintable)
 class WORLDFORGE_API UVoxelWorldManager : public UWorldSubsystem
 {
     GENERATED_BODY()
@@ -26,6 +26,19 @@ public:
     // Converts sim grid coordinates into UE world coordinates.
     UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
     FVector GridToWorld(FIntPoint GridCell, int32 ZLevel = 0) const;
+
+    // ADDED:
+    // Converts UE world coordinates back into sim grid coordinates.
+    // This is the BP-safe inverse helper for click-to-build workflows.
+    // Uses voxel-world origin offset when available and center-based snapping.
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
+    FIntPoint WorldToGrid(FVector WorldPosition) const;
+
+    // ADDED:
+    // 3D helper for future vertical build workflows.
+    // Current player flow is XY-only, so this is additive and does not break existing BP.
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
+    FIntVector WorldToGrid3D(FVector WorldPosition) const;
 
     // Existing system: biome/chunk application pipeline
     UFUNCTION(BlueprintCallable, Category = "WorldForge|Voxel")
@@ -51,6 +64,12 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Voxel")
     float VoxelSize = 100.0f;
 
+    // ADDED:
+    // Optional debug logging for click-to-grid conversion validation.
+    // Useful for confirming repeated clicks on the same tile resolve to the same grid cell.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Voxel|Debug")
+    bool bLogGridConversions = true;
+
 protected:
     // Existing BP bridge events
     UFUNCTION(BlueprintImplementableEvent, Category = "WorldForge|Voxel")
@@ -63,6 +82,11 @@ protected:
     void OnVoxelDigged(FVector WorldPosition);
 
 private:
+    // ADDED:
+    // Returns the voxel-world origin if the actor is available.
+    // Falls back to world zero if no voxel actor is currently cached/found.
+    FVector GetVoxelWorldOrigin() const;
+
     // Added Phase V-C cache
     UPROPERTY()
     AActor* VoxelWorldActor = nullptr;

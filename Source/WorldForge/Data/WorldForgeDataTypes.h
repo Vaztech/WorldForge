@@ -119,6 +119,22 @@ enum class EJobPriority : uint8
     Idle = 0 UMETA(DisplayName = "Idle")
 };
 
+// ADDED
+// Section I / Milestone D:
+// High-level purpose category used by prefab selection and future UI.
+UENUM(BlueprintType)
+enum class EBuildingPurpose : uint8
+{
+    Housing        UMETA(DisplayName = "Housing"),
+    Storage        UMETA(DisplayName = "Storage"),
+    Production     UMETA(DisplayName = "Production"),
+    Defense        UMETA(DisplayName = "Defense"),
+    Infrastructure UMETA(DisplayName = "Infrastructure"),
+    Spiritual      UMETA(DisplayName = "Spiritual"),
+    Economic       UMETA(DisplayName = "Economic"),
+    Decorative     UMETA(DisplayName = "Decorative")
+};
+
 // ═══════════════════════════════════════════════════════════════════
 // FOG OF WAR
 // ═══════════════════════════════════════════════════════════════════
@@ -243,6 +259,14 @@ struct FCivilizationData
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) bool bCollapsed = false;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TArray<int32> ControlledTileIDs;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TArray<int32> HistoryEventIDs;
+
+    // ADDED -- BF-01: persisted real population total for civ health scoring.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 TotalPopulation = 0;
+
+    // ADDED -- BF-01
+    // Populated every 100 steps by UCivilizationResilienceSystem::OnSimStep().
+    // Sums FSettlementState.Population for all settlements on tiles this civ controls.
+    // Defaults to 0 so existing saves load cleanly without migration.
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -513,6 +537,17 @@ struct FActiveBuildTask
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) int32 PlacedBlocks = 0;
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) int32 AssignedAgentID = -1;
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) bool bComplete = false;
+
+    // ADDED
+    // Optional explicit block list for custom / player-authored builds.
+    // When populated, construction places these cells directly instead of
+    // using the legacy 2x2 layered prefab footprint.
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) TArray<FIntPoint> BlockList;
+
+    // ADDED
+    // Material used by PlaceNextBlock().
+    // Existing prefab tasks still default to stone if this tag is not valid.
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) FGameplayTag MaterialTag;
 };
 
 // Job queue entry posted by systems and consumed by UJobProcessor.
@@ -728,7 +763,6 @@ struct FCaravanData
     UPROPERTY(SaveGame) bool bOutbound = true;
 };
 
-// ADDED
 UENUM()
 enum class EOutpostType : uint8
 {

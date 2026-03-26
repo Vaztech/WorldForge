@@ -47,6 +47,10 @@ UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Skill_Crafting);
 UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Skill_Hauling);
 UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Skill_Building);
 
+// ---- Race mechanic tags --------------------------------------------
+// ADDED
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Race_Mechanic_PressureLimit);
+
 // ---- Currency tags -------------------------------------------------
 UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Currency_Barter);
 
@@ -67,6 +71,16 @@ UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Sim_Event_ColonistDied);
 UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Sim_Event_ColonistInjured);
 UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Sim_Event_MoraleCrisis);
 UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Sim_Event_StockpileEmpty);
+
+// ADDED
+// ---- Building tags -------------------------------------------------
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Building_Housing_Hut);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Building_Storage_Stockpile);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Building_Production_Kitchen);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Building_Production_Carpenter);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Building_Defense_Barracks);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Building_Spiritual_Shrine);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Building_Economic_MarketStall);
 
 // ====================================================================
 // Blueprint Access Library
@@ -204,4 +218,26 @@ public:
 
     UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Event")
     static FGameplayTag GetStockpileEmptyEventTag();
+
+    // ADDED
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Building")
+    static FGameplayTag GetBuildingHousingHutTag();
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Building")
+    static FGameplayTag GetBuildingStorageStockpileTag();
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Building")
+    static FGameplayTag GetBuildingProductionKitchenTag();
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Building")
+    static FGameplayTag GetBuildingProductionCarpenterTag();
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Building")
+    static FGameplayTag GetBuildingDefenseBarracksTag();
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Building")
+    static FGameplayTag GetBuildingSpiritualShrineTag();
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Building")
+    static FGameplayTag GetBuildingEconomicMarketStallTag();
 };

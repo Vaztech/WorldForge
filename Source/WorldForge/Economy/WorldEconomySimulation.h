@@ -86,6 +86,16 @@ public:
     UFUNCTION(BlueprintCallable, Category = "WorldForge|Economy")
     bool HasBlackMarket(FGameplayTag ItemTag, int32 SettlementID) const;
 
+    // ADDED
+    // Section C hard prerequisite.
+    // Called on caravan arrival after stockpile delivery has already occurred.
+    // Recomputes destination supply pressure deterministically and logs currency exchange.
+    // Does NOT modify prices immediately.
+    void ProcessCaravanTransaction(
+        int32 BuyerSettlementID,
+        int32 SellerSettlementID,
+        int32 CaravanID);
+
     // ── Phase 3B event notifications (stubs in 3A) ──────────────────
     void NotifyWarStarted(int32 AttackerCivID, int32 DefenderCivID);
     void NotifyWarEnded(int32 WinnerCivID, int32 LoserCivID);

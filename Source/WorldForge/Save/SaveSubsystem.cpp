@@ -14,6 +14,13 @@
 #include "JobProcessor.h"
 #include "ProductionProcessor.h"
 
+// Phase 3B additions
+#include "OverworldSubsystem.h"              // ADDED
+#include "DiplomacySubsystem.h"              // ADDED
+#include "NavalSystem.h"                     // ADDED
+#include "CosmicSimulationSubsystem.h"       // ADDED
+#include "CivilizationResilienceSystem.h"    // ADDED
+
 void USaveSubsystem::Initialize(FSubsystemCollectionBase& C)
 {
     Super::Initialize(C);
@@ -206,6 +213,36 @@ UWorldForgeSaveGame* USaveSubsystem::CollectWorldState(UWorld* W, const FString&
         S->EconomySaveState = Econ->GetEconomySaveState();
     }
 
+    // Phase 3B: overworld state
+    if (UOverworldSubsystem* Overworld = W->GetSubsystem<UOverworldSubsystem>())
+    {
+        S->OverworldSaveState = Overworld->GetOverworldSaveState(); // ADDED
+    }
+
+    // Phase 3B: diplomacy state
+    if (UDiplomacySubsystem* Diplomacy = W->GetSubsystem<UDiplomacySubsystem>())
+    {
+        S->DiplomacySaveState = Diplomacy->GetDiplomacySaveState(); // ADDED
+    }
+
+    // Phase 3B: naval state
+    if (UNavalSystem* Naval = W->GetSubsystem<UNavalSystem>())
+    {
+        S->NavalSaveState = Naval->GetNavalSaveState(); // ADDED
+    }
+
+    // Phase 3B: cosmic state
+    if (UCosmicSimulationSubsystem* Cosmic = W->GetSubsystem<UCosmicSimulationSubsystem>())
+    {
+        S->CosmicSaveState = Cosmic->GetCosmicSaveState(); // ADDED
+    }
+
+    // Phase 3B: resilience state
+    if (UCivilizationResilienceSystem* Resilience = W->GetSubsystem<UCivilizationResilienceSystem>())
+    {
+        S->ResilienceSaveState = Resilience->GetResilienceSaveState(); // ADDED
+    }
+
     return S;
 }
 
@@ -264,6 +301,38 @@ void USaveSubsystem::DistributeLoadedState(UWorldForgeSaveGame* S, UWorld* W)
     if (UWorldEconomySimulation* Econ = W->GetSubsystem<UWorldEconomySimulation>())
     {
         Econ->RestoreEconomyFromSave(S->EconomySaveState);
+    }
+
+    // Phase 3B: restore in strict dependency order
+
+    // 1. Overworld
+    if (UOverworldSubsystem* Overworld = W->GetSubsystem<UOverworldSubsystem>())
+    {
+        Overworld->RestoreOverworldFromSave(S->OverworldSaveState); // ADDED
+    }
+
+    // 2. Diplomacy
+    if (UDiplomacySubsystem* Diplomacy = W->GetSubsystem<UDiplomacySubsystem>())
+    {
+        Diplomacy->RestoreDiplomacyFromSave(S->DiplomacySaveState); // ADDED
+    }
+
+    // 3. Naval
+    if (UNavalSystem* Naval = W->GetSubsystem<UNavalSystem>())
+    {
+        Naval->RestoreNavalFromSave(S->NavalSaveState); // ADDED
+    }
+
+    // 4. Cosmic
+    if (UCosmicSimulationSubsystem* Cosmic = W->GetSubsystem<UCosmicSimulationSubsystem>())
+    {
+        Cosmic->RestoreCosmicFromSave(S->CosmicSaveState); // ADDED
+    }
+
+    // 5. Resilience
+    if (UCivilizationResilienceSystem* Resilience = W->GetSubsystem<UCivilizationResilienceSystem>())
+    {
+        Resilience->RestoreResilienceFromSave(S->ResilienceSaveState); // ADDED
     }
 }
 

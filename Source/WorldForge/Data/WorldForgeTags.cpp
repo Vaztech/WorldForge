@@ -31,6 +31,9 @@ UE_DEFINE_GAMEPLAY_TAG(TAG_Skill_Crafting, "WorldForge.Skill.Crafting");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Skill_Hauling, "WorldForge.Skill.Hauling");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Skill_Building, "WorldForge.Skill.Building");
 
+// ---- Race mechanic tags --------------------------------------------
+UE_DEFINE_GAMEPLAY_TAG(TAG_Race_Mechanic_PressureLimit, "WorldForge.Race.Mechanic.PressureLimit");
+
 // ---- Currency tags -------------------------------------------------
 UE_DEFINE_GAMEPLAY_TAG(TAG_Currency_Barter, "WorldForge.Currency.Barter");
 
@@ -51,6 +54,16 @@ UE_DEFINE_GAMEPLAY_TAG(TAG_Sim_Event_ColonistDied, "WorldForge.Sim.Event.Colonis
 UE_DEFINE_GAMEPLAY_TAG(TAG_Sim_Event_ColonistInjured, "WorldForge.Sim.Event.ColonistInjured");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Sim_Event_MoraleCrisis, "WorldForge.Sim.Event.MoraleCrisis");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Sim_Event_StockpileEmpty, "WorldForge.Sim.Event.StockpileEmpty");
+
+// ADDED
+// ---- Building tags -------------------------------------------------
+UE_DEFINE_GAMEPLAY_TAG(TAG_Building_Housing_Hut, "WorldForge.Building.Housing.Hut");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Building_Storage_Stockpile, "WorldForge.Building.Storage.Stockpile");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Building_Production_Kitchen, "WorldForge.Building.Production.Kitchen");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Building_Production_Carpenter, "WorldForge.Building.Production.Carpenter");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Building_Defense_Barracks, "WorldForge.Building.Defense.Barracks");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Building_Spiritual_Shrine, "WorldForge.Building.Spiritual.Shrine");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Building_Economic_MarketStall, "WorldForge.Building.Economic.MarketStall");
 
 // ====================================================================
 // UWorldForgeTagLibrary -- Blueprint accessors for native tags
@@ -260,4 +273,41 @@ FGameplayTag UWorldForgeTagLibrary::GetMoraleCrisisEventTag()
 FGameplayTag UWorldForgeTagLibrary::GetStockpileEmptyEventTag()
 {
     return TAG_Sim_Event_StockpileEmpty;
+}
+
+// ADDED
+// ---- Building tags -------------------------------------------------
+FGameplayTag UWorldForgeTagLibrary::GetBuildingHousingHutTag()
+{
+    return TAG_Building_Housing_Hut;
+}
+
+FGameplayTag UWorldForgeTagLibrary::GetBuildingStorageStockpileTag()
+{
+    return TAG_Building_Storage_Stockpile;
+}
+
+FGameplayTag UWorldForgeTagLibrary::GetBuildingProductionKitchenTag()
+{
+    return TAG_Building_Production_Kitchen;
+}
+
+FGameplayTag UWorldForgeTagLibrary::GetBuildingProductionCarpenterTag()
+{
+    return TAG_Building_Production_Carpenter;
+}
+
+FGameplayTag UWorldForgeTagLibrary::GetBuildingDefenseBarracksTag()
+{
+    return TAG_Building_Defense_Barracks;
+}
+
+FGameplayTag UWorldForgeTagLibrary::GetBuildingSpiritualShrineTag()
+{
+    return TAG_Building_Spiritual_Shrine;
+}
+
+FGameplayTag UWorldForgeTagLibrary::GetBuildingEconomicMarketStallTag()
+{
+    return TAG_Building_Economic_MarketStall;
 }

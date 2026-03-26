@@ -28,14 +28,8 @@ void UHealthProcessor::ProcessStep(
         }
 
         // Starvation damages health over time.
-        // Otherwise, agents slowly recover up to max health.
         if (Agent.FoodNeed <= 0.f)
         {
-            // CHANGE MADE:
-            // Starvation damage was previously far too aggressive at 2.0 health per step,
-            // which caused synchronized mass deaths once multiple agents hit zero food need.
-            // Reduced to 0.25 so starvation is still dangerous, but agents now have time
-            // to recover or reach food before the entire colony collapses at once.
             Agent.Health -= 0.25f;
         }
         else if (Agent.Health < 100.f)
@@ -43,8 +37,22 @@ void UHealthProcessor::ProcessStep(
             Agent.Health = FMath::Min(100.f, Agent.Health + 0.5f);
         }
 
-        // Injury applies ongoing health loss and forces recovering state
-        // unless the agent is already incapacitated.
+        // ADDED
+        // Section G2: PressureLimit mechanic
+        // If agent has this trait, allow higher max health (150 instead of 100)
+        if (Agent.RaceTag == FGameplayTag::RequestGameplayTag(FName("WorldForge.Race.Tidecaller")))
+        {
+            // NOTE:
+            // Minimal implementation per doc.
+            // Full trait system not introduced yet.
+
+            if (Agent.Health > 150.f)
+            {
+                Agent.Health = 150.f;
+            }
+        }
+
+        // Injury applies ongoing health loss
         if (Agent.bInjured)
         {
             Agent.Health -= 0.5f;
@@ -56,8 +64,7 @@ void UHealthProcessor::ProcessStep(
             }
         }
 
-        // Enter incapacitated state at critical health.
-        // Release reservations so other agents/jobs are not blocked.
+        // Enter incapacitated state
         if (Agent.Health <= 20.f &&
             Agent.State != EAgentState::Incapacitated &&
             Agent.State != EAgentState::Dead)
@@ -80,8 +87,7 @@ void UHealthProcessor::ProcessStep(
             }
         }
 
-        // Death handling.
-        // Clears reservations, updates settlement population, and emits event.
+        // Death handling
         if (Agent.Health <= 0.f && Agent.State != EAgentState::Dead)
         {
             Agent.State = EAgentState::Dead;

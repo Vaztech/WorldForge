@@ -55,6 +55,15 @@ public:
     UPROPERTY(SaveGame) TArray<FActiveProductionTask> ActiveProductionTasks;
 
     // ====================================================================
+    // PHASE 3B SYSTEM SAVE STATE
+    // ====================================================================
+    UPROPERTY(SaveGame) FOverworldSaveState   OverworldSaveState;    // ADDED
+    UPROPERTY(SaveGame) FDiplomacySaveState   DiplomacySaveState;    // ADDED
+    UPROPERTY(SaveGame) FNavalSaveState       NavalSaveState;        // ADDED
+    UPROPERTY(SaveGame) FCosmicSaveState      CosmicSaveState;       // ADDED
+    UPROPERTY(SaveGame) FResilienceSaveState  ResilienceSaveState;   // ADDED
+
+    // ====================================================================
     // SIMULATION TIME
     // ====================================================================
     UPROPERTY(SaveGame) int32 SimStepNumber = 0;

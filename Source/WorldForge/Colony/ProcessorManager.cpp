@@ -10,18 +10,20 @@
 #include "Processors/IncidentProcessor.h"
 #include "Processors/EconomicProcessor.h"
 
-#include "ColonistVisualManager.h"   // NEW: spawn visual actors when agents are registered
+#include "ColonistVisualManager.h"
 #include "EventBus.h"
 #include "SimulationTimeManager.h"
 #include "WorldForgeTags.h"
 #include "HAL/PlatformTime.h"
-#include "CultureDriftSystem.h"                // ADDED
-#include "CivilizationResilienceSystem.h"      // ADDED
+#include "CultureDriftSystem.h"
+#include "CivilizationResilienceSystem.h"
+#include "OverworldSubsystem.h"
+#include "DiplomacySubsystem.h"
+#include "NavalSystem.h"
+#include "CosmicSimulationSubsystem.h"
+#include "../Core/Narrative/CommandersDeskManager.h"
 
-// =====================================================
-// CHANGE MADE:
 // Required for FGameplayTag::RequestGameplayTag
-// =====================================================
 #include "GameplayTagContainer.h"
 
 void UProcessorManager::Initialize(FSubsystemCollectionBase& Collection)
@@ -32,13 +34,15 @@ void UProcessorManager::Initialize(FSubsystemCollectionBase& Collection)
 
     InitializeProcessors();
 
-    // ADDED
-    // Cache Section B world-level systems.
-    // These are invoked after colony processors and before EventBus flush.
+    // Cache world-level simulation subsystems.
     if (UWorld* World = GetWorld())
     {
         CultureDrift = World->GetSubsystem<UCultureDriftSystem>();
         CivResilience = World->GetSubsystem<UCivilizationResilienceSystem>();
+        Overworld = World->GetSubsystem<UOverworldSubsystem>();
+        Diplomacy = World->GetSubsystem<UDiplomacySubsystem>();
+        Naval = World->GetSubsystem<UNavalSystem>();
+        CosmicSim = World->GetSubsystem<UCosmicSimulationSubsystem>();
     }
 
     UE_LOG(
@@ -76,9 +80,12 @@ void UProcessorManager::Deinitialize()
 
     SettlementAgentScratch.Reset();
 
-    // ADDED
     CultureDrift = nullptr;
     CivResilience = nullptr;
+    Overworld = nullptr;
+    Diplomacy = nullptr;
+    Naval = nullptr;
+    CosmicSim = nullptr;
 
     Super::Deinitialize();
 }
@@ -137,7 +144,6 @@ void UProcessorManager::RunSimulationStep(int32 StepNumber)
             ProcessorTimingsMs[i] += static_cast<float>((FPlatformTime::Seconds() - T0) * 1000.0);
         }
 
-        // ADDED
         // Section B world-level systems must run after all colony processors
         // and before EventBus flush so queued events land in the same flush.
         if (CultureDrift)
@@ -148,6 +154,34 @@ void UProcessorManager::RunSimulationStep(int32 StepNumber)
         if (CivResilience)
         {
             CivResilience->OnSimStep(StepNumber, SID, Agents, World);
+        }
+
+        // Section C overworld system runs after Section B systems
+        // and before EventBus flush.
+        if (Overworld)
+        {
+            Overworld->OnSimStep(StepNumber, SID, Agents, World);
+        }
+
+        // Section D diplomacy system runs after Overworld
+        // and before EventBus flush.
+        if (Diplomacy)
+        {
+            Diplomacy->OnSimStep(StepNumber, SID, Agents, World);
+        }
+
+        // Section E naval system runs after Diplomacy
+        // and before EventBus flush.
+        if (Naval)
+        {
+            Naval->OnSimStep(StepNumber, SID, Agents, World);
+        }
+
+        // Section F cosmic system runs after Naval
+        // and before EventBus flush.
+        if (CosmicSim)
+        {
+            CosmicSim->OnSimStep(StepNumber, SID, Agents, World);
         }
     }
 
@@ -165,6 +199,14 @@ void UProcessorManager::RunSimulationStep(int32 StepNumber)
     if (UEventBus* Bus = World->GetSubsystem<UEventBus>())
     {
         Bus->FlushPendingEvents();
+    }
+
+    // H2 authoritative desk path:
+    // drain economy narrative reports only after all processors have run
+    // and after EventBus flush has surfaced any cosmic narrative beats.
+    if (UCommandersDeskManager* Desk = World->GetSubsystem<UCommandersDeskManager>())
+    {
+        Desk->DrainNarrativeReports();
     }
 }
 
@@ -189,11 +231,8 @@ void UProcessorManager::RegisterAgent(const FAgentData& A)
 
     FAgentData NewAgent = A;
 
-    // =====================================================
-    // CHANGE MADE:
     // Ensure agent always has a valid RaceTag for visual system.
-    // Without this, Blueprint resolves None → no sprite renders.
-    // =====================================================
+    // Without this, Blueprint resolves None -> no sprite renders.
     if (!NewAgent.RaceTag.IsValid())
     {
         NewAgent.RaceTag = FGameplayTag::RequestGameplayTag(
@@ -214,7 +253,6 @@ void UProcessorManager::RegisterAgent(const FAgentData& A)
     Agents.Add(NewAgent);
     RegisterSettlement(NewAgent.SettlementID);
 
-    // NEW:
     // Automatically make sure visual actors exist for this settlement as soon as
     // agents are registered. This removes the need for a separate Blueprint call.
     if (UWorld* World = GetWorld())
@@ -245,10 +283,7 @@ void UProcessorManager::SpawnTestAgent(int32 AgentID, int32 SettlementID, FIntPo
     Agent.Skills.Add(TAG_Skill_Hauling, 25.f);
     Agent.Skills.Add(TAG_Skill_Mining, 25.f);
 
-    // =====================================================
-    // CHANGE MADE:
-    // Assign default race so test agents render correctly
-    // =====================================================
+    // Assign default race so test agents render correctly.
     Agent.RaceTag = FGameplayTag::RequestGameplayTag(
         FName("WorldForge.Race.Dwarf")
     );
