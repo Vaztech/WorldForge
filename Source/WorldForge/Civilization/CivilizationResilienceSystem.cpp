@@ -85,9 +85,13 @@ float UCivilizationResilienceSystem::ComputeCivHealth(const FCivilizationData& C
 
 float UCivilizationResilienceSystem::DeriveTerritoryScore(const FCivilizationData& Civ) const
 {
-    // ADDED
-    // Guide proxy preserved: TechLevel is used until real territory fields exist.
-    return FMath::Clamp(static_cast<float>(Civ.TechLevel) / 10.0f, 0.0f, 1.0f);
+    // MODIFIED -- BF-02: use real controlled territory instead of TechLevel proxy.
+    // ControlledTileIDs is maintained by UWorldMapSubsystem each world tick.
+    // 20 tiles = full score; 0 tiles = zero.
+    return FMath::Clamp(
+        static_cast<float>(Civ.ControlledTileIDs.Num()) / 20.0f,
+        0.0f,
+        1.0f);
 }
 
 float UCivilizationResilienceSystem::DeriveEconomyScore(
