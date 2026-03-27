@@ -18,8 +18,8 @@ void UCivilizationResilienceSystem::Deinitialize()
 void UCivilizationResilienceSystem::OnSimStep(int32 StepNumber, int32 SettlementID,
     TArray<FAgentData>& Agents, UWorld* World)
 {
-    (void)SettlementID; // ADDED
-    (void)Agents;       // ADDED
+    (void)SettlementID; // KEPT EXISTING
+    (void)Agents;       // KEPT EXISTING
 
     if (!World) return;
     if (StepNumber % LivingWorldTickInterval != 0) return;
@@ -85,9 +85,7 @@ float UCivilizationResilienceSystem::ComputeCivHealth(const FCivilizationData& C
 
 float UCivilizationResilienceSystem::DeriveTerritoryScore(const FCivilizationData& Civ) const
 {
-    // MODIFIED -- BF-02: use real controlled territory instead of TechLevel proxy.
-    // ControlledTileIDs is maintained by UWorldMapSubsystem each world tick.
-    // 20 tiles = full score; 0 tiles = zero.
+    // KEPT (BF-02)
     return FMath::Clamp(
         static_cast<float>(Civ.ControlledTileIDs.Num()) / 20.0f,
         0.0f,
@@ -98,32 +96,59 @@ float UCivilizationResilienceSystem::DeriveEconomyScore(
     const FCivilizationData& Civ,
     UWorldEconomySimulation* EconSim) const
 {
-    if (!EconSim) return 0.5f;
+    // MODIFIED -- BF-03: use real currency state from economy system
+    if (!EconSim)
+    {
+        return 0.5f;
+    }
 
-    const FGovernmentEconomicProfile* Gov = EconSim->GetGovernment(Civ.CivID);
-    if (!Gov) return 0.5f;
+    const TArray<FCurrencyDefinition>& AllCurrencies = EconSim->GetAllCurrencies(); // CORRECT ACCESSOR
 
-    return FMath::Clamp(Gov->EnforcementBudget, 0.0f, 1.0f);
+    const FCurrencyDefinition* FoundCurrency = nullptr;
+
+    for (const FCurrencyDefinition& Currency : AllCurrencies)
+    {
+        if (Currency.CurrencyTag == Civ.CurrencyTag)
+        {
+            FoundCurrency = &Currency;
+            break;
+        }
+    }
+
+    if (!FoundCurrency)
+    {
+        return 0.5f;
+    }
+
+    // Anchor reflects macro economic strength
+    const float AnchorScore = FMath::Clamp(
+        FoundCurrency->CurrentAnchorValue / FMath::Max(1.0f, FoundCurrency->BaseAnchorValue),
+        0.0f,
+        1.0f);
+
+    // Trust reflects stability
+    const float TrustScore = FMath::Clamp(
+        FoundCurrency->TrustState.GovernmentCredibility,
+        0.0f,
+        1.0f);
+
+    return FMath::Clamp((AnchorScore * 0.6f) + (TrustScore * 0.4f), 0.0f, 1.0f);
 }
 
 float UCivilizationResilienceSystem::DerivePopulationScore(const FCivilizationData& Civ) const
 {
-    (void)Civ; // ADDED
-    return 0.5f; // ADDED
+    (void)Civ;
+    return 0.5f;
 }
 
 float UCivilizationResilienceSystem::DeriveMilitaryScore(const FCivilizationData& Civ) const
 {
-    // MODIFIED
-    // Actual project uses FCultureData fields, not TArray<float>.
     return FMath::Clamp(Civ.CulturalDNA.Militarism / 100.0f, 0.0f, 1.0f);
 }
 
 ECivilizationCollapseType UCivilizationResilienceSystem::DetermineCollapseType(
     const FCivilizationData& Civ) const
 {
-    // MODIFIED
-    // Actual project uses FCultureData fields, not TArray<float>.
     const float Militarism = Civ.CulturalDNA.Militarism;
     const float Expansion = Civ.CulturalDNA.ExpansionDrive;
 
@@ -135,8 +160,6 @@ ECivilizationCollapseType UCivilizationResilienceSystem::DetermineCollapseType(
 void UCivilizationResilienceSystem::TriggerCollapse(
     FCivilizationData& Civ, int32 StepNumber, UWorld* World)
 {
-    // MODIFIED
-    // Keep the actual civilization state in sync with the resilience record.
     Civ.bCollapsed = true;
 
     DispatchCollapseEvent(Civ, StepNumber, World);
@@ -152,12 +175,10 @@ void UCivilizationResilienceSystem::DispatchCollapseEvent(
     FSimulationEvent E;
     E.EventType = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Sim.Event.CivCollapsed")));
     E.SettlementID = -1;
-    E.AgentID = Civ.CivID; // MODIFIED
-    // Actual FSimulationEvent has no IntPayload in this project.
-    // Reuse AgentID as the existing integer carrier for CivID.
+    E.AgentID = Civ.CivID;
     E.StepNumber = StepNumber;
-    E.Payload = FGameplayTag(); // ADDED
-    E.FloatPayload = 0.0f;      // ADDED
+    E.Payload = FGameplayTag();
+    E.FloatPayload = 0.0f;
 
     Bus->Dispatch(E);
 }
@@ -171,11 +192,9 @@ void UCivilizationResilienceSystem::SpawnRefugeeEvent(
     FSimulationEvent E;
     E.EventType = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Sim.Event.RefugeesArriving")));
     E.SettlementID = -1;
-    E.AgentID = Civ.CivID; // MODIFIED
-    // Actual FSimulationEvent has no IntPayload in this project.
-    // Reuse AgentID as the existing integer carrier for CivID.
+    E.AgentID = Civ.CivID;
     E.StepNumber = StepNumber;
-    E.Payload = FGameplayTag(); // ADDED
+    E.Payload = FGameplayTag();
     E.FloatPayload = 10.0f;
 
     Bus->Dispatch(E);
