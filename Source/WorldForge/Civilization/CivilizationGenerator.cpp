@@ -1,37 +1,40 @@
 #include "CivilizationGenerator.h"
 #include "../Core/WorldForgeRNG.h"
+#include "Generation/CivGenContext.h"         // ADDED
+#include "Generation/CivPlacementPass.h"       // ADDED
+#include "Generation/CivCultureSeedPass.h"     // ADDED
+#include "Generation/CivGovernmentSeedPass.h"  // ADDED
+#include "Generation/CivEconomySeedPass.h"     // ADDED
+#include "Generation/CivDiplomacySeedPass.h"   // ADDED
 
 TArray<FCivilizationData> UCivilizationGenerator::GenerateCivilizations(
     int32 StartingCivCount, const TArray<FWorldTileData>& WorldTiles,
     int32 GridWidth, UWorldForgeRNG* RNG)
 {
-    TArray<FCivilizationData> Result;
-    TArray<int32> UsedTileIDs;
+    // ADDED: Build generation context
+    FCivGenContext Context;
+    Context.StartingCivCount = StartingCivCount;
+    Context.WorldTiles = &WorldTiles;
+    Context.GridWidth = GridWidth;
+    Context.RNG = RNG;
 
-    for (int32 i = 0; i < StartingCivCount; i++)
-    {
-        FCivilizationData Civ;
-        Civ.CivID = i;
-        Civ.Name = FString::Printf(TEXT("Civilization_%d"), i);
+    // KEPT EXISTING: Placement/create pass owns starting civ creation
+    FCivPlacementPass::Execute(*this, Context);
 
-        const int32 StartTile = FindStartingTile(WorldTiles, UsedTileIDs, RNG);
-        if (StartTile >= 0 && WorldTiles.IsValidIndex(StartTile))
-        {
-            Civ.ControlledTileIDs.Add(StartTile);
-            UsedTileIDs.Add(StartTile);
+    // ADDED: Cultural DNA must be seeded before downstream government/economy/diplomacy passes.
+    FCivCultureSeedPass::Execute(*this, Context.GeneratedCivs, WorldTiles, RNG);
 
-            Civ.RaceType = AssignRaceFromBiome(WorldTiles[StartTile].BiomeType, RNG);
-        }
-        else
-        {
-            Civ.RaceType = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Race.Dwarf")));
-        }
+    // MODIFIED: Government seeding pass now performs real government assignment.
+    FCivGovernmentSeedPass::Execute(Context.GeneratedCivs, WorldTiles, RNG);
 
-        Result.Add(Civ);
-    }
+    // MODIFIED: Economy seeding pass now performs real currency assignment.
+    FCivEconomySeedPass::Execute(Context.GeneratedCivs, WorldTiles, RNG);
 
-    UE_LOG(LogTemp, Log, TEXT("[CivGen] Generated %d civilizations"), Result.Num());
-    return Result;
+    // MODIFIED: Diplomacy seeding pass now performs real relationship seeding.
+    FCivDiplomacySeedPass::Execute(Context.GeneratedCivs, WorldTiles, RNG);
+
+    UE_LOG(LogTemp, Log, TEXT("[CivGen] Generated %d civilizations"), Context.GeneratedCivs.Num());
+    return Context.GeneratedCivs;
 }
 
 void UCivilizationGenerator::GenerateCulturalDNA(
@@ -39,43 +42,8 @@ void UCivilizationGenerator::GenerateCulturalDNA(
     const TArray<FWorldTileData>& WorldTiles,
     UWorldForgeRNG* RNG)
 {
-    for (FCivilizationData& Civ : Civs)
-    {
-        FCultureData& DNA = Civ.CulturalDNA;
-
-        DNA.CivID = Civ.CivID;
-        DNA.HierarchyTolerance = GenerateDNAAxis(10.f, 90.f, RNG);
-        DNA.OutgroupHostility = GenerateDNAAxis(10.f, 90.f, RNG);
-        DNA.LaborEthics = GenerateDNAAxis(20.f, 80.f, RNG);
-        DNA.Militarism = GenerateDNAAxis(10.f, 90.f, RNG);
-        DNA.MagicReverence = GenerateDNAAxis(10.f, 90.f, RNG);
-        DNA.Individualism = GenerateDNAAxis(20.f, 80.f, RNG);
-        DNA.TheologicalRigidity = GenerateDNAAxis(10.f, 90.f, RNG);
-        DNA.EconomicOpenness = GenerateDNAAxis(10.f, 90.f, RNG);
-        DNA.ExpansionDrive = GenerateDNAAxis(10.f, 90.f, RNG);
-        DNA.CosmicDevotion = GenerateDNAAxis(10.f, 90.f, RNG);
-
-        if (Civ.RaceType == FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Race.Dwarf"))))
-        {
-            DNA.MagicReverence = FMath::Max(10.f, DNA.MagicReverence - 30.f);
-            DNA.EconomicOpenness = FMath::Min(90.f, DNA.EconomicOpenness + 20.f);
-        }
-        else if (Civ.RaceType == FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Race.HighElf"))))
-        {
-            DNA.MagicReverence = FMath::Min(90.f, DNA.MagicReverence + 30.f);
-            DNA.HierarchyTolerance = FMath::Min(90.f, DNA.HierarchyTolerance + 20.f);
-        }
-        else if (Civ.RaceType == FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Race.Oni"))))
-        {
-            DNA.Militarism = FMath::Min(90.f, DNA.Militarism + 25.f);
-            DNA.EconomicOpenness = FMath::Max(10.f, DNA.EconomicOpenness - 20.f);
-        }
-        else if (Civ.RaceType == FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Race.Tidecaller"))))
-        {
-            DNA.HierarchyTolerance = FMath::Max(10.f, DNA.HierarchyTolerance - 20.f);
-            DNA.CosmicDevotion = FMath::Min(90.f, DNA.CosmicDevotion + 20.f);
-        }
-    }
+    // KEPT EXISTING: Public entry point remains available and routes through the dedicated culture pass.
+    FCivCultureSeedPass::Execute(*this, Civs, WorldTiles, RNG);
 }
 
 int32 UCivilizationGenerator::FindStartingTile(
