@@ -23,20 +23,8 @@ public:
     virtual void Deinitialize() override;
 
     void OnSimStep(int32 StepNumber, int32 SettlementID,
-        TArray<FAgentData>& Agents, UWorld* World); // ADDED
+        TArray<FAgentData>& Agents, UWorld* World);
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite)
-    int32 LivingWorldTickInterval = 100; // ADDED
-
-private:
-    void ApplyEventDrivenDrift(FCivilizationData& Civ,
-        const TArray<FSimulationEvent>& RecentEvents) const; // ADDED
-
-    static void CapAllDNAValues(FCivilizationData& Civ); // ADDED
-
-    void LogSignificantDrift(const FCivilizationData& Before,
-        const FCivilizationData& After,
-        int32 StepNumber) const; // ADDED
-
-    static float DriftAxis(float Current, float Delta); // ADDED
+    int32 LivingWorldTickInterval = 100;
 };
