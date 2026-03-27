@@ -1,9 +1,13 @@
 #include "CivilizationResilienceSystem.h"
 #include "WorldMapSubsystem.h"
 #include "WorldEconomySimulation.h"
-#include "SettlementManager.h" // ADDED -- BF-04
+#include "SettlementManager.h"
 #include "EventBus.h"
 #include "Engine/World.h"
+#include "Resilience/CivilizationResilienceContext.h"
+#include "Resilience/CivilizationResiliencePopulationPass.h"
+#include "Resilience/CivilizationResilienceEvaluationPass.h"
+#include "Resilience/CivilizationResilienceOutcomePass.h"
 
 void UCivilizationResilienceSystem::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -33,45 +37,14 @@ void UCivilizationResilienceSystem::OnSimStep(int32 StepNumber, int32 Settlement
 
     TArray<FCivilizationData>& Civs = WMS->GetMutableCivilizations();
 
-    // BF-04: Reset population
-    for (FCivilizationData& Civ : Civs)
-    {
-        Civ.TotalPopulation = 0;
-    }
+    FResilienceContext Context;
+    Context.World = World;
+    Context.WMS = WMS;
+    Context.SettlementManager = SettlementManager;
+    Context.StepNumber = StepNumber;
 
-    const TArray<FSettlementState>& Settlements = SettlementManager->GetAllSettlements();
-
-    for (const FSettlementState& Settlement : Settlements)
-    {
-        const FWorldTileData* Tile = WMS->GetTileDataPtr(Settlement.WorldTileID);
-
-        int32 TargetCivID = -1;
-
-        if (Tile && Tile->ControllingCivID >= 0)
-        {
-            TargetCivID = Tile->ControllingCivID;
-        }
-        else
-        {
-            // ADDED -- BF-04 FIX:
-            // Fallback to Civ 0 when tile has no controlling civ
-            TargetCivID = 0;
-        }
-
-        for (FCivilizationData& Civ : Civs)
-        {
-            if (Civ.CivID == TargetCivID)
-            {
-                Civ.TotalPopulation += Settlement.Population;
-                break;
-            }
-        }
-    }
-
-    for (FCivilizationData& Civ : Civs)
-    {
-        ProcessOneCiv(Civ, StepNumber, World);
-    }
+    FCivilizationResiliencePopulationPass::Execute(Context, Civs);
+    FCivilizationResilienceEvaluationPass::Execute(Context, Civs, this);
 }
 
 void UCivilizationResilienceSystem::ProcessOneCiv(
@@ -79,26 +52,129 @@ void UCivilizationResilienceSystem::ProcessOneCiv(
 {
     if (Civ.CivID < 0) return;
 
-    FResilienceRecord& Record = Records.FindOrAdd(Civ.CivID);
+    FResilienceRecord& Record = FindOrAddRecord(Civ.CivID);
     Record.CivID = Civ.CivID;
 
     if (Record.bHasCollapsed) return;
 
+    float TerritoryScore = 0.0f;
+    float EconomyScore = 0.0f;
+    float PopulationScore = 0.0f;
+    float MilitaryScore = 0.0f;
+    float Health = 0.0f;
+
+    BuildScoreBundleFromWorld(
+        Civ,
+        World,
+        TerritoryScore,
+        EconomyScore,
+        PopulationScore,
+        MilitaryScore,
+        Health);
+
+    LogCivHealthFromScores(
+        Civ,
+        StepNumber,
+        TerritoryScore,
+        EconomyScore,
+        PopulationScore,
+        MilitaryScore,
+        Health);
+
+    ApplyHealthOutcome(Civ, Record, StepNumber, World, Health);
+}
+
+FResilienceRecord& UCivilizationResilienceSystem::FindOrAddRecord(int32 CivID)
+{
+    return Records.FindOrAdd(CivID);
+}
+
+void UCivilizationResilienceSystem::BuildScoreBundleFromWorld(
+    const FCivilizationData& Civ,
+    UWorld* World,
+    float& OutTerritoryScore,
+    float& OutEconomyScore,
+    float& OutPopulationScore,
+    float& OutMilitaryScore,
+    float& OutHealth) const
+{
     UWorldEconomySimulation* EconSim = World
         ? World->GetSubsystem<UWorldEconomySimulation>() : nullptr;
 
-    const float TerritoryScore = FMath::Clamp(DeriveTerritoryScore(Civ), 0.0f, 1.0f);
-    const float EconomyScore = FMath::Clamp(DeriveEconomyScore(Civ, EconSim), 0.0f, 1.0f);
-    const float PopulationScore = FMath::Clamp(DerivePopulationScore(Civ), 0.0f, 1.0f);
-    const float MilitaryScore = FMath::Clamp(DeriveMilitaryScore(Civ), 0.0f, 1.0f);
+    OutTerritoryScore = FMath::Clamp(DeriveTerritoryScore(Civ), 0.0f, 1.0f);
+    OutEconomyScore = FMath::Clamp(DeriveEconomyScore(Civ, EconSim), 0.0f, 1.0f);
+    OutPopulationScore = FMath::Clamp(DerivePopulationScore(Civ), 0.0f, 1.0f);
+    OutMilitaryScore = FMath::Clamp(DeriveMilitaryScore(Civ), 0.0f, 1.0f);
 
-    const float Health =
-        (TerritoryScore * 0.30f) +
-        (EconomyScore * 0.30f) +
-        (PopulationScore * 0.20f) +
-        (MilitaryScore * 0.20f);
+    OutHealth =
+        (OutTerritoryScore * 0.30f) +
+        (OutEconomyScore * 0.30f) +
+        (OutPopulationScore * 0.20f) +
+        (OutMilitaryScore * 0.20f);
+}
 
-    // ADDED -- BF-04 VALIDATION LOG
+float UCivilizationResilienceSystem::ComputeCivHealthFromWorld(
+    const FCivilizationData& Civ,
+    UWorld* World) const
+{
+    float TerritoryScore = 0.0f;
+    float EconomyScore = 0.0f;
+    float PopulationScore = 0.0f;
+    float MilitaryScore = 0.0f;
+    float Health = 0.0f;
+
+    BuildScoreBundleFromWorld(
+        Civ,
+        World,
+        TerritoryScore,
+        EconomyScore,
+        PopulationScore,
+        MilitaryScore,
+        Health);
+
+    return Health;
+}
+
+void UCivilizationResilienceSystem::LogCivHealth(
+    const FCivilizationData& Civ,
+    int32 StepNumber,
+    UWorld* World,
+    float Health) const
+{
+    float TerritoryScore = 0.0f;
+    float EconomyScore = 0.0f;
+    float PopulationScore = 0.0f;
+    float MilitaryScore = 0.0f;
+    float ComputedHealth = 0.0f;
+
+    BuildScoreBundleFromWorld(
+        Civ,
+        World,
+        TerritoryScore,
+        EconomyScore,
+        PopulationScore,
+        MilitaryScore,
+        ComputedHealth);
+
+    LogCivHealthFromScores(
+        Civ,
+        StepNumber,
+        TerritoryScore,
+        EconomyScore,
+        PopulationScore,
+        MilitaryScore,
+        Health);
+}
+
+void UCivilizationResilienceSystem::LogCivHealthFromScores(
+    const FCivilizationData& Civ,
+    int32 StepNumber,
+    float TerritoryScore,
+    float EconomyScore,
+    float PopulationScore,
+    float MilitaryScore,
+    float Health) const
+{
     UE_LOG(LogTemp, Log,
         TEXT("[CivResilience] Step=%d Civ=%d TotalPopulation=%d Territory=%.2f Economy=%.2f Population=%.2f Military=%.2f Health=%.2f"),
         StepNumber,
@@ -109,28 +185,49 @@ void UCivilizationResilienceSystem::ProcessOneCiv(
         PopulationScore,
         MilitaryScore,
         Health);
+}
 
-    if (Health < CollapseThreshold)
-    {
-        Record.ConsecutiveLowHealthTicks++;
+void UCivilizationResilienceSystem::ApplyHealthOutcome(
+    FCivilizationData& Civ,
+    FResilienceRecord& Record,
+    int32 StepNumber,
+    UWorld* World,
+    float Health)
+{
+    FCivilizationResilienceOutcomePass::ApplyOutcome(
+        this,
+        Civ,
+        Record,
+        StepNumber,
+        World,
+        Health);
+}
 
-        if (Record.ConsecutiveLowHealthTicks >= ConsecutiveCollapseTicksRequired)
-        {
-            TriggerCollapse(Civ, StepNumber, World);
-            Record.bHasCollapsed = true;
-            Record.CollapseType = DetermineCollapseType(Civ);
-            Record.CollapseStepNumber = StepNumber;
+float UCivilizationResilienceSystem::GetCollapseThreshold() const
+{
+    return CollapseThreshold;
+}
 
-            UE_LOG(LogTemp, Warning,
-                TEXT("[CivResilience] Civ %d COLLAPSED at step %d (type %d)"),
-                Civ.CivID, StepNumber,
-                static_cast<int32>(Record.CollapseType));
-        }
-    }
-    else
-    {
-        Record.ConsecutiveLowHealthTicks = FMath::Max(0, Record.ConsecutiveLowHealthTicks - 1);
-    }
+int32 UCivilizationResilienceSystem::GetConsecutiveCollapseTicksRequired() const
+{
+    return ConsecutiveCollapseTicksRequired;
+}
+
+void UCivilizationResilienceSystem::ExecuteCollapse(
+    FCivilizationData& Civ,
+    FResilienceRecord& Record,
+    int32 StepNumber,
+    UWorld* World)
+{
+    TriggerCollapse(Civ, StepNumber, World);
+    Record.bHasCollapsed = true;
+    Record.CollapseType = DetermineCollapseType(Civ);
+    Record.CollapseStepNumber = StepNumber;
+
+    UE_LOG(LogTemp, Warning,
+        TEXT("[CivResilience] Civ %d COLLAPSED at step %d (type %d)"),
+        Civ.CivID, StepNumber,
+        static_cast<int32>(Record.CollapseType));
 }
 
 float UCivilizationResilienceSystem::ComputeCivHealth(const FCivilizationData& Civ) const
@@ -224,7 +321,6 @@ void UCivilizationResilienceSystem::TriggerCollapse(
 {
     Civ.bCollapsed = true;
 
-    // ADDED -- BF-05: write history event
     UWorldMapSubsystem* WMS = World ? World->GetSubsystem<UWorldMapSubsystem>() : nullptr;
     if (WMS)
     {

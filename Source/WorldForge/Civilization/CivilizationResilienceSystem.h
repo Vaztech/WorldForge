@@ -5,61 +5,93 @@
 #include "WorldForgeDataTypes.h"
 #include "CivilizationResilienceSystem.generated.h"
 
-// ─────────────────────────────────────────────────────────────────────────
-// UCivilizationResilienceSystem -- Phase 3B
-// Runs every LivingWorldTickInterval sim steps (same as CultureDriftSystem).
-// Checks CivHealthScore each tick. If < CollapseThreshold for
-// ConsecutiveCollapseTicksRequired consecutive ticks, triggers collapse.
-// Collapse is dispatched via EventBus::Dispatch() -- NEVER applied immediately.
-// ─────────────────────────────────────────────────────────────────────────
+class UWorldEconomySimulation;
+
 UCLASS()
 class WORLDFORGE_API UCivilizationResilienceSystem : public UWorldSubsystem
 {
     GENERATED_BODY()
 
 public:
-    virtual bool ShouldCreateSubsystem(UObject* Outer) const override { return true; }
     virtual void Initialize(FSubsystemCollectionBase& Collection) override;
     virtual void Deinitialize() override;
 
-    void OnSimStep(int32 StepNumber, int32 SettlementID,
-        TArray<FAgentData>& Agents, UWorld* World); // ADDED
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Resilience")
+    void OnSimStep(int32 StepNumber, int32 SettlementID, TArray<FAgentData>& Agents, UWorld* World);
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite)
-    int32 LivingWorldTickInterval = 100; // ADDED
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Resilience")
+    float ComputeCivHealth(const FCivilizationData& Civ) const;
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite)
-    float CollapseThreshold = 0.2f; // ADDED
+    FResilienceSaveState GetResilienceSaveState() const;
+    void RestoreResilienceFromSave(const FResilienceSaveState& S);
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite)
-    int32 ConsecutiveCollapseTicksRequired = 3; // ADDED
+    void ProcessOneCiv(FCivilizationData& Civ, int32 StepNumber, UWorld* World);
 
-    float ComputeCivHealth(const FCivilizationData& Civ) const; // ADDED
+    FResilienceRecord& FindOrAddRecord(int32 CivID);
 
-    FResilienceSaveState GetResilienceSaveState() const; // ADDED
-    void RestoreResilienceFromSave(const FResilienceSaveState& S); // ADDED
+    void BuildScoreBundleFromWorld(
+        const FCivilizationData& Civ,
+        UWorld* World,
+        float& OutTerritoryScore,
+        float& OutEconomyScore,
+        float& OutPopulationScore,
+        float& OutMilitaryScore,
+        float& OutHealth) const;
+
+    float ComputeCivHealthFromWorld(const FCivilizationData& Civ, UWorld* World) const;
+
+    void LogCivHealth(
+        const FCivilizationData& Civ,
+        int32 StepNumber,
+        UWorld* World,
+        float Health) const;
+
+    void LogCivHealthFromScores(
+        const FCivilizationData& Civ,
+        int32 StepNumber,
+        float TerritoryScore,
+        float EconomyScore,
+        float PopulationScore,
+        float MilitaryScore,
+        float Health) const;
+
+    void ApplyHealthOutcome(
+        FCivilizationData& Civ,
+        FResilienceRecord& Record,
+        int32 StepNumber,
+        UWorld* World,
+        float Health);
+
+    float GetCollapseThreshold() const;
+    int32 GetConsecutiveCollapseTicksRequired() const;
+
+    void ExecuteCollapse(
+        FCivilizationData& Civ,
+        FResilienceRecord& Record,
+        int32 StepNumber,
+        UWorld* World);
 
 private:
-    TMap<int32, FResilienceRecord> Records; // ADDED
+    float DeriveTerritoryScore(const FCivilizationData& Civ) const;
+    float DeriveEconomyScore(const FCivilizationData& Civ, UWorldEconomySimulation* EconSim) const;
+    float DerivePopulationScore(const FCivilizationData& Civ) const;
+    float DeriveMilitaryScore(const FCivilizationData& Civ) const;
 
-    void ProcessOneCiv(FCivilizationData& Civ,
-        int32 StepNumber, UWorld* World); // ADDED
+    ECivilizationCollapseType DetermineCollapseType(const FCivilizationData& Civ) const;
+    void TriggerCollapse(FCivilizationData& Civ, int32 StepNumber, UWorld* World);
+    void DispatchCollapseEvent(const FCivilizationData& Civ, int32 StepNumber, UWorld* World) const;
+    void SpawnRefugeeEvent(const FCivilizationData& Civ, int32 StepNumber, UWorld* World) const;
 
-    void TriggerCollapse(FCivilizationData& Civ,
-        int32 StepNumber, UWorld* World); // ADDED
+private:
+    UPROPERTY()
+    TMap<int32, FResilienceRecord> Records;
 
-    ECivilizationCollapseType DetermineCollapseType(
-        const FCivilizationData& Civ) const; // ADDED
+    UPROPERTY(EditAnywhere, Category = "WorldForge|Resilience")
+    float CollapseThreshold = 0.30f;
 
-    void DispatchCollapseEvent(const FCivilizationData& Civ,
-        int32 StepNumber, UWorld* World) const; // ADDED
+    UPROPERTY(EditAnywhere, Category = "WorldForge|Resilience")
+    int32 ConsecutiveCollapseTicksRequired = 3;
 
-    void SpawnRefugeeEvent(const FCivilizationData& Civ,
-        int32 StepNumber, UWorld* World) const; // ADDED
-
-    float DeriveTerritoryScore(const FCivilizationData& Civ) const; // ADDED
-    float DeriveEconomyScore(const FCivilizationData& Civ,
-        class UWorldEconomySimulation* EconSim) const; // ADDED
-    float DerivePopulationScore(const FCivilizationData& Civ) const; // ADDED
-    float DeriveMilitaryScore(const FCivilizationData& Civ) const; // ADDED
+    UPROPERTY(EditAnywhere, Category = "WorldForge|Resilience")
+    int32 LivingWorldTickInterval = 50;
 };
