@@ -23,13 +23,20 @@ public:
     virtual void Initialize(FSubsystemCollectionBase& Collection) override;
     virtual void Deinitialize() override;
 
-    // Called by ProcessorManager delegate each sim step.
+    // Called by simulation-step bridge each sim step.
     void OnSimStep(int32 StepNumber, int32 SettlementID,
         TArray<FAgentData>& Agents, UWorld* World);
+
+    // ADDED -- BF-06 runtime hook
+    // Bridge for USimulationTimeManager::OnSimulationStep dynamic multicast.
+    UFUNCTION()
+    void HandleSimulationStep(int32 StepNumber);
 
     // ── Caravan management ─────────────────────────────────────────────
     // Dispatch a new outbound caravan from OriginSettlementID.
     // TravelSteps = how many sim steps to reach destination.
+    // KEPT EXISTING -- not BlueprintCallable because TArray<FCargoItem>
+    // is not currently a Blueprint-supported parameter type in this project.
     int32 DispatchCaravan(int32 OriginSettlementID,
         int32 DestSettlementID,
         const TArray<FCargoItem>& Cargo,
@@ -38,10 +45,12 @@ public:
         int32 TravelSteps);
 
     // ── Outpost management ─────────────────────────────────────────────
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Overworld")
     int32 BuildOutpost(int32 OwnerSettlementID,
         FIntPoint GridCell,
         EOutpostType OutpostType);
 
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Overworld")
     void AbandonOutpost(int32 OutpostID);
 
     const TArray<FOutpostData>& GetActiveOutposts() const { return ActiveOutposts; }
@@ -49,6 +58,7 @@ public:
 
     // ── Trade route modifiers (used by UpdateFlow in Phase 3B) ─────────
     // Returns combined InfrastructureMod for routes touching this settlement.
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Overworld")
     float GetInfrastructureMod(int32 OriginID, int32 DestID) const;
 
     // ── Save / Load ────────────────────────────────────────────────────

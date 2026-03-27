@@ -3,16 +3,39 @@
 #include "SettlementManager.h"
 #include "EventBus.h"
 #include "WorldForgeTags.h"
+#include "SimulationTimeManager.h" // ADDED -- BF-06 runtime hook
 #include "Engine/World.h"
 
 void UOverworldSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
     Super::Initialize(Collection);
     UE_LOG(LogTemp, Log, TEXT("[Overworld] Initialized."));
+
+    // ADDED -- BF-06 runtime hook:
+    // Bind Overworld to simulation-step updates so caravans and outpost
+    // supply lines actually advance during the live sim.
+    if (UWorld* World = GetWorld())
+    {
+        if (USimulationTimeManager* SimTime = World->GetSubsystem<USimulationTimeManager>())
+        {
+            SimTime->OnSimulationStep.AddDynamic(this, &UOverworldSubsystem::HandleSimulationStep);
+            UE_LOG(LogTemp, Log, TEXT("[Overworld] Bound to SimulationTimeManager."));
+        }
+    }
 }
 
 void UOverworldSubsystem::Deinitialize()
 {
+    // ADDED -- BF-06 runtime hook:
+    // Remove delegate binding safely on shutdown.
+    if (UWorld* World = GetWorld())
+    {
+        if (USimulationTimeManager* SimTime = World->GetSubsystem<USimulationTimeManager>())
+        {
+            SimTime->OnSimulationStep.RemoveDynamic(this, &UOverworldSubsystem::HandleSimulationStep);
+        }
+    }
+
     ActiveCaravans.Empty();
     ActiveOutposts.Empty();
     NextCaravanID = 0;
@@ -21,12 +44,19 @@ void UOverworldSubsystem::Deinitialize()
     Super::Deinitialize();
 }
 
+void UOverworldSubsystem::HandleSimulationStep(int32 StepNumber)
+{
+    // ADDED -- BF-06 runtime hook:
+    // Bridge dynamic multicast signature to the existing OnSimStep contract.
+    TArray<FAgentData> DummyAgents;
+    OnSimStep(StepNumber, -1, DummyAgents, GetWorld());
+}
+
 void UOverworldSubsystem::OnSimStep(int32 StepNumber, int32 SettlementID,
     TArray<FAgentData>& Agents, UWorld* World)
 {
-    (void)StepNumber;   // ADDED
-    (void)SettlementID; // ADDED
-    (void)Agents;       // ADDED
+    (void)SettlementID; // KEPT EXISTING
+    (void)Agents;       // KEPT EXISTING
 
     if (!World) return;
 
@@ -68,8 +98,6 @@ int32 UOverworldSubsystem::DispatchCaravan(
 // ── Caravan stepping ───────────────────────────────────────────────────────
 void UOverworldSubsystem::StepCaravans(int32 StepNumber, UWorld* World)
 {
-    (void)StepNumber; // ADDED
-
     TArray<FCaravanData> Arrived;
 
     for (FCaravanData& C : ActiveCaravans)
@@ -90,6 +118,24 @@ void UOverworldSubsystem::StepCaravans(int32 StepNumber, UWorld* World)
             });
 
         ProcessCaravanArrival(C, World);
+
+        // ADDED -- BF-06: update supply timestamp for outposts owned by the
+        // destination settlement when a caravan arrives.
+        for (FOutpostData& O : ActiveOutposts)
+        {
+            if (O.OwnerSettlementID == C.DestSettlementID)
+            {
+                O.LastSupplyArrivedStep = StepNumber;
+
+                // ADDED -- BF-06 validation logging
+                UE_LOG(LogTemp, Log,
+                    TEXT("[Overworld] Outpost %d supply refreshed at step %d by caravan %d (OwnerSettlementID=%d)"),
+                    O.OutpostID,
+                    StepNumber,
+                    C.CaravanID,
+                    O.OwnerSettlementID);
+            }
+        }
     }
 }
 
@@ -162,6 +208,7 @@ int32 UOverworldSubsystem::BuildOutpost(
     O.bActive = true;
     O.StepsWithoutSupply = 0;
     O.FlowRateMod = 1.0f;
+    O.LastSupplyArrivedStep = 0; // ADDED -- BF-06
 
     ActiveOutposts.Add(O);
 
@@ -192,7 +239,7 @@ void UOverworldSubsystem::AbandonOutpost(int32 OutpostID)
 
 void UOverworldSubsystem::StepOutpostSupplyLines(int32 StepNumber, UWorld* World)
 {
-    (void)World; // ADDED
+    (void)World; // KEPT EXISTING
 
     for (FOutpostData& O : ActiveOutposts)
     {
@@ -201,13 +248,52 @@ void UOverworldSubsystem::StepOutpostSupplyLines(int32 StepNumber, UWorld* World
             continue;
         }
 
-        if (IsOutpostSupplied(O, StepNumber))
+        const bool bSupplied = IsOutpostSupplied(O, StepNumber);
+
+        // ADDED -- BF-06 validation logging:
+        // periodic snapshot every 50 steps for active outposts.
+        if ((StepNumber % 50) == 0)
         {
+            UE_LOG(LogTemp, Log,
+                TEXT("[Overworld] Outpost %d status at step %d: supplied=%s lastSupply=%d unsuppliedSteps=%d flow=%.2f active=%s"),
+                O.OutpostID,
+                StepNumber,
+                bSupplied ? TEXT("true") : TEXT("false"),
+                O.LastSupplyArrivedStep,
+                O.StepsWithoutSupply,
+                O.FlowRateMod,
+                O.bActive ? TEXT("true") : TEXT("false"));
+        }
+
+        if (bSupplied)
+        {
+            // ADDED -- BF-06 validation logging:
+            // only log when supply has just been restored after an outage.
+            if (O.StepsWithoutSupply > 0)
+            {
+                UE_LOG(LogTemp, Log,
+                    TEXT("[Overworld] Outpost %d supply restored at step %d after %d unsupplied steps."),
+                    O.OutpostID,
+                    StepNumber,
+                    O.StepsWithoutSupply);
+            }
+
             O.StepsWithoutSupply = 0;
             continue;
         }
 
         O.StepsWithoutSupply++;
+
+        // ADDED -- BF-06 validation logging:
+        // log the first unsupplied step so the expiry of the 150-step window is obvious.
+        if (O.StepsWithoutSupply == 1)
+        {
+            UE_LOG(LogTemp, Warning,
+                TEXT("[Overworld] Outpost %d became unsupplied at step %d (LastSupplyArrivedStep=%d)."),
+                O.OutpostID,
+                StepNumber,
+                O.LastSupplyArrivedStep);
+        }
 
         if (O.StepsWithoutSupply >= OutpostAbandonsAt)
         {
@@ -219,11 +305,16 @@ void UOverworldSubsystem::StepOutpostSupplyLines(int32 StepNumber, UWorld* World
         }
         else if (O.StepsWithoutSupply >= OutpostDegradesAt)
         {
-            O.FlowRateMod = 0.5f; // MODIFIED
-            UE_LOG(LogTemp, Warning,
-                TEXT("[Overworld] Outpost %d degraded after %d unsupplied steps."),
-                O.OutpostID,
-                O.StepsWithoutSupply);
+            // MODIFIED -- spam fix:
+            // only transition/log once when first entering degraded state.
+            if (O.FlowRateMod > 0.5f)
+            {
+                O.FlowRateMod = 0.5f;
+                UE_LOG(LogTemp, Warning,
+                    TEXT("[Overworld] Outpost %d degraded after %d unsupplied steps."),
+                    O.OutpostID,
+                    O.StepsWithoutSupply);
+            }
         }
     }
 }
@@ -232,13 +323,10 @@ bool UOverworldSubsystem::IsOutpostSupplied(
     const FOutpostData& Outpost,
     int32 StepNumber) const
 {
-    (void)Outpost;    // ADDED
-    (void)StepNumber; // ADDED
-
-    // ADDED
-    // Phase 3B stub: outposts are always considered supplied.
-    // Real supply-line checks are deferred to a later phase.
-    return true;
+    // MODIFIED -- BF-06: real supply-line check.
+    // Supplied if a caravan arrived within the last 150 steps (~3 in-game years).
+    constexpr int32 SupplyWindowSteps = 150;
+    return (StepNumber - Outpost.LastSupplyArrivedStep) <= SupplyWindowSteps;
 }
 
 float UOverworldSubsystem::GetInfrastructureMod(int32 OriginID, int32 DestID) const

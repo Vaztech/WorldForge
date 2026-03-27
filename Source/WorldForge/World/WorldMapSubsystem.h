@@ -9,8 +9,6 @@
 
 class UWorldGenPipeline;
 
-// Inherits UWorldSubsystem for lifetime management
-// Inherits FTickableGameObject for safe tick registration in UE5.7
 UCLASS()
 class WORLDFORGE_API UWorldMapSubsystem
     : public UWorldSubsystem
@@ -19,12 +17,10 @@ class WORLDFORGE_API UWorldMapSubsystem
     GENERATED_BODY()
 
 public:
-    // UWorldSubsystem
     virtual bool ShouldCreateSubsystem(UObject* Outer) const override { return true; }
     virtual void Initialize(FSubsystemCollectionBase& Collection) override;
     virtual void Deinitialize() override;
 
-    // FTickableGameObject
     virtual void Tick(float DeltaTime) override;
     virtual bool IsTickable() const override { return bInitialized; }
     virtual bool IsTickableInEditor() const override { return false; }
@@ -33,21 +29,17 @@ public:
         RETURN_QUICK_DECLARE_CYCLE_STAT(UWorldMapSubsystem, STATGROUP_Tickables);
     }
 
-    // Load from pipeline after GenerateWorld() completes
     UFUNCTION(BlueprintCallable, Category = "WorldForge|WorldMap")
     void InitializeFromPipeline(UWorldGenPipeline* Pipeline);
 
-    // Tile queries
     UFUNCTION(BlueprintCallable, Category = "WorldForge|WorldMap")
     bool GetTileData(int32 TileID, FWorldTileData& OutTile) const;
     const FWorldTileData* GetTileDataPtr(int32 TileID) const;
     FWorldTileData* GetMutableTileDataPtr(int32 TileID);
 
-    // Civ queries
     UFUNCTION(BlueprintCallable, Category = "WorldForge|WorldMap")
     bool GetCivData(int32 CivID, FCivilizationData& OutCiv) const;
 
-    // Fog of war
     UFUNCTION(BlueprintCallable, Category = "WorldForge|WorldMap")
     void RevealTile(int32 TileID, EKnowledgeLevel NewLevel, float Accuracy = 1.0f);
 
@@ -59,12 +51,14 @@ public:
     int32 GetTileCount() const { return WorldTiles.Num(); }
     bool IsInitialized() const { return bInitialized; }
 
-    // ---- Added accessors ----
     const TArray<FWorldTileData>& GetWorldTiles() const { return WorldTiles; }
     const TArray<FCivilizationData>& GetCivilizations() const { return Civilizations; }
     const TArray<FHistoryEventData>& GetHistoryLog() const { return HistoryLog; }
 
-    TArray<FCivilizationData>& GetMutableCivilizations() { return Civilizations; } // ADDED
+    TArray<FCivilizationData>& GetMutableCivilizations() { return Civilizations; }
+
+    // ADDED -- BF-05: History logging API
+    int32 AddHistoryEvent(const FHistoryEventData& Event);
 
 private:
     void TickLivingWorld();

@@ -98,3 +98,19 @@ EKnowledgeLevel UWorldMapSubsystem::GetTileKnowledge(int32 TileID) const
     const FWorldTileData* T = GetTileDataPtr(TileID);
     return T ? T->KnowledgeState.KnowledgeLevel : EKnowledgeLevel::Unexplored;
 }
+
+// ADDED -- BF-05
+int32 UWorldMapSubsystem::AddHistoryEvent(const FHistoryEventData& Event)
+{
+    FHistoryEventData NewEvent = Event;
+    NewEvent.EventID = HistoryLog.Num();
+
+    HistoryLog.Add(NewEvent);
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[History] EventID=%d Type=%s"),
+        NewEvent.EventID,
+        *NewEvent.EventType.ToString());
+
+    return NewEvent.EventID;
+}

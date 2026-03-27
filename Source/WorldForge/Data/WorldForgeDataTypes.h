@@ -789,6 +789,12 @@ struct FOutpostData
     UPROPERTY(SaveGame) FIntPoint WorldGridCell;
     UPROPERTY(SaveGame) int32 StaffCount = 0;
     UPROPERTY(SaveGame) int32 StepsWithoutSupply = 0;
+
+    // ADDED -- BF-06
+    // Updated when a caravan arrives at OwnerSettlementID.
+    // Default 0 = treated as supplied from start (safe for existing saves).
+    UPROPERTY(SaveGame) int32 LastSupplyArrivedStep = 0;
+
     UPROPERTY(SaveGame) bool bActive = true;
     UPROPERTY(SaveGame) float FlowRateMod = 1.0f;
 };
