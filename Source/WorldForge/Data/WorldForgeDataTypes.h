@@ -2,13 +2,13 @@
 
 #include "CoreMinimal.h"
 #include "GameplayTagContainer.h"
+#include "Civilization/WorldHistory/WorldHistoryTypes.h"
 #include "WorldForgeDataTypes.generated.h"
 
 // ═══════════════════════════════════════════════════════════════════
 // ENUMS
 // ═══════════════════════════════════════════════════════════════════
 
-// Fog of war knowledge levels per world tile.
 UENUM(BlueprintType)
 enum class EKnowledgeLevel : uint8
 {
@@ -19,7 +19,6 @@ enum class EKnowledgeLevel : uint8
     Live          UMETA(DisplayName = "Live")
 };
 
-// Colony world size options used during world generation.
 UENUM(BlueprintType)
 enum class EWorldSize : uint8
 {
@@ -29,7 +28,6 @@ enum class EWorldSize : uint8
     OMG     UMETA(DisplayName = "OMG (1024x1024)")
 };
 
-// Pre-history epoch identifiers used by the historical simulation.
 UENUM(BlueprintType)
 enum class EPreHistoryEpoch : uint8
 {
@@ -39,7 +37,6 @@ enum class EPreHistoryEpoch : uint8
     Stabilization  UMETA(DisplayName = "Stabilization 1500-2000yr")
 };
 
-// Colonist simulation state machine — all 14 states required by Phase 2.
 UENUM(BlueprintType)
 enum class EAgentState : uint8
 {
@@ -59,7 +56,6 @@ enum class EAgentState : uint8
     Dead
 };
 
-// Reservation types used by the reservation system.
 UENUM(BlueprintType)
 enum class EReservationType : uint8
 {
@@ -70,7 +66,6 @@ enum class EReservationType : uint8
     InteractionSlot
 };
 
-// Price-fix policy types used by economy/world systems.
 UENUM(BlueprintType)
 enum class EPriceFixType : uint8
 {
@@ -84,7 +79,6 @@ enum class EPriceFixType : uint8
     Requisition
 };
 
-// Settlement market tier / sophistication level.
 UENUM(BlueprintType)
 enum class EMarketTier : uint8
 {
@@ -95,7 +89,6 @@ enum class EMarketTier : uint8
     BlackMarket
 };
 
-// Phase 3A: trust component used for queued trust deltas.
 UENUM(BlueprintType)
 enum class ETrustComponent : uint8
 {
@@ -107,8 +100,6 @@ enum class ETrustComponent : uint8
     GovernmentCredibility
 };
 
-// Job priority ordering used by the job queue manager.
-// Higher numeric value = higher priority.
 UENUM(BlueprintType)
 enum class EJobPriority : uint8
 {
@@ -119,9 +110,6 @@ enum class EJobPriority : uint8
     Idle = 0 UMETA(DisplayName = "Idle")
 };
 
-// ADDED
-// Section I / Milestone D:
-// High-level purpose category used by prefab selection and future UI.
 UENUM(BlueprintType)
 enum class EBuildingPurpose : uint8
 {
@@ -166,10 +154,7 @@ struct FVoxelBiomeProfile
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 OctaveCount = 4;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) bool bEnableCaves = true;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float CaveThreshold = 0.3f;
-
-    // Phase rule: WorldForge uses smooth SDF terrain only.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) bool bSmoothSDF = true;
-
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TArray<FGameplayTag> SurfaceMaterials;
 };
 
@@ -193,7 +178,6 @@ struct FWorldTileData
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FWorldKnowledgeState KnowledgeState;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FVoxelBiomeProfile VoxelProfile;
 
-    // World/cosmic influence fields used by higher-level simulation layers.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float Sacredness = 0.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float Corruption = 0.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float FearPressure = 0.f;
@@ -244,6 +228,177 @@ struct FHistoryEventData
 };
 
 USTRUCT(BlueprintType)
+struct FFigureRelationship
+{
+    GENERATED_BODY()
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    int32 TargetFigureID = -1;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    ERelationType RelationType = ERelationType::Ally;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    int32 FormedYear = 0;
+};
+
+USTRUCT(BlueprintType)
+struct FHistoricalFigure
+{
+    GENERATED_BODY()
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    int32 FigureID = -1;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    FText Name;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    FText Epithet;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    FGameplayTag RaceTag;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    int32 CivID = -1;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    int32 BirthYear = 0;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    int32 DeathYear = -1;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    EHistoricalRole Role = EHistoricalRole::Hero;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    TArray<int32> KeyEventIDs;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    TArray<FGameplayTag> Skills;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    TArray<FFigureRelationship> Relationships;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    float LegacyScore = 0.f;
+};
+
+USTRUCT(BlueprintType)
+struct FHistoricalEvent
+{
+    GENERATED_BODY()
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    int32 EventID = -1;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    FText Title;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    FText Description;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    int32 Year = 0;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    FGameplayTag EventType;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    TArray<int32> InvolvedFigureIDs;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    TArray<int32> InvolvedCivIDs;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    float HistoricalImpact = 0.5f;
+};
+
+USTRUCT(BlueprintType)
+struct FLegendaryArtifact
+{
+    GENERATED_BODY()
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    int32 ArtifactID = -1;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    FText Name;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    FGameplayTag ItemTag;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    int32 CreatorFigureID = -1;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    int32 CreationYear = 0;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    int32 CreationEventID = -1;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    int32 CurrentOwnerCivID = -1;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    TMap<FGameplayTag, float> StatModifiers;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    FText LoreDescription;
+};
+
+USTRUCT(BlueprintType)
+struct FArtifactOwnershipRecord
+{
+    GENERATED_BODY()
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    int32 ArtifactID = -1;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    int32 OwnerCivID = -1;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    int32 AcquiredEventID = -1;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    int32 LostEventID = -1;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    int32 StartYear = 0;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    int32 EndYear = 0;
+};
+
+USTRUCT(BlueprintType)
+struct FMythRecord
+{
+    GENERATED_BODY()
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    int32 MythID = -1;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    FText Title;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    FText Description;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    int32 RelatedFigureID = -1;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    int32 RelatedArtifactID = -1;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    int32 OriginEventID = -1;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    float MythStrength = 0.5f;
+};
+
+USTRUCT(BlueprintType)
 struct FCivilizationData
 {
     GENERATED_BODY()
@@ -256,17 +411,16 @@ struct FCivilizationData
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TMap<int32, float> RelationshipMap;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 TechLevel = 1;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FString Name;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FString LegendaryFigure;
+
+    // Phase 3.5 — RaceOrigin binding
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FString RaceOrigin;
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) bool bCollapsed = false;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TArray<int32> ControlledTileIDs;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TArray<int32> HistoryEventIDs;
 
-    // ADDED -- BF-01: persisted real population total for civ health scoring.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 TotalPopulation = 0;
-
-    // ADDED -- BF-01
-    // Populated every 100 steps by UCivilizationResilienceSystem::OnSimStep().
-    // Sums FSettlementState.Population for all settlements on tiles this civ controls.
-    // Defaults to 0 so existing saves load cleanly without migration.
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -373,9 +527,6 @@ struct FSettlementMarket
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) EMarketTier MarketTier = EMarketTier::None;
 };
 
-// Minimal compile-safe trade flow state needed by FEconomySaveState.
-// If this struct already exists elsewhere in your project, remove this copy
-// and include the canonical header instead.
 USTRUCT(BlueprintType)
 struct FTradeFlowState
 {
@@ -416,7 +567,6 @@ struct FSettlementPriceHistory
 {
     GENERATED_BODY()
 
-    // ItemTag -> last N prices
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
     TMap<FGameplayTag, FFloatHistoryArray> ItemHistory;
 };
@@ -436,31 +586,24 @@ struct FEconomySaveState
 {
     GENERATED_BODY()
 
-    // SettlementID -> price array
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
     TMap<int32, FMarketPriceArray> SettlementPrices;
 
-    // SettlementID -> (ItemTag -> history array)
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
     TMap<int32, FSettlementPriceHistory> PriceHistory;
 
-    // Live currency trust states (keyed by CurrencyTag)
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
     TMap<FGameplayTag, FCurrencyTrustState> CurrencyTrust;
 
-    // Currency definitions (keyed by CurrencyTag)
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
     TMap<FGameplayTag, FCurrencyDefinition> AllCurrencies;
 
-    // Government profiles (keyed by CivID)
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
     TMap<int32, FGovernmentEconomicProfile> CivGovernments;
 
-    // Trade routes (keyed by RouteID)
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
     TMap<int32, FTradeFlowState> TradeRoutes;
 
-    // Pending trust deltas that were queued but not yet applied
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
     TArray<FCurrencyTrustDelta> PendingTrustDeltas;
 };
@@ -479,13 +622,8 @@ struct FSettlementState
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FString Name;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 Population = 0;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float MoraleSummary = 50.f;
-
-    // Phase 3A: player currency stub until diplomacy/economy expands.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FGameplayTag PlayerCurrencyTag;
-
-    // -1 = player-controlled settlement; AI settlements use owning civ id.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 OwnerCivID = -1;
-
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float ThreatLevel = 0.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TMap<FGameplayTag, int32> Stockpiles;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TArray<FGameplayTag> CompletedBuildings;
@@ -509,7 +647,6 @@ struct FReservationRecord
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 SettlementID = -1;
 };
 
-/** 2D navigation cell. Phase 2 uses a single elevation layer only. */
 USTRUCT(BlueprintType)
 struct FNavCell
 {
@@ -522,8 +659,6 @@ struct FNavCell
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) int32 OccupantID = -1;
 };
 
-// Active construction work tracked separately from jobs.
-// ConstructionProcessor mutates these while the job layer handles assignment/movement.
 USTRUCT(BlueprintType)
 struct FActiveBuildTask
 {
@@ -537,21 +672,10 @@ struct FActiveBuildTask
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) int32 PlacedBlocks = 0;
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) int32 AssignedAgentID = -1;
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) bool bComplete = false;
-
-    // ADDED
-    // Optional explicit block list for custom / player-authored builds.
-    // When populated, construction places these cells directly instead of
-    // using the legacy 2x2 layered prefab footprint.
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) TArray<FIntPoint> BlockList;
-
-    // ADDED
-    // Material used by PlaceNextBlock().
-    // Existing prefab tasks still default to stone if this tag is not valid.
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) FGameplayTag MaterialTag;
 };
 
-// Job queue entry posted by systems and consumed by UJobProcessor.
-// This is the assign -> move -> arrive part of the loop.
 USTRUCT(BlueprintType)
 struct FJobRequest
 {
@@ -571,8 +695,6 @@ struct FJobRequest
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) int32 PostedOnStep = 0;
 };
 
-// Active work task executed after arrival.
-// ProductionProcessor owns progression/completion for these tasks.
 USTRUCT(BlueprintType)
 struct FActiveProductionTask
 {
@@ -591,7 +713,6 @@ struct FActiveProductionTask
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) bool bComplete = false;
 };
 
-// Runtime colonist/agent state used by processors every fixed simulation step.
 USTRUCT(BlueprintType)
 struct FAgentData
 {
@@ -601,42 +722,24 @@ struct FAgentData
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 SettlementID = -1;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) EAgentState State = EAgentState::Idle;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FGameplayTag RaceTag;
-
-    // Core need values.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float FoodNeed = 100.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float SleepNeed = 100.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float SocialNeed = 60.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float SafetyNeed = 80.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float PurposeNeed = 70.f;
-
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float MoodScore = 50.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TArray<FString> RecentThoughts;
-
-    // Skill tags drive job weighting and production speed.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TMap<FGameplayTag, float> Skills;
-
-    // Ethics values affect compliance/refusal systems.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float EthicsPacifism = 50.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float EthicsCompassion = 50.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float EthicsHonour = 50.f;
-
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float Health = 100.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) bool bInjured = false;
-
-    // Reservation link used by the reservation system.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 ActiveReservationID = -1;
-
-    // Current job tag assigned by JobProcessor.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FGameplayTag CurrentJobTag;
-
-    // Current building context for production/build jobs.
-    // Phase 2 patch: required so processors know which building the current job belongs to.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FGameplayTag CurrentJobBuildingTag;
-
-    // Deterministic grid-based movement state.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FIntPoint CurrentGridPos = FIntPoint::ZeroValue;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FIntPoint CurrentNavTarget = FIntPoint::ZeroValue;
-
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TMap<FName, float> EntityFavor;
 };
 
@@ -677,12 +780,6 @@ struct FWorldGenConfig
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int64 MasterSeed = 12345;
 };
 
-// ADDED
-// WorldForgeDataTypes.h -- Phase 3B additions
-// Append to bottom of file. Do NOT duplicate Phase 3A structs already present.
-
-// ADDED
-// ── Cultural DNA axis indices ─────────────────────────────────────────────
 enum ECulturalAxis : int32
 {
     CA_Hierarchy = 0,
@@ -698,8 +795,6 @@ enum ECulturalAxis : int32
     CA_MAX = 10
 };
 
-// ADDED
-// ── Phase 3B: Civilization resilience ────────────────────────────────────
 UENUM()
 enum class ECivilizationCollapseType : uint8
 {
@@ -713,7 +808,6 @@ enum class ECivilizationCollapseType : uint8
     EconomicCollapse
 };
 
-// ADDED
 USTRUCT()
 struct FResilienceRecord
 {
@@ -726,7 +820,6 @@ struct FResilienceRecord
     UPROPERTY(SaveGame) int32 CollapseStepNumber = -1;
 };
 
-// ADDED
 USTRUCT()
 struct FResilienceSaveState
 {
@@ -735,8 +828,6 @@ struct FResilienceSaveState
     UPROPERTY(SaveGame) TArray<FResilienceRecord> Records;
 };
 
-// ADDED
-// ── Phase 3B: Overworld ───────────────────────────────────────────────────
 USTRUCT()
 struct FCargoItem
 {
@@ -747,7 +838,6 @@ struct FCargoItem
     UPROPERTY(SaveGame) float PricePerUnit = 1.0f;
 };
 
-// ADDED
 USTRUCT()
 struct FCaravanData
 {
@@ -777,7 +867,6 @@ enum class EOutpostType : uint8
     ForwardBase
 };
 
-// ADDED
 USTRUCT()
 struct FOutpostData
 {
@@ -789,17 +878,11 @@ struct FOutpostData
     UPROPERTY(SaveGame) FIntPoint WorldGridCell;
     UPROPERTY(SaveGame) int32 StaffCount = 0;
     UPROPERTY(SaveGame) int32 StepsWithoutSupply = 0;
-
-    // ADDED -- BF-06
-    // Updated when a caravan arrives at OwnerSettlementID.
-    // Default 0 = treated as supplied from start (safe for existing saves).
     UPROPERTY(SaveGame) int32 LastSupplyArrivedStep = 0;
-
     UPROPERTY(SaveGame) bool bActive = true;
     UPROPERTY(SaveGame) float FlowRateMod = 1.0f;
 };
 
-// ADDED
 USTRUCT()
 struct FOverworldSaveState
 {
@@ -811,8 +894,6 @@ struct FOverworldSaveState
     UPROPERTY(SaveGame) int32 NextOutpostID = 0;
 };
 
-// ADDED
-// ── Phase 3B: Diplomacy ───────────────────────────────────────────────────
 UENUM()
 enum class EDiplomaticActionType : uint8
 {
@@ -834,7 +915,6 @@ enum class EDiplomaticActionType : uint8
     JointExpedition
 };
 
-// ADDED
 USTRUCT()
 struct FDiplomaticTreaty
 {
@@ -848,7 +928,6 @@ struct FDiplomaticTreaty
     UPROPERTY(SaveGame) bool bActive = true;
 };
 
-// ADDED
 USTRUCT()
 struct FDiplomacySaveState
 {
@@ -860,8 +939,6 @@ struct FDiplomacySaveState
     UPROPERTY(SaveGame) TMap<int64, FGameplayTag> PeggedCurrencyPairs;
 };
 
-// ADDED
-// ── Phase 3B: Naval ───────────────────────────────────────────────────────
 UENUM()
 enum class EShipType : uint8
 {
@@ -870,7 +947,6 @@ enum class EShipType : uint8
     ScoutSloop
 };
 
-// ADDED
 USTRUCT()
 struct FShipData
 {
@@ -888,7 +964,6 @@ struct FShipData
     UPROPERTY(SaveGame) bool bInTransit = false;
 };
 
-// ADDED
 USTRUCT()
 struct FNavalSaveState
 {
@@ -899,8 +974,6 @@ struct FNavalSaveState
     UPROPERTY(SaveGame) int32 NextShipID = 0;
 };
 
-// ADDED
-// ── Phase 3B: Cosmic ──────────────────────────────────────────────────────
 UENUM()
 enum class ECosmicEntityStatus : uint8
 {
@@ -911,7 +984,6 @@ enum class ECosmicEntityStatus : uint8
     Gone
 };
 
-// ADDED
 USTRUCT()
 struct FCosmicEntityState
 {
@@ -944,7 +1016,6 @@ struct FCosmicEntityState
     UPROPERTY(SaveGame) float FlowBoostMultiplier = 1.0f;
 };
 
-// ADDED
 USTRUCT()
 struct FAnchorRecord
 {
@@ -957,7 +1028,6 @@ struct FAnchorRecord
     UPROPERTY(SaveGame) float PowerPerSimDay = 0.1f;
 };
 
-// ADDED
 USTRUCT()
 struct FNarrativePressureState
 {
@@ -974,7 +1044,6 @@ struct FNarrativePressureState
     static constexpr float Threshold = 100.0f;
 };
 
-// ADDED
 USTRUCT()
 struct FCosmicSaveState
 {

@@ -1,9 +1,46 @@
-#include "WorldGenPipeline.h"
+﻿#include "WorldGenPipeline.h"
 #include "../Core/WorldForgeRNG.h"
 #include "GameplayTagContainer.h"
 #include "../Civilization/CivilizationGenerator.h"
 #include "../Civilization/HistoricalSimulation.h"
+#include "../Civilization/WorldHistory/WorldHistoryGenerator.h"
+#include "../Civilization/WorldHistory/WorldHistoryContext.h"
 #include "../Economy/WorldEconomySimulation.h"
+
+namespace
+{
+    static FString CleanNameArtifacts(const FString& Input)
+    {
+        FString Result = Input;
+
+        // Remove triple repeated characters (rrr -> rr)
+        for (int32 i = 0; i < Result.Len() - 2; ++i)
+        {
+            if (Result[i] == Result[i + 1] && Result[i] == Result[i + 2])
+            {
+                Result.RemoveAt(i + 2);
+                --i;
+            }
+        }
+
+        // Remove repeated 2-letter syllables (e.g. riri -> ri)
+        for (int32 i = 0; i < Result.Len() - 3; ++i)
+        {
+            if (Result[i] == Result[i + 2] &&
+                Result[i + 1] == Result[i + 3])
+            {
+                Result.RemoveAt(i + 2, 2);
+                --i;
+            }
+        }
+
+        // Keep previous replacements (safe)
+        Result.ReplaceInline(TEXT("ririr"), TEXT("rir"));
+        Result.ReplaceInline(TEXT("lalal"), TEXT("lal"));
+
+        return Result;
+    }
+}
 
 void UWorldGenPipeline::GenerateWorld(
     int64 InWorldSeed,
@@ -216,4 +253,81 @@ void UWorldGenPipeline::Step13_RunPreHistory()
     HistSim->RunSimulation(SimCfg, Civilizations, WorldTiles, Currencies, HistoryLog, RNGRef);
 
     UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step13: %d events"), HistoryLog.Num());
+
+    // === WORLD HISTORY PIPELINE (Phase 3.5) ===
+    {
+        FWorldHistoryContext Context;
+        Context.RNG = RNGRef;
+        Context.CurrentYear = CurrentConfig.PreHistoryYears;
+
+        FWorldHistoryGenerator Generator;
+        Generator.Run(Context);
+
+        const int32 NameCount = FMath::Min(Civilizations.Num(), Context.GeneratedNames.Num());
+
+        TSet<FString> UsedNames;
+
+        for (int32 Index = 0; Index < NameCount; ++Index)
+        {
+            FString RawName = Context.GeneratedNames[Index];
+
+            RawName = CleanNameArtifacts(RawName);
+
+            if (RawName.Len() > 0)
+            {
+                RawName[0] = FChar::ToUpper(RawName[0]);
+            }
+
+            FString FinalName = RawName;
+
+            int32 Suffix = 1;
+            while (UsedNames.Contains(FinalName))
+            {
+                FinalName = FString::Printf(TEXT("%s %d"), *RawName, Suffix);
+                ++Suffix;
+            }
+
+            UsedNames.Add(FinalName);
+
+            FText NameText = FText::FromString(FinalName);
+            Civilizations[Index].Name = NameText.ToString();
+
+            UE_LOG(
+                LogTemp,
+                Log,
+                TEXT("[WorldHistory] Assigned Civilization %d Name: %s"),
+                Civilizations[Index].CivID,
+                *Civilizations[Index].Name);
+        }
+
+        if (Context.GeneratedFigures.Num() == Civilizations.Num())
+        {
+            for (int32 Index = 0; Index < Civilizations.Num(); ++Index)
+            {
+                Civilizations[Index].LegendaryFigure = Context.GeneratedFigures[Index];
+
+                UE_LOG(
+                    LogTemp,
+                    Log,
+                    TEXT("[WorldHistory] Civilization %d Figure Stored As: %s"),
+                    Civilizations[Index].CivID,
+                    *Civilizations[Index].LegendaryFigure);
+            }
+        }
+
+        for (int32 Index = 0; Index < NameCount; ++Index)
+        {
+            if (Context.RaceOrigins.IsValidIndex(Index))
+            {
+                Civilizations[Index].RaceOrigin = Context.RaceOrigins[Index];
+
+                UE_LOG(
+                    LogTemp,
+                    Log,
+                    TEXT("[WorldHistory] Civilization %d Origin Stored As: %s"),
+                    Civilizations[Index].CivID,
+                    *Civilizations[Index].RaceOrigin);
+            }
+        }
+    }
 }

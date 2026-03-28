@@ -18,6 +18,10 @@ public:
     UPROPERTY(SaveGame) TArray<FCivilizationData>      Civilizations;
     UPROPERTY(SaveGame) TArray<FHistoryEventData>      HistoryLog;
 
+    // Phase 3.5: world history artifact storage
+    UPROPERTY(SaveGame) TArray<FLegendaryArtifact>     Artifacts;
+    UPROPERTY(SaveGame) TArray<FArtifactOwnershipRecord> ArtifactHistory;
+
     UPROPERTY(SaveGame) int64 WorldSeed = 0;
     UPROPERTY(SaveGame) int32 GridWidth = 256;
     UPROPERTY(SaveGame) int32 GridHeight = 256;
