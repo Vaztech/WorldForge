@@ -51,6 +51,15 @@ public:
     UFUNCTION(BlueprintCallable, Category = "WorldForge|Settlement")
     void SetPlayerCurrency(int32 SettlementID, FGameplayTag CurrencyTag);
 
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Settlement|Visuals")
+    void SetVisualDirty(int32 SettlementID);
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Settlement|Visuals")
+    bool IsVisualDirty(int32 SettlementID) const;
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Settlement|Visuals")
+    void ClearVisualDirty(int32 SettlementID);
+
     FSettlementState* GetMutableSettlement(int32 ID);
     const FSettlementState* GetSettlement(int32 ID) const;
 
@@ -69,4 +78,7 @@ public:
 private:
     TArray<FSettlementState> Settlements;
     int32 NextSettlementID = 0;
+
+    UPROPERTY(Transient)
+    TSet<int32> VisualDirtySettlements;
 };

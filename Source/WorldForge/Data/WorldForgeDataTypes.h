@@ -1055,3 +1055,49 @@ struct FCosmicSaveState
     UPROPERTY(SaveGame) int32 NextEntityID = 0;
     UPROPERTY(SaveGame) int32 NextAnchorID = 0;
 };
+
+// ═══════════════════════════════════════════════════════════════════
+// VSS SAVE DATA
+// ═══════════════════════════════════════════════════════════════════
+
+USTRUCT(BlueprintType)
+struct FVoxelSpawnRecord
+{
+    GENERATED_BODY()
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    FGameplayTag SimEntityTag;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    FIntPoint GridCell = FIntPoint::ZeroValue;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    FVector WorldPos = FVector::ZeroVector;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    FRotator Rotation = FRotator::ZeroRotator;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    FVector Scale = FVector(1.f, 1.f, 1.f);
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    int32 InstanceIdx = INDEX_NONE;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    int32 SettlementID = -1;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    bool bIsProp = false;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    bool bIsBlackMarket = false;
+};
+
+USTRUCT(BlueprintType)
+struct FVSSSaveState
+{
+    GENERATED_BODY()
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    TArray<FVoxelSpawnRecord> SpawnRecords;
+};

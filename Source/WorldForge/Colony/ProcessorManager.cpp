@@ -21,6 +21,7 @@
 #include "DiplomacySubsystem.h"
 #include "NavalSystem.h"
 #include "CosmicSimulationSubsystem.h"
+#include "Visual/VoxelSpawnSubsystem.h"
 #include "../Core/Narrative/CommandersDeskManager.h"
 
 // Required for FGameplayTag::RequestGameplayTag
@@ -35,6 +36,8 @@ void UProcessorManager::Initialize(FSubsystemCollectionBase& Collection)
     InitializeProcessors();
 
     // Cache world-level simulation subsystems.
+    // Note: UVoxelSpawnSubsystem may initialize after ProcessorManager,
+    // so we also lazily reacquire it during RunSimulationStep().
     if (UWorld* World = GetWorld())
     {
         CultureDrift = World->GetSubsystem<UCultureDriftSystem>();
@@ -43,6 +46,7 @@ void UProcessorManager::Initialize(FSubsystemCollectionBase& Collection)
         Diplomacy = World->GetSubsystem<UDiplomacySubsystem>();
         Naval = World->GetSubsystem<UNavalSystem>();
         CosmicSim = World->GetSubsystem<UCosmicSimulationSubsystem>();
+        VoxelSpawn = World->GetSubsystem<UVoxelSpawnSubsystem>();
     }
 
     UE_LOG(
@@ -86,6 +90,7 @@ void UProcessorManager::Deinitialize()
     Diplomacy = nullptr;
     Naval = nullptr;
     CosmicSim = nullptr;
+    VoxelSpawn = nullptr;
 
     Super::Deinitialize();
 }
@@ -122,6 +127,12 @@ void UProcessorManager::RunSimulationStep(int32 StepNumber)
     if (!World)
     {
         return;
+    }
+
+    // VSS may initialize after ProcessorManager, so reacquire if needed.
+    if (!VoxelSpawn)
+    {
+        VoxelSpawn = World->GetSubsystem<UVoxelSpawnSubsystem>();
     }
 
     for (float& T : ProcessorTimingsMs)
@@ -199,6 +210,11 @@ void UProcessorManager::RunSimulationStep(int32 StepNumber)
     if (UEventBus* Bus = World->GetSubsystem<UEventBus>())
     {
         Bus->FlushPendingEvents();
+    }
+
+    if (VoxelSpawn)
+    {
+        VoxelSpawn->OnSimStep(StepNumber);
     }
 
     // H2 authoritative desk path:

@@ -1,4 +1,6 @@
-﻿#include "VoxelConstructionSystem.h"
+﻿// VoxelConstructionSystem.cpp
+
+#include "VoxelConstructionSystem.h"
 #include "Engine/World.h"
 #include "SettlementManager.h"
 #include "EventBus.h"
@@ -13,9 +15,16 @@ void UVoxelConstructionSystem::Initialize(FSubsystemCollectionBase& C)
 
 int32 UVoxelConstructionSystem::StartBuildTask(int32 SID, FGameplayTag Tag, FIntPoint Origin, int32 AgentID)
 {
-    if (HasActiveTask(SID, Tag))
+    if (HasConflictingTaskAtOrigin(SID, Origin))
     {
-        UE_LOG(LogTemp, Warning, TEXT("[VoxelConstruction] Already has active %s task"), *Tag.ToString());
+        UE_LOG(
+            LogTemp,
+            Warning,
+            TEXT("[VoxelConstruction] Already has active task at (%d,%d) for settlement %d"),
+            Origin.X,
+            Origin.Y,
+            SID
+        );
         return -1;
     }
 
@@ -50,7 +59,6 @@ int32 UVoxelConstructionSystem::StartBuildTask(int32 SID, FGameplayTag Tag, FInt
         return -1;
     }
 
-    // NEW:
     // Consume stockpile up front so the task reserves real materials
     // and cannot be duplicated after passing the gate once.
     if (!SettlementManager)
@@ -104,8 +112,16 @@ int32 UVoxelConstructionSystem::StartBuildTask(int32 SID, FGameplayTag Tag, FInt
 
     ActiveTasks.Add(T);
 
-    UE_LOG(LogTemp, Log, TEXT("[VoxelConstruction] Task %d: %s at (%d,%d) -- %d blocks"),
-        T.TaskID, *Tag.ToString(), Origin.X, Origin.Y, T.TotalBlocks);
+    UE_LOG(
+        LogTemp,
+        Log,
+        TEXT("[VoxelConstruction] Task %d: %s at (%d,%d) -- %d blocks"),
+        T.TaskID,
+        *Tag.ToString(),
+        Origin.X,
+        Origin.Y,
+        T.TotalBlocks
+    );
 
     return T.TaskID;
 }
@@ -143,7 +159,6 @@ int32 UVoxelConstructionSystem::StartCustomBuildTask(
         return -1;
     }
 
-    // NEW:
     // Consume stockpile up front so custom tasks also reserve real materials.
     if (!SettlementManager)
     {
@@ -202,10 +217,14 @@ int32 UVoxelConstructionSystem::StartCustomBuildTask(
 
     ActiveTasks.Add(T);
 
-    UE_LOG(LogTemp, Log, TEXT("[VoxelConstruction] Custom task %d: blocks=%d material=%s"),
+    UE_LOG(
+        LogTemp,
+        Log,
+        TEXT("[VoxelConstruction] Custom task %d: blocks=%d material=%s"),
         T.TaskID,
         T.TotalBlocks,
-        *T.MaterialTag.ToString());
+        *T.MaterialTag.ToString()
+    );
 
     return T.TaskID;
 }
@@ -213,7 +232,10 @@ int32 UVoxelConstructionSystem::StartCustomBuildTask(
 bool UVoxelConstructionSystem::PlaceNextBlock(int32 TaskID, UWorld* World)
 {
     FActiveBuildTask* T = GetMutableTask(TaskID);
-    if (!T || T->bComplete) return false;
+    if (!T || T->bComplete)
+    {
+        return false;
+    }
 
     // Advance progress first so PlacedBlocks remains the "count of completed placements"
     // exactly like the existing prefab logic.
@@ -309,8 +331,13 @@ void UVoxelConstructionSystem::FinalizeBuilding(const FActiveBuildTask& T, UWorl
         Bus->Dispatch(E);
     }
 
-    UE_LOG(LogTemp, Log, TEXT("[VoxelConstruction] Complete: %s settlement %d"),
-        *T.BuildingTag.ToString(), T.SettlementID);
+    UE_LOG(
+        LogTemp,
+        Log,
+        TEXT("[VoxelConstruction] Complete: %s settlement %d"),
+        *T.BuildingTag.ToString(),
+        T.SettlementID
+    );
 }
 
 bool UVoxelConstructionSystem::IsTaskComplete(int32 ID) const
@@ -327,8 +354,42 @@ bool UVoxelConstructionSystem::HasActiveTask(int32 SID, FGameplayTag Tag) const
     for (const FActiveBuildTask& T : ActiveTasks)
     {
         if (T.SettlementID == SID && T.BuildingTag == Tag && !T.bComplete)
+        {
             return true;
+        }
     }
+    return false;
+}
+
+bool UVoxelConstructionSystem::HasConflictingTaskAtOrigin(int32 SettlementID, FIntPoint Origin) const
+{
+    for (const FActiveBuildTask& T : ActiveTasks)
+    {
+        if (T.bComplete)
+        {
+            continue;
+        }
+
+        if (T.SettlementID != SettlementID)
+        {
+            continue;
+        }
+
+        // For prefab tasks, reject only an active task already using the same origin.
+        // This allows multiple huts/houses of the same type at different cells.
+        if (T.BlockList.Num() == 0 && T.OriginGridCell == Origin)
+        {
+            return true;
+        }
+
+        // For custom tasks, also reject if the requested prefab origin overlaps
+        // one of the custom task's explicit cells.
+        if (T.BlockList.Contains(Origin))
+        {
+            return true;
+        }
+    }
+
     return false;
 }
 

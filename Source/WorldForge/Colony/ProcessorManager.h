@@ -5,12 +5,13 @@
 #include "BaseProcessor.h"
 #include "ProcessorManager.generated.h"
 
-class UCultureDriftSystem;             // ADDED
-class UCivilizationResilienceSystem;   // ADDED
-class UOverworldSubsystem;             // ADDED
-class UDiplomacySubsystem;             // ADDED
-class UNavalSystem;                    // ADDED
-class UCosmicSimulationSubsystem;      // ADDED
+class UCultureDriftSystem;
+class UCivilizationResilienceSystem;
+class UOverworldSubsystem;
+class UDiplomacySubsystem;
+class UNavalSystem;
+class UCosmicSimulationSubsystem;
+class UVoxelSpawnSubsystem;
 
 UCLASS(BlueprintType)
 class WORLDFORGE_API UProcessorManager : public UWorldSubsystem
@@ -93,10 +94,11 @@ private:
 
     mutable TArray<FAgentData> SettlementAgentScratch;
 
-    UPROPERTY() UCultureDriftSystem* CultureDrift = nullptr;                 // ADDED
-    UPROPERTY() UCivilizationResilienceSystem* CivResilience = nullptr;      // ADDED
-    UPROPERTY() UOverworldSubsystem* Overworld = nullptr;                    // ADDED
-    UPROPERTY() UDiplomacySubsystem* Diplomacy = nullptr;                    // ADDED
-    UPROPERTY() UNavalSystem* Naval = nullptr;                               // ADDED
-    UPROPERTY() UCosmicSimulationSubsystem* CosmicSim = nullptr;             // ADDED
+    UPROPERTY() UCultureDriftSystem* CultureDrift = nullptr;
+    UPROPERTY() UCivilizationResilienceSystem* CivResilience = nullptr;
+    UPROPERTY() UOverworldSubsystem* Overworld = nullptr;
+    UPROPERTY() UDiplomacySubsystem* Diplomacy = nullptr;
+    UPROPERTY() UNavalSystem* Naval = nullptr;
+    UPROPERTY() UCosmicSimulationSubsystem* CosmicSim = nullptr;
+    UPROPERTY() UVoxelSpawnSubsystem* VoxelSpawn = nullptr;
 };

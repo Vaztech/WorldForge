@@ -1,3 +1,5 @@
+// VoxelConstructionSystem.h
+
 #pragma once
 #include "CoreMinimal.h"
 #include "Subsystems/WorldSubsystem.h"
@@ -33,6 +35,9 @@ public:
 
     bool PlaceNextBlock(int32 TaskID, UWorld* World);
     bool IsTaskComplete(int32 TaskID) const;
+
+    // Legacy query kept for any callers that still want to know if a given
+    // building tag is currently under construction anywhere in the settlement.
     bool HasActiveTask(int32 SID, FGameplayTag BuildTag) const;
 
     FActiveBuildTask* GetMutableTask(int32 TaskID);
@@ -47,6 +52,10 @@ private:
     void FinalizeBuilding(const FActiveBuildTask& Task, UWorld* World);
 
     int32 GetBlockCount(FGameplayTag BuildTag) const;
+
+    // Reject only truly conflicting prefab tasks at the same placement cell,
+    // instead of blocking every active task with the same building tag.
+    bool HasConflictingTaskAtOrigin(int32 SettlementID, FIntPoint Origin) const;
 
     // Resolve which stockpile item should gate this build.
     // For now this is intentionally minimal and deterministic:

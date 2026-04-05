@@ -5,7 +5,6 @@
 
 void UPlayerBuildContext::AddCell(FIntPoint Cell)
 {
-    // Prevent duplicate cells
     if (!SelectedCells.Contains(Cell))
     {
         SelectedCells.Add(Cell);
@@ -27,9 +26,13 @@ void UPlayerBuildContext::SetActiveSettlement(int32 SettlementID)
     ActiveSettlementID = SettlementID;
 }
 
+void UPlayerBuildContext::SetLastCommitResultMessage(const FString& Message)
+{
+    LastCommitResultMessage = Message;
+}
+
 bool UPlayerBuildContext::CommitBuild(int32 AgentID)
 {
-    // Backward-compatible wrapper for the original prototype path.
     return CommitCustomBuild(AgentID);
 }
 
@@ -40,18 +43,21 @@ bool UPlayerBuildContext::CommitCustomBuild(int32 AgentID)
     if (!World)
     {
         UE_LOG(LogTemp, Warning, TEXT("[PlayerBuildContext] CommitCustomBuild failed: World null"));
+        SetLastCommitResultMessage(TEXT("Custom build failed: world unavailable."));
         return false;
     }
 
     if (SelectedCells.Num() == 0)
     {
         UE_LOG(LogTemp, Warning, TEXT("[PlayerBuildContext] CommitCustomBuild failed: No selected cells"));
+        SetLastCommitResultMessage(TEXT("Custom build failed: no cells selected."));
         return false;
     }
 
     if (ActiveSettlementID < 0)
     {
         UE_LOG(LogTemp, Warning, TEXT("[PlayerBuildContext] CommitCustomBuild failed: Invalid SettlementID"));
+        SetLastCommitResultMessage(TEXT("Custom build failed: invalid settlement."));
         return false;
     }
 
@@ -59,8 +65,11 @@ bool UPlayerBuildContext::CommitCustomBuild(int32 AgentID)
     if (!Construction)
     {
         UE_LOG(LogTemp, Warning, TEXT("[PlayerBuildContext] CommitCustomBuild failed: Construction system missing"));
+        SetLastCommitResultMessage(TEXT("Custom build failed: construction system missing."));
         return false;
     }
+
+    const int32 CommittedCellCount = SelectedCells.Num();
 
     const int32 TaskID = Construction->StartCustomBuildTask(
         ActiveSettlementID,
@@ -72,6 +81,7 @@ bool UPlayerBuildContext::CommitCustomBuild(int32 AgentID)
     if (TaskID < 0)
     {
         UE_LOG(LogTemp, Warning, TEXT("[PlayerBuildContext] CommitCustomBuild failed: Task creation failed"));
+        SetLastCommitResultMessage(TEXT("Custom build failed: task creation was rejected."));
         return false;
     }
 
@@ -79,8 +89,16 @@ bool UPlayerBuildContext::CommitCustomBuild(int32 AgentID)
         LogTemp,
         Log,
         TEXT("[PlayerBuildContext] Custom build committed: %d cells, material=%s"),
-        SelectedCells.Num(),
+        CommittedCellCount,
         *SelectedMaterial.ToString()
+    );
+
+    SetLastCommitResultMessage(
+        FString::Printf(
+            TEXT("Custom build committed: %d cells of %s."),
+            CommittedCellCount,
+            SelectedMaterial.IsValid() ? *SelectedMaterial.ToString() : TEXT("UnknownMaterial")
+        )
     );
 
     ClearSelection();
@@ -97,12 +115,14 @@ bool UPlayerBuildContext::CommitPrefabBuild(
     if (!World)
     {
         UE_LOG(LogTemp, Warning, TEXT("[PlayerBuildContext] CommitPrefabBuild failed: World null"));
+        SetLastCommitResultMessage(TEXT("Prefab build failed: world unavailable."));
         return false;
     }
 
     if (ActiveSettlementID < 0)
     {
         UE_LOG(LogTemp, Warning, TEXT("[PlayerBuildContext] CommitPrefabBuild failed: Invalid SettlementID"));
+        SetLastCommitResultMessage(TEXT("Prefab build failed: invalid settlement."));
         return false;
     }
 
@@ -110,6 +130,7 @@ bool UPlayerBuildContext::CommitPrefabBuild(
     if (!Construction)
     {
         UE_LOG(LogTemp, Warning, TEXT("[PlayerBuildContext] CommitPrefabBuild failed: Construction system missing"));
+        SetLastCommitResultMessage(TEXT("Prefab build failed: construction system missing."));
         return false;
     }
 
@@ -117,6 +138,7 @@ bool UPlayerBuildContext::CommitPrefabBuild(
     if (!BuildingTag.IsValid())
     {
         UE_LOG(LogTemp, Warning, TEXT("[PlayerBuildContext] CommitPrefabBuild failed: Invalid building tag"));
+        SetLastCommitResultMessage(TEXT("Prefab build failed: invalid building tag."));
         return false;
     }
 
@@ -130,6 +152,14 @@ bool UPlayerBuildContext::CommitPrefabBuild(
     if (TaskID < 0)
     {
         UE_LOG(LogTemp, Warning, TEXT("[PlayerBuildContext] CommitPrefabBuild failed: Task creation failed"));
+        SetLastCommitResultMessage(
+            FString::Printf(
+                TEXT("Could not place %s at (%d, %d). A task may already exist there or requirements were not met."),
+                *BuildingTag.ToString(),
+                Origin.X,
+                Origin.Y
+            )
+        );
         return false;
     }
 
@@ -141,6 +171,15 @@ bool UPlayerBuildContext::CommitPrefabBuild(
         EraIndex,
         Origin.X,
         Origin.Y
+    );
+
+    SetLastCommitResultMessage(
+        FString::Printf(
+            TEXT("Placed %s task at (%d, %d)."),
+            *BuildingTag.ToString(),
+            Origin.X,
+            Origin.Y
+        )
     );
 
     return true;

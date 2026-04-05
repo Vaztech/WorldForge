@@ -52,11 +52,9 @@ public:
     UFUNCTION(BlueprintCallable)
     bool CommitBuild(int32 AgentID);
 
-    // ADDED
     UFUNCTION(BlueprintCallable)
     bool CommitCustomBuild(int32 AgentID);
 
-    // ADDED
     UFUNCTION(BlueprintCallable)
     bool CommitPrefabBuild(
         EBuildingPurpose Purpose,
@@ -65,7 +63,12 @@ public:
         int32 AgentID
     );
 
+    UFUNCTION(BlueprintPure)
+    FString GetLastCommitResultMessage() const { return LastCommitResultMessage; }
+
 private:
+
+    void SetLastCommitResultMessage(const FString& Message);
 
     // Selected grid cells for the current build.
     UPROPERTY()
@@ -78,4 +81,8 @@ private:
     // Target settlement.
     UPROPERTY()
     int32 ActiveSettlementID = -1;
+
+    // Last user-facing result for UI feedback.
+    UPROPERTY(Transient)
+    FString LastCommitResultMessage;
 };

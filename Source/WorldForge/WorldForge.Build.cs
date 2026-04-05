@@ -44,6 +44,7 @@ public class WorldForge : ModuleRules
         {
             "Slate",        // UI framework
             "SlateCore",    // Core UI types
+            "UMG",          // UUserWidget / UWidget
             "PCG",          // Procedural Content Generation (used in world gen)
         });
 

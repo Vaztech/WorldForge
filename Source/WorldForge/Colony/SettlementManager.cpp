@@ -1,4 +1,5 @@
 #include "SettlementManager.h"
+#include "GameplayTagContainer.h"
 
 void USettlementManager::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -84,6 +85,15 @@ void USettlementManager::AddBuilding(int32 ID, const FGameplayTag& Tag)
     if (S && Tag.IsValid() && !S->CompletedBuildings.Contains(Tag))
     {
         S->CompletedBuildings.Add(Tag);
+        SetVisualDirty(ID);
+
+        UE_LOG(
+            LogTemp,
+            Log,
+            TEXT("[SettlementManager] Building registered for settlement %d: %s"),
+            ID,
+            *Tag.ToString()
+        );
     }
 }
 
@@ -112,6 +122,24 @@ void USettlementManager::SetPlayerCurrency(int32 SettlementID, FGameplayTag Curr
     {
         S->PlayerCurrencyTag = CurrencyTag;
     }
+}
+
+void USettlementManager::SetVisualDirty(int32 SettlementID)
+{
+    if (SettlementID >= 0)
+    {
+        VisualDirtySettlements.Add(SettlementID);
+    }
+}
+
+bool USettlementManager::IsVisualDirty(int32 SettlementID) const
+{
+    return VisualDirtySettlements.Contains(SettlementID);
+}
+
+void USettlementManager::ClearVisualDirty(int32 SettlementID)
+{
+    VisualDirtySettlements.Remove(SettlementID);
 }
 
 FSettlementState* USettlementManager::GetMutableSettlement(int32 ID)
@@ -156,6 +184,7 @@ void USettlementManager::IncrementPopulation(int32 ID)
     if (FSettlementState* S = GetMutableSettlement(ID))
     {
         S->Population++;
+        SetVisualDirty(ID);
     }
 }
 
@@ -164,6 +193,7 @@ void USettlementManager::DecrementPopulation(int32 ID)
     if (FSettlementState* S = GetMutableSettlement(ID))
     {
         S->Population = FMath::Max(0, S->Population - 1);
+        SetVisualDirty(ID);
     }
 }
 
@@ -177,6 +207,7 @@ void USettlementManager::RestoreFromSave(const TArray<FSettlementState>& Saved)
 {
     Settlements = Saved;
     NextSettlementID = 0;
+    VisualDirtySettlements.Reset();
 
     for (const FSettlementState& S : Settlements)
     {
