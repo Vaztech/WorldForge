@@ -3,6 +3,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "GameplayTagContainer.h"
 #include "BuildModeTypes.h"
 #include "BuildGhostActor.generated.h"
 
@@ -14,72 +15,70 @@ class UVoxelWorldManager;
 UCLASS()
 class WORLDFORGE_API ABuildGhostActor : public AActor
 {
-	GENERATED_BODY()
+    GENERATED_BODY()
 
 public:
-	ABuildGhostActor();
+    ABuildGhostActor();
 
-	// Sets the visual state of the ghost (green = valid, red = invalid, hidden)
-	void SetGhostState(EBuildGhostState State);
+    // Sets the visual state of the ghost (green = valid, red = invalid, hidden)
+    void SetGhostState(EBuildGhostState State);
 
-	// Prefab mode: move ghost mesh to world position with rotation
-	void UpdatePrefabGhost(FVector WorldPosition, int32 RotationIndex);
+    // Prefab mode: preview explicit block volume instead of a single cube
+    void UpdatePrefabGhost(
+        FVector WorldPosition,
+        int32 RotationIndex,
+        FGameplayTag BuildingTag,
+        UVoxelWorldManager* VoxelManager,
+        float SurfaceZ = 0.0f
+    );
 
-	// Custom draw mode: highlight selected cells + cursor cell
-	void UpdateCustomDrawCells(
-		const TArray<FIntPoint>& SelectedCells,
-		FIntPoint CursorCell,
-		UVoxelWorldManager* VoxelManager);
+    // Custom draw mode: highlight selected cells + cursor cell as full cubes
+    void UpdateCustomDrawCells(
+        const TArray<FIntPoint>& SelectedCells,
+        FIntPoint CursorCell,
+        UVoxelWorldManager* VoxelManager,
+        float SurfaceZ = 0.0f);
 
-	// Remove all cell highlights
-	void ClearAllHighlights();
+    // Remove all cell highlights
+    void ClearAllHighlights();
 
 protected:
-	virtual void BeginPlay() override;
+    virtual void BeginPlay() override;
 
 private:
 
-	// ================================
-	// Prefab ghost mesh
-	// ================================
+    UPROPERTY(VisibleAnywhere)
+    UStaticMeshComponent* GhostMesh;
 
-	UPROPERTY(VisibleAnywhere)
-	UStaticMeshComponent* GhostMesh;
+    UPROPERTY()
+    UMaterialInstanceDynamic* GhostMaterial;
 
-	UPROPERTY()
-	UMaterialInstanceDynamic* GhostMaterial;
+    UPROPERTY()
+    TArray<UStaticMeshComponent*> CellHighlightPool;
 
-	// ================================
-	// Custom draw cell highlights
-	// ================================
+    UPROPERTY()
+    UMaterialInstanceDynamic* CellValidMaterial;
 
-	// Pool of mesh components used for cell highlighting
-	UPROPERTY()
-	TArray<UStaticMeshComponent*> CellHighlightPool;
+    UPROPERTY()
+    UMaterialInstanceDynamic* CellCursorMaterial;
 
-	UPROPERTY()
-	UMaterialInstanceDynamic* CellValidMaterial;
+    int32 ActiveHighlightCount = 0;
 
-	UPROPERTY()
-	UMaterialInstanceDynamic* CellCursorMaterial;
+    static constexpr float GhostOpacity = 0.4f;
 
-	// How many pool entries are currently in use
-	int32 ActiveHighlightCount = 0;
+    FLinearColor GetColorForState(EBuildGhostState State) const;
+    UStaticMeshComponent* GetOrCreateHighlight(int32 Index);
+    void EnsurePoolSize(int32 RequiredSize);
 
-	// ================================
-	// Colors
-	// ================================
+    bool TryParseExplicitPrefabDimensions(
+        const FString& Source,
+        int32& OutWidth,
+        int32& OutDepth,
+        int32& OutHeight
+    ) const;
 
-	static constexpr float GhostOpacity = 0.4f;
+    FIntPoint RotateLocalCell(FIntPoint LocalXY, int32 RotationIndex, int32 Width, int32 Depth) const;
+    int32 GetLegacyPrefabBlockCount(FGameplayTag BuildingTag) const;
 
-	FLinearColor GetColorForState(EBuildGhostState State) const;
-
-	// Get or create a cell highlight component from the pool
-	UStaticMeshComponent* GetOrCreateHighlight(int32 Index);
-
-	// Ensure enough pool capacity
-	void EnsurePoolSize(int32 RequiredSize);
-
-	// Current state
-	EBuildGhostState CurrentState = EBuildGhostState::Hidden;
+    EBuildGhostState CurrentState = EBuildGhostState::Hidden;
 };

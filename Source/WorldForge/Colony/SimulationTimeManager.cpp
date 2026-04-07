@@ -4,12 +4,17 @@ void USimulationTimeManager::Initialize(FSubsystemCollectionBase& Collection)
 {
     Super::Initialize(Collection);
 
+    RecalculateTimeSettings();
+
     UE_LOG(
         LogTemp,
         Log,
-        TEXT("[SimTime] Initialized. Interval=%.2fs MaxSteps/Frame=%d"),
+        TEXT("[SimTime] Initialized. Target=%.2f min/day Interval=%.2fs StepsPerDay=%d MaxSteps/Frame=%d Speed=%.2fx"),
+        TargetMinutesPerDay,
         FixedStepInterval,
-        MaxStepsPerFrame
+        StepsPerDay,
+        MaxStepsPerFrame,
+        SimSpeedMultiplier
     );
 }
 
@@ -85,7 +90,15 @@ void USimulationTimeManager::StartSimulation()
     bPaused = false;
     Accumulator = 0.f;
 
-    UE_LOG(LogTemp, Log, TEXT("[SimTime] Started."));
+    UE_LOG(
+        LogTemp,
+        Log,
+        TEXT("[SimTime] Started. Target=%.2f min/day Interval=%.2fs StepsPerDay=%d Speed=%.2fx"),
+        TargetMinutesPerDay,
+        FixedStepInterval,
+        StepsPerDay,
+        SimSpeedMultiplier
+    );
 }
 
 void USimulationTimeManager::PauseSimulation()
@@ -102,10 +115,36 @@ void USimulationTimeManager::ResumeSimulation()
     UE_LOG(LogTemp, Log, TEXT("[SimTime] Resumed at step %d"), StepNumber);
 }
 
-void USimulationTimeManager::SetSimSpeed(float M)
+void USimulationTimeManager::SetSimSpeed(float Multiplier)
 {
-    SimSpeedMultiplier = FMath::Clamp(M, 0.1f, 20.f);
-    UE_LOG(LogTemp, Log, TEXT("[SimTime] Speed %.1fx"), SimSpeedMultiplier);
+    SimSpeedMultiplier = FMath::Clamp(Multiplier, 0.01f, 10.0f);
+
+    UE_LOG(
+        LogTemp,
+        Log,
+        TEXT("[SimTime] Speed %.2fx"),
+        SimSpeedMultiplier
+    );
+}
+
+void USimulationTimeManager::RecalculateTimeSettings()
+{
+    const int32 SafeStepsPerDay = FMath::Max(1, StepsPerDay);
+    const float SafeTargetMinutesPerDay = FMath::Clamp(TargetMinutesPerDay, 1.0f, 120.0f);
+    const float SecondsPerDay = SafeTargetMinutesPerDay * 60.0f;
+
+    StepsPerDay = SafeStepsPerDay;
+    TargetMinutesPerDay = SafeTargetMinutesPerDay;
+    FixedStepInterval = SecondsPerDay / static_cast<float>(SafeStepsPerDay);
+
+    UE_LOG(
+        LogTemp,
+        Log,
+        TEXT("[SimTime] Recalculated: %.2f min/day -> %.2fs/step (StepsPerDay=%d)"),
+        TargetMinutesPerDay,
+        FixedStepInterval,
+        StepsPerDay
+    );
 }
 
 void USimulationTimeManager::RestoreStepCount(int32 S, int32 D, int32 Y)

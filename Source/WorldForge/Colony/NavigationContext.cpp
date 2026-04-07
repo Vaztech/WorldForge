@@ -1,4 +1,5 @@
 #include "NavigationContext.h"
+#include "SettlementManager.h"
 
 const TMap<FIntPoint, FNavCell> UNavigationContext::EmptyGrid;
 
@@ -176,6 +177,29 @@ FIntPoint UNavigationContext::WorldToGrid(FVector Position, float CellSize) cons
     );
 }
 
+FIntPoint UNavigationContext::NavToWorld(int32 SettlementID, FIntPoint NavCell) const
+{
+    const UWorld* World = GetWorld();
+    if (!World)
+    {
+        return NavCell;
+    }
+
+    const USettlementManager* SettlementMgr = World->GetSubsystem<USettlementManager>();
+    if (!SettlementMgr)
+    {
+        return NavCell;
+    }
+
+    const FSettlementState* Settlement = SettlementMgr->GetSettlement(SettlementID);
+    if (!Settlement)
+    {
+        return NavCell;
+    }
+
+    return Settlement->WorldOrigin + NavCell;
+}
+
 const TMap<FIntPoint, FNavCell>& UNavigationContext::GetGrid(int32 SettlementID) const
 {
     const TMap<FIntPoint, FNavCell>* Grid = SettlementGrids.Find(SettlementID);
@@ -214,9 +238,6 @@ TArray<FIntPoint> UNavigationContext::GetNeighbors(FIntPoint Position, int32 Gri
     return Neighbors;
 }
 
-// Returns a deterministic walkable cell for the given settlement.
-// Phase 2 fix: harvest/work jobs need a valid TargetGridPos so agents
-// do not all fall back to (0,0).
 FIntPoint UNavigationContext::GetRandomWalkableCell(
     int32 SettlementID,
     int32 Seed
@@ -228,7 +249,6 @@ FIntPoint UNavigationContext::GetRandomWalkableCell(
         return FIntPoint(0, 0);
     }
 
-    // Collect all currently walkable cells for this settlement.
     TArray<FIntPoint> Walkable;
     Walkable.Reserve(G->Num());
 
@@ -245,7 +265,5 @@ FIntPoint UNavigationContext::GetRandomWalkableCell(
         return FIntPoint(0, 0);
     }
 
-    // Deterministic selection based only on the provided seed.
-    // No randomness is introduced here.
     return Walkable[FMath::Abs(Seed) % Walkable.Num()];
 }

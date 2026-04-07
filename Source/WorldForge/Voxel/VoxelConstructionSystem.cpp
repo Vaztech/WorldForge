@@ -7,6 +7,81 @@
 #include "VoxelWorldManager.h"
 #include "WorldForgeTags.h"
 
+namespace
+{
+    static bool TryParseExplicitPrefabDimensions(const FString& Source, int32& OutWidth, int32& OutDepth, int32& OutHeight)
+    {
+        OutWidth = 0;
+        OutDepth = 0;
+        OutHeight = 0;
+
+        const int32 Length = Source.Len();
+        for (int32 Start = 0; Start < Length; ++Start)
+        {
+            if (!FChar::IsDigit(Source[Start]))
+            {
+                continue;
+            }
+
+            int32 Cursor = Start;
+
+            FString A;
+            while (Cursor < Length && FChar::IsDigit(Source[Cursor]))
+            {
+                A.AppendChar(Source[Cursor]);
+                ++Cursor;
+            }
+
+            if (A.IsEmpty() || Cursor >= Length || (Source[Cursor] != TCHAR('x') && Source[Cursor] != TCHAR('X')))
+            {
+                continue;
+            }
+
+            ++Cursor;
+
+            FString B;
+            while (Cursor < Length && FChar::IsDigit(Source[Cursor]))
+            {
+                B.AppendChar(Source[Cursor]);
+                ++Cursor;
+            }
+
+            if (B.IsEmpty() || Cursor >= Length || (Source[Cursor] != TCHAR('x') && Source[Cursor] != TCHAR('X')))
+            {
+                continue;
+            }
+
+            ++Cursor;
+
+            FString C;
+            while (Cursor < Length && FChar::IsDigit(Source[Cursor]))
+            {
+                C.AppendChar(Source[Cursor]);
+                ++Cursor;
+            }
+
+            if (C.IsEmpty())
+            {
+                continue;
+            }
+
+            const int32 ParsedWidth = FCString::Atoi(*A);
+            const int32 ParsedDepth = FCString::Atoi(*B);
+            const int32 ParsedHeight = FCString::Atoi(*C);
+
+            if (ParsedWidth > 0 && ParsedDepth > 0 && ParsedHeight > 0)
+            {
+                OutWidth = ParsedWidth;
+                OutDepth = ParsedDepth;
+                OutHeight = ParsedHeight;
+                return true;
+            }
+        }
+
+        return false;
+    }
+}
+
 void UVoxelConstructionSystem::Initialize(FSubsystemCollectionBase& C)
 {
     Super::Initialize(C);
@@ -28,48 +103,78 @@ int32 UVoxelConstructionSystem::StartBuildTask(int32 SID, FGameplayTag Tag, FInt
         return -1;
     }
 
-    // Prefab builds currently default to stone unless a richer prefab-material
-    // mapping is introduced later. This preserves your existing behavior while
-    // adding the Section I stockpile gate/consumption.
     const FGameplayTag DefaultPrefabMaterial =
         FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Voxel.Material.Stone")));
 
-    const int32 RequiredBlocks = GetBlockCount(Tag);
+    const TArray<FIntVector> PrefabBlocks = BuildPrefabBlockList(Tag, Origin);
+    return StartBuildTaskFromBlocks(SID, Tag, PrefabBlocks, DefaultPrefabMaterial, AgentID);
+}
+
+int32 UVoxelConstructionSystem::StartBuildTaskFromBlocks(
+    int32 SID,
+    FGameplayTag BuildTag,
+    const TArray<FIntVector>& Blocks,
+    FGameplayTag MaterialTag,
+    int32 AgentID)
+{
+    if (Blocks.Num() <= 0)
+    {
+        UE_LOG(
+            LogTemp,
+            Warning,
+            TEXT("[VoxelConstruction] Cannot start prefab task %s for settlement %d: empty block list"),
+            *BuildTag.ToString(),
+            SID
+        );
+        return -1;
+    }
+
+    if (HasConflictingTaskInBlockList(SID, Blocks))
+    {
+        UE_LOG(
+            LogTemp,
+            Warning,
+            TEXT("[VoxelConstruction] Cannot start prefab task %s for settlement %d: explicit block list conflicts with an active task"),
+            *BuildTag.ToString(),
+            SID
+        );
+        return -1;
+    }
+
+    const FGameplayTag EffectiveMaterial = MaterialTag.IsValid()
+        ? MaterialTag
+        : FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Voxel.Material.Stone")));
 
     UWorld* World = GetWorld();
     USettlementManager* SettlementManager = World ? World->GetSubsystem<USettlementManager>() : nullptr;
 
-    // Section I / Milestone D:
-    // insufficient material blocks task creation.
-    if (!HasEnoughStockpileForTask(SID, DefaultPrefabMaterial, RequiredBlocks, World))
+    if (!HasEnoughStockpileForTask(SID, EffectiveMaterial, Blocks.Num(), World))
     {
-        const FGameplayTag RequiredItem = ResolveRequiredStockpileItem(DefaultPrefabMaterial);
+        const FGameplayTag RequiredItem = ResolveRequiredStockpileItem(EffectiveMaterial);
 
         UE_LOG(
             LogTemp,
             Warning,
             TEXT("[VoxelConstruction] Cannot start prefab task %s for settlement %d: insufficient %s. Required=%d Available=%d"),
-            *Tag.ToString(),
+            *BuildTag.ToString(),
             SID,
             *RequiredItem.ToString(),
-            RequiredBlocks,
+            Blocks.Num(),
             SettlementManager ? SettlementManager->GetStockpileAmount(SID, RequiredItem) : 0
         );
 
         return -1;
     }
 
-    // Consume stockpile up front so the task reserves real materials
-    // and cannot be duplicated after passing the gate once.
     if (!SettlementManager)
     {
-        UE_LOG(LogTemp, Warning, TEXT("[VoxelConstruction] Cannot start prefab task %s: SettlementManager missing"), *Tag.ToString());
+        UE_LOG(LogTemp, Warning, TEXT("[VoxelConstruction] Cannot start prefab task %s: SettlementManager missing"), *BuildTag.ToString());
         return -1;
     }
 
     {
-        const FGameplayTag RequiredItem = ResolveRequiredStockpileItem(DefaultPrefabMaterial);
-        const bool bConsumed = SettlementManager->ConsumeFromStockpile(SID, RequiredItem, RequiredBlocks);
+        const FGameplayTag RequiredItem = ResolveRequiredStockpileItem(EffectiveMaterial);
+        const bool bConsumed = SettlementManager->ConsumeFromStockpile(SID, RequiredItem, Blocks.Num());
 
         if (!bConsumed)
         {
@@ -77,9 +182,9 @@ int32 UVoxelConstructionSystem::StartBuildTask(int32 SID, FGameplayTag Tag, FInt
                 LogTemp,
                 Warning,
                 TEXT("[VoxelConstruction] Failed to consume %d of %s for prefab task %s in settlement %d"),
-                RequiredBlocks,
+                Blocks.Num(),
                 *RequiredItem.ToString(),
-                *Tag.ToString(),
+                *BuildTag.ToString(),
                 SID
             );
 
@@ -90,25 +195,34 @@ int32 UVoxelConstructionSystem::StartBuildTask(int32 SID, FGameplayTag Tag, FInt
             LogTemp,
             Log,
             TEXT("[VoxelConstruction] Consumed %d of %s for prefab task %s"),
-            RequiredBlocks,
+            Blocks.Num(),
             *RequiredItem.ToString(),
-            *Tag.ToString()
+            *BuildTag.ToString()
         );
     }
 
     FActiveBuildTask T;
     T.TaskID = NextTaskID++;
     T.SettlementID = SID;
-    T.BuildingTag = Tag;
-    T.OriginGridCell = Origin;
+    T.BuildingTag = BuildTag;
     T.AssignedAgentID = AgentID;
-    T.TotalBlocks = RequiredBlocks;
+    T.TotalBlocks = Blocks.Num();
     T.PlacedBlocks = 0;
     T.bComplete = false;
+    T.MaterialTag = EffectiveMaterial;
+    T.BlockList3D = Blocks;
 
-    // Preserve current prefab behavior while allowing Section I material support.
-    // Existing tasks default to stone unless a custom material is supplied later.
-    T.MaterialTag = DefaultPrefabMaterial;
+    const FIntVector FirstBlock = Blocks[0];
+    T.OriginGridCell = FIntPoint(FirstBlock.X, FirstBlock.Y);
+
+    T.BlockList.Reset();
+    for (const FIntVector& Block : Blocks)
+    {
+        if (Block.Z == 0)
+        {
+            T.BlockList.AddUnique(FIntPoint(Block.X, Block.Y));
+        }
+    }
 
     ActiveTasks.Add(T);
 
@@ -117,9 +231,9 @@ int32 UVoxelConstructionSystem::StartBuildTask(int32 SID, FGameplayTag Tag, FInt
         Log,
         TEXT("[VoxelConstruction] Task %d: %s at (%d,%d) -- %d blocks"),
         T.TaskID,
-        *Tag.ToString(),
-        Origin.X,
-        Origin.Y,
+        *T.BuildingTag.ToString(),
+        T.OriginGridCell.X,
+        T.OriginGridCell.Y,
         T.TotalBlocks
     );
 
@@ -132,7 +246,45 @@ int32 UVoxelConstructionSystem::StartCustomBuildTask(
     FGameplayTag MaterialTag,
     int32 AgentID)
 {
-    // Use caller-supplied material if valid; otherwise preserve existing stone fallback.
+    TArray<FIntVector> Blocks3D;
+    Blocks3D.Reserve(Blocks.Num());
+
+    for (const FIntPoint& Block : Blocks)
+    {
+        Blocks3D.Add(FIntVector(Block.X, Block.Y, 0));
+    }
+
+    return StartCustomBuildTask3D(SID, Blocks3D, MaterialTag, AgentID);
+}
+
+int32 UVoxelConstructionSystem::StartCustomBuildTask3D(
+    int32 SID,
+    const TArray<FIntVector>& Blocks,
+    FGameplayTag MaterialTag,
+    int32 AgentID)
+{
+    if (Blocks.Num() <= 0)
+    {
+        UE_LOG(
+            LogTemp,
+            Warning,
+            TEXT("[VoxelConstruction] Cannot start custom task for settlement %d: empty block list"),
+            SID
+        );
+        return -1;
+    }
+
+    if (HasConflictingTaskInBlockList(SID, Blocks))
+    {
+        UE_LOG(
+            LogTemp,
+            Warning,
+            TEXT("[VoxelConstruction] Cannot start custom task for settlement %d: explicit block list conflicts with an active task"),
+            SID
+        );
+        return -1;
+    }
+
     const FGameplayTag EffectiveMaterial = MaterialTag.IsValid()
         ? MaterialTag
         : FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Voxel.Material.Stone")));
@@ -140,8 +292,6 @@ int32 UVoxelConstructionSystem::StartCustomBuildTask(
     UWorld* World = GetWorld();
     USettlementManager* SettlementManager = World ? World->GetSubsystem<USettlementManager>() : nullptr;
 
-    // Section I / Milestone D:
-    // insufficient material blocks task creation.
     if (!HasEnoughStockpileForTask(SID, EffectiveMaterial, Blocks.Num(), World))
     {
         const FGameplayTag RequiredItem = ResolveRequiredStockpileItem(EffectiveMaterial);
@@ -159,7 +309,6 @@ int32 UVoxelConstructionSystem::StartCustomBuildTask(
         return -1;
     }
 
-    // Consume stockpile up front so custom tasks also reserve real materials.
     if (!SettlementManager)
     {
         UE_LOG(LogTemp, Warning, TEXT("[VoxelConstruction] Cannot start custom task: SettlementManager missing"));
@@ -196,24 +345,25 @@ int32 UVoxelConstructionSystem::StartCustomBuildTask(
     FActiveBuildTask T;
     T.TaskID = NextTaskID++;
     T.SettlementID = SID;
-
-    // Custom builds do not necessarily map to a standard completed building tag yet.
-    // Leave BuildingTag empty rather than inventing a new architecture.
     T.BuildingTag = FGameplayTag::EmptyTag;
-
-    // Store the exact cells to place, in order.
-    T.BlockList = Blocks;
-
+    T.BlockList3D = Blocks;
     T.MaterialTag = EffectiveMaterial;
-
     T.TotalBlocks = Blocks.Num();
     T.PlacedBlocks = 0;
     T.AssignedAgentID = AgentID;
     T.bComplete = false;
 
-    // For custom tasks, OriginGridCell is not used for placement, but keeping it zero
-    // maintains save compatibility and avoids changing task shape semantics elsewhere.
-    T.OriginGridCell = FIntPoint::ZeroValue;
+    const FIntVector FirstBlock = Blocks[0];
+    T.OriginGridCell = FIntPoint(FirstBlock.X, FirstBlock.Y);
+
+    T.BlockList.Reset();
+    for (const FIntVector& Block : Blocks)
+    {
+        if (Block.Z == 0)
+        {
+            T.BlockList.AddUnique(FIntPoint(Block.X, Block.Y));
+        }
+    }
 
     ActiveTasks.Add(T);
 
@@ -237,67 +387,43 @@ bool UVoxelConstructionSystem::PlaceNextBlock(int32 TaskID, UWorld* World)
         return false;
     }
 
-    // Advance progress first so PlacedBlocks remains the "count of completed placements"
-    // exactly like the existing prefab logic.
+    TArray<FIntVector> EffectiveBlocks;
+    GetEffectiveBlockList3D(*T, EffectiveBlocks);
+
+    if (EffectiveBlocks.Num() <= 0)
+    {
+        UE_LOG(
+            LogTemp,
+            Warning,
+            TEXT("[VoxelConstruction] PlaceNextBlock failed: Task %d has no effective block list"),
+            TaskID
+        );
+        return false;
+    }
+
+    if (T->PlacedBlocks >= EffectiveBlocks.Num())
+    {
+        T->bComplete = true;
+        FinalizeBuilding(*T, World);
+        return true;
+    }
+
+    const FIntVector Block = EffectiveBlocks[T->PlacedBlocks];
     T->PlacedBlocks++;
 
     if (UVoxelWorldManager* V = World ? World->GetSubsystem<UVoxelWorldManager>() : nullptr)
     {
-        FVector WorldPos = FVector::ZeroVector;
+        const FVector WorldPos = V->GridToWorld(FIntPoint(Block.X, Block.Y), Block.Z);
 
-        // Section I hybrid build support:
-        // If BlockList exists, place explicit cells directly.
-        // Otherwise preserve the old 2x2 layered prefab behavior.
-        if (T->BlockList.Num() > 0)
-        {
-            const int32 BlockIndex = T->PlacedBlocks - 1;
-
-            if (T->BlockList.IsValidIndex(BlockIndex))
-            {
-                const FIntPoint BuildGridCell = T->BlockList[BlockIndex];
-
-                // Current custom builds place on layer 0 only.
-                // Vertical custom layering is deferred to a later targeted step.
-                WorldPos = V->GridToWorld(BuildGridCell, 0);
-            }
-        }
-        else
-        {
-            // ================================
-            // Existing prefab grid placement
-            // ================================
-            const int32 Layer = (T->PlacedBlocks - 1) / 4;
-            const int32 BlockIndexWithinLayer = (T->PlacedBlocks - 1) % 4;
-
-            FIntPoint LocalOffset = FIntPoint::ZeroValue;
-
-            switch (BlockIndexWithinLayer)
-            {
-            case 0: LocalOffset = FIntPoint(0, 0); break;
-            case 1: LocalOffset = FIntPoint(1, 0); break;
-            case 2: LocalOffset = FIntPoint(0, 1); break;
-            case 3: LocalOffset = FIntPoint(1, 1); break;
-            default: break;
-            }
-
-            const FIntPoint BuildGridCell(
-                T->OriginGridCell.X + LocalOffset.X,
-                T->OriginGridCell.Y + LocalOffset.Y
-            );
-
-            WorldPos = V->GridToWorld(BuildGridCell, Layer);
-        }
-
-        // Use task material when present instead of always hardcoding stone.
-        // This preserves old behavior through the fallback path.
         V->PlaceVoxelBlock(
             WorldPos,
             T->MaterialTag.IsValid()
             ? T->MaterialTag
-            : FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Voxel.Material.Stone"))));
+            : FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Voxel.Material.Stone")))
+        );
     }
 
-    if (T->PlacedBlocks >= T->TotalBlocks)
+    if (T->PlacedBlocks >= EffectiveBlocks.Num())
     {
         T->bComplete = true;
         FinalizeBuilding(*T, World);
@@ -311,8 +437,6 @@ void UVoxelConstructionSystem::FinalizeBuilding(const FActiveBuildTask& T, UWorl
 {
     if (!W) return;
 
-    // Only register a completed building if this task actually represents a tagged building.
-    // Custom freeform builds may intentionally leave BuildingTag empty.
     if (T.BuildingTag.IsValid())
     {
         if (USettlementManager* SM = W->GetSubsystem<USettlementManager>())
@@ -375,18 +499,40 @@ bool UVoxelConstructionSystem::HasConflictingTaskAtOrigin(int32 SettlementID, FI
             continue;
         }
 
-        // For prefab tasks, reject only an active task already using the same origin.
-        // This allows multiple huts/houses of the same type at different cells.
-        if (T.BlockList.Num() == 0 && T.OriginGridCell == Origin)
+        if (T.OriginGridCell == Origin)
         {
             return true;
         }
 
-        // For custom tasks, also reject if the requested prefab origin overlaps
-        // one of the custom task's explicit cells.
-        if (T.BlockList.Contains(Origin))
+        if (TaskOccupiesBlock(T, FIntVector(Origin.X, Origin.Y, 0)))
         {
             return true;
+        }
+    }
+
+    return false;
+}
+
+bool UVoxelConstructionSystem::HasConflictingTaskInBlockList(int32 SettlementID, const TArray<FIntVector>& Blocks) const
+{
+    for (const FIntVector& Block : Blocks)
+    {
+        for (const FActiveBuildTask& T : ActiveTasks)
+        {
+            if (T.bComplete)
+            {
+                continue;
+            }
+
+            if (T.SettlementID != SettlementID)
+            {
+                continue;
+            }
+
+            if (TaskOccupiesBlock(T, Block))
+            {
+                return true;
+            }
         }
     }
 
@@ -418,6 +564,29 @@ int32 UVoxelConstructionSystem::GetBlockCount(FGameplayTag Tag) const
 {
     const FString S = Tag.ToString();
 
+    int32 TrailingDigitStart = INDEX_NONE;
+    for (int32 Index = S.Len() - 1; Index >= 0; --Index)
+    {
+        if (FChar::IsDigit(S[Index]))
+        {
+            TrailingDigitStart = Index;
+        }
+        else
+        {
+            break;
+        }
+    }
+
+    if (TrailingDigitStart != INDEX_NONE)
+    {
+        const FString TrailingDigits = S.Mid(TrailingDigitStart);
+        const int32 ParsedCount = FCString::Atoi(*TrailingDigits);
+        if (ParsedCount > 0)
+        {
+            return ParsedCount;
+        }
+    }
+
     if (S.Contains(TEXT("Stockpile"))) return 8;
     if (S.Contains(TEXT("Kitchen"))) return 16;
     if (S.Contains(TEXT("Carpenter"))) return 20;
@@ -427,12 +596,108 @@ int32 UVoxelConstructionSystem::GetBlockCount(FGameplayTag Tag) const
     return 10;
 }
 
+TArray<FIntVector> UVoxelConstructionSystem::BuildPrefabBlockList(FGameplayTag BuildTag, FIntPoint Origin) const
+{
+    TArray<FIntVector> Blocks;
+
+    int32 ExplicitWidth = 0;
+    int32 ExplicitDepth = 0;
+    int32 ExplicitHeight = 0;
+
+    if (TryParseExplicitPrefabDimensions(BuildTag.ToString(), ExplicitWidth, ExplicitDepth, ExplicitHeight))
+    {
+        Blocks.Reserve(ExplicitWidth * ExplicitDepth * ExplicitHeight);
+
+        for (int32 Z = 0; Z < ExplicitHeight; ++Z)
+        {
+            for (int32 Y = 0; Y < ExplicitDepth; ++Y)
+            {
+                for (int32 X = 0; X < ExplicitWidth; ++X)
+                {
+                    Blocks.Add(FIntVector(Origin.X + X, Origin.Y + Y, Z));
+                }
+            }
+        }
+
+        return Blocks;
+    }
+
+    const int32 RequiredBlocks = GetBlockCount(BuildTag);
+    Blocks.Reserve(RequiredBlocks);
+
+    for (int32 BlockNumber = 0; BlockNumber < RequiredBlocks; ++BlockNumber)
+    {
+        const int32 Layer = BlockNumber / 4;
+        const int32 BlockIndexWithinLayer = BlockNumber % 4;
+
+        FIntPoint LocalOffset = FIntPoint::ZeroValue;
+
+        switch (BlockIndexWithinLayer)
+        {
+        case 0: LocalOffset = FIntPoint(0, 0); break;
+        case 1: LocalOffset = FIntPoint(1, 0); break;
+        case 2: LocalOffset = FIntPoint(0, 1); break;
+        case 3: LocalOffset = FIntPoint(1, 1); break;
+        default: break;
+        }
+
+        Blocks.Add(FIntVector(
+            Origin.X + LocalOffset.X,
+            Origin.Y + LocalOffset.Y,
+            Layer
+        ));
+    }
+
+    return Blocks;
+}
+
+void UVoxelConstructionSystem::GetEffectiveBlockList3D(const FActiveBuildTask& Task, TArray<FIntVector>& OutBlocks) const
+{
+    OutBlocks.Reset();
+
+    if (Task.BlockList3D.Num() > 0)
+    {
+        OutBlocks = Task.BlockList3D;
+        return;
+    }
+
+    if (Task.BlockList.Num() > 0)
+    {
+        OutBlocks.Reserve(Task.BlockList.Num());
+        for (const FIntPoint& Block2D : Task.BlockList)
+        {
+            OutBlocks.Add(FIntVector(Block2D.X, Block2D.Y, 0));
+        }
+        return;
+    }
+
+    if (Task.TotalBlocks > 0)
+    {
+        OutBlocks = BuildPrefabBlockList(Task.BuildingTag, Task.OriginGridCell);
+        return;
+    }
+}
+
+bool UVoxelConstructionSystem::TaskOccupiesBlock(const FActiveBuildTask& Task, const FIntVector& Block) const
+{
+    TArray<FIntVector> EffectiveBlocks;
+    GetEffectiveBlockList3D(Task, EffectiveBlocks);
+
+    for (const FIntVector& ExistingBlock : EffectiveBlocks)
+    {
+        if (ExistingBlock == Block)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 FGameplayTag UVoxelConstructionSystem::ResolveRequiredStockpileItem(FGameplayTag MaterialTag) const
 {
     const FString MaterialString = MaterialTag.ToString();
 
-    // Keep this intentionally minimal and deterministic until your project
-    // defines a richer voxel-material -> item-cost mapping table.
     if (MaterialString.Contains(TEXT("Wood")))
     {
         return TAG_Item_Wood;
@@ -469,9 +734,133 @@ bool UVoxelConstructionSystem::HasEnoughStockpileForTask(
     return AvailableUnits >= RequiredUnits;
 }
 
+int32 UVoxelConstructionSystem::GetRequiredUnitsForPrefab(FGameplayTag BuildTag) const
+{
+    return BuildTag.IsValid() ? GetBlockCount(BuildTag) : 0;
+}
+
+int32 UVoxelConstructionSystem::GetRequiredUnitsForCustom(int32 CellCount) const
+{
+    return FMath::Max(0, CellCount);
+}
+
+FGameplayTag UVoxelConstructionSystem::GetRequiredItemForPrefab(FGameplayTag BuildTag) const
+{
+    if (!BuildTag.IsValid())
+    {
+        return FGameplayTag::EmptyTag;
+    }
+
+    const FGameplayTag DefaultPrefabMaterial =
+        FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Voxel.Material.Stone")));
+
+    return ResolveRequiredStockpileItem(DefaultPrefabMaterial);
+}
+
+FGameplayTag UVoxelConstructionSystem::GetRequiredItemForMaterial(FGameplayTag MaterialTag) const
+{
+    if (!MaterialTag.IsValid())
+    {
+        return FGameplayTag::EmptyTag;
+    }
+
+    return ResolveRequiredStockpileItem(MaterialTag);
+}
+
+int32 UVoxelConstructionSystem::GetAvailableUnitsForPrefab(int32 SettlementID, FGameplayTag BuildTag, UWorld* World) const
+{
+    if (!World || SettlementID < 0 || !BuildTag.IsValid())
+    {
+        return 0;
+    }
+
+    USettlementManager* SettlementManager = World->GetSubsystem<USettlementManager>();
+    if (!SettlementManager)
+    {
+        return 0;
+    }
+
+    const FGameplayTag RequiredItem = GetRequiredItemForPrefab(BuildTag);
+    return RequiredItem.IsValid() ? SettlementManager->GetStockpileAmount(SettlementID, RequiredItem) : 0;
+}
+
+int32 UVoxelConstructionSystem::GetAvailableUnitsForMaterial(int32 SettlementID, FGameplayTag MaterialTag, UWorld* World) const
+{
+    if (!World || SettlementID < 0 || !MaterialTag.IsValid())
+    {
+        return 0;
+    }
+
+    USettlementManager* SettlementManager = World->GetSubsystem<USettlementManager>();
+    if (!SettlementManager)
+    {
+        return 0;
+    }
+
+    const FGameplayTag RequiredItem = GetRequiredItemForMaterial(MaterialTag);
+    return RequiredItem.IsValid() ? SettlementManager->GetStockpileAmount(SettlementID, RequiredItem) : 0;
+}
+
+bool UVoxelConstructionSystem::CanAffordPrefab(int32 SettlementID, FGameplayTag BuildTag, UWorld* World) const
+{
+    if (!BuildTag.IsValid())
+    {
+        return false;
+    }
+
+    const FGameplayTag DefaultPrefabMaterial =
+        FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Voxel.Material.Stone")));
+
+    return HasEnoughStockpileForTask(
+        SettlementID,
+        DefaultPrefabMaterial,
+        GetRequiredUnitsForPrefab(BuildTag),
+        World
+    );
+}
+
+bool UVoxelConstructionSystem::CanAffordCustom(int32 SettlementID, FGameplayTag MaterialTag, int32 CellCount, UWorld* World) const
+{
+    if (!MaterialTag.IsValid())
+    {
+        return false;
+    }
+
+    return HasEnoughStockpileForTask(
+        SettlementID,
+        MaterialTag,
+        GetRequiredUnitsForCustom(CellCount),
+        World
+    );
+}
+
 void UVoxelConstructionSystem::RestoreFromSave(const TArray<FActiveBuildTask>& Saved)
 {
     ActiveTasks = Saved;
+
+    for (FActiveBuildTask& T : ActiveTasks)
+    {
+        if (T.BlockList3D.Num() == 0)
+        {
+            if (T.BlockList.Num() > 0)
+            {
+                T.BlockList3D.Reserve(T.BlockList.Num());
+                for (const FIntPoint& LegacyBlock : T.BlockList)
+                {
+                    T.BlockList3D.Add(FIntVector(LegacyBlock.X, LegacyBlock.Y, 0));
+                }
+            }
+            else if (T.TotalBlocks > 0)
+            {
+                T.BlockList3D = BuildPrefabBlockList(T.BuildingTag, T.OriginGridCell);
+            }
+        }
+
+        if (T.BlockList3D.Num() > 0)
+        {
+            T.TotalBlocks = T.BlockList3D.Num();
+        }
+    }
 
     NextTaskID = 0;
     for (const FActiveBuildTask& T : ActiveTasks)

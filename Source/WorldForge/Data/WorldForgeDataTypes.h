@@ -123,6 +123,13 @@ enum class EBuildingPurpose : uint8
     Decorative     UMETA(DisplayName = "Decorative")
 };
 
+UENUM(BlueprintType)
+enum class ETerrainMode : uint8
+{
+    Smooth UMETA(DisplayName = "Smooth"),
+    Blocky UMETA(DisplayName = "Blocky")
+};
+
 // ═══════════════════════════════════════════════════════════════════
 // FOG OF WAR
 // ═══════════════════════════════════════════════════════════════════
@@ -515,16 +522,29 @@ struct FMarketPrice
 };
 
 USTRUCT(BlueprintType)
-struct FSettlementMarket
+struct FSettlementState
 {
     GENERATED_BODY()
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 SettlementID = -1;
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FGameplayTag PrimaryCurrency;
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TArray<FGameplayTag> AcceptedCurrencies;
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TMap<FGameplayTag, FMarketPrice> Prices;
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TMap<FGameplayTag, float> CurrencyReserves;
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) EMarketTier MarketTier = EMarketTier::None;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 WorldTileID = -1;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FString Name;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 Population = 0;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float MoraleSummary = 50.f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FGameplayTag PlayerCurrencyTag;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 OwnerCivID = -1;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float ThreatLevel = 0.f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TMap<FGameplayTag, int32> Stockpiles;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TArray<FGameplayTag> CompletedBuildings;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FGameplayTag ReligionState;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FGameplayTagContainer ActivePolicies;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) bool bActorsLoaded = false;
+
+    // NEW:
+    // World-space terrain/grid origin for this settlement.
+    // Local nav cells are converted to world terrain cells by:
+    // WorldCell = WorldOrigin + LocalNavCell
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FIntPoint WorldOrigin = FIntPoint::ZeroValue;
 };
 
 USTRUCT(BlueprintType)
@@ -612,25 +632,6 @@ struct FEconomySaveState
 // COLONY SIMULATION
 // ═══════════════════════════════════════════════════════════════════
 
-USTRUCT(BlueprintType)
-struct FSettlementState
-{
-    GENERATED_BODY()
-
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 SettlementID = -1;
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 WorldTileID = -1;
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FString Name;
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 Population = 0;
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float MoraleSummary = 50.f;
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FGameplayTag PlayerCurrencyTag;
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 OwnerCivID = -1;
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float ThreatLevel = 0.f;
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TMap<FGameplayTag, int32> Stockpiles;
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TArray<FGameplayTag> CompletedBuildings;
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FGameplayTag ReligionState;
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FGameplayTagContainer ActivePolicies;
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) bool bActorsLoaded = false;
-};
 
 USTRUCT(BlueprintType)
 struct FReservationRecord
@@ -672,7 +673,13 @@ struct FActiveBuildTask
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) int32 PlacedBlocks = 0;
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) int32 AssignedAgentID = -1;
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) bool bComplete = false;
+
+    // Legacy flat custom-build data kept for backward compatibility with existing saves.
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) TArray<FIntPoint> BlockList;
+
+    // New canonical 3D block list.
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) TArray<FIntVector> BlockList3D;
+
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) FGameplayTag MaterialTag;
 };
 
@@ -778,6 +785,10 @@ struct FWorldGenConfig
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float EconomicComplexity = 0.5f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 StartingCivCount = 4;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int64 MasterSeed = 12345;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) ETerrainMode TerrainMode = ETerrainMode::Smooth;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, meta = (ClampMin = "1", UIMin = "1"))
+    int32 BlockHeightStep = 4;
 };
 
 enum ECulturalAxis : int32

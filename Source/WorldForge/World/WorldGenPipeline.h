@@ -76,6 +76,9 @@ private:
     bool            bComplete = false;
 
     // Stored explicitly -- no GetWorld() calls inside UObject
+    UPROPERTY(Transient)
     UWorldForgeRNG* RNGRef = nullptr;
+
+    UPROPERTY(Transient)
     UWorld* WorldRef = nullptr;
 };

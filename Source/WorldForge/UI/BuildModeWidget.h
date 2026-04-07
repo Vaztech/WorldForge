@@ -1,4 +1,3 @@
-// Source/WorldForge/UI/BuildModeWidget.h
 #pragma once
 
 #include "CoreMinimal.h"
@@ -8,6 +7,7 @@
 #include "BuildModeWidget.generated.h"
 
 class UBuildModeManager;
+class UWorldForgeDataRegistry;
 
 UCLASS(BlueprintType, Blueprintable)
 class WORLDFORGE_API UBuildModeWidget : public UUserWidget
@@ -39,6 +39,45 @@ public:
 	// Player clicked confirm in the UI (custom draw only)
 	UFUNCTION(BlueprintCallable, Category = "WorldForge|BuildUI")
 	void ConfirmBuild();
+
+	// ================================
+	// Read-only data accessors for Blueprint UI
+	// ================================
+
+	// Registry-driven building list for prefab buttons.
+	UFUNCTION(BlueprintCallable, Category = "WorldForge|BuildUI")
+	TArray<FGameplayTag> GetAvailableBuildingTags() const;
+
+	// Initial deterministic material list for custom draw UI.
+	UFUNCTION(BlueprintCallable, Category = "WorldForge|BuildUI")
+	TArray<FGameplayTag> GetAvailableMaterialTags() const;
+
+	UFUNCTION(BlueprintPure, Category = "WorldForge|BuildUI")
+	FText GetBuildingDisplayName(FGameplayTag BuildingTag) const;
+
+	UFUNCTION(BlueprintPure, Category = "WorldForge|BuildUI")
+	FText GetItemDisplayName(FGameplayTag ItemTag) const;
+
+	UFUNCTION(BlueprintPure, Category = "WorldForge|BuildUI")
+	FText GetMaterialDisplayName(FGameplayTag MaterialTag) const;
+
+	UFUNCTION(BlueprintPure, Category = "WorldForge|BuildUI")
+	FText GetSelectedBuildingDisplayName() const;
+
+	UFUNCTION(BlueprintPure, Category = "WorldForge|BuildUI")
+	FText GetSelectedMaterialDisplayName() const;
+
+	UFUNCTION(BlueprintPure, Category = "WorldForge|BuildUI")
+	FText GetCurrentCostLabel() const;
+
+	UFUNCTION(BlueprintPure, Category = "WorldForge|BuildUI")
+	FText GetCurrentAvailabilityLabel() const;
+
+	UFUNCTION(BlueprintPure, Category = "WorldForge|BuildUI")
+	bool GetCanAffordCurrentSelection() const;
+
+	UFUNCTION(BlueprintPure, Category = "WorldForge|BuildUI")
+	int32 GetCurrentCellCount() const;
 
 	// ================================
 	// Events (implement in Blueprint to update visuals)
@@ -79,4 +118,6 @@ private:
 	UBuildModeManager* CachedManager = nullptr;
 
 	UBuildModeManager* GetManager();
+
+	UWorldForgeDataRegistry* GetRegistry() const;
 };

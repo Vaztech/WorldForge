@@ -75,6 +75,15 @@ public:
     const TArray<FSettlementState>& GetAllSettlements() const { return Settlements; }
     void RestoreFromSave(const TArray<FSettlementState>& Saved);
 
+    // TEMP DEBUG HELPERS
+    // NOTE: These are temporary testing utilities for resource injection.
+    // Reminder: revert/remove before shipping or when proper debug tooling exists.
+    UFUNCTION(CallInEditor, BlueprintCallable, Category = "WorldForge|Settlement|Debug")
+    void Add10Stone(int32 SettlementID);
+
+    UFUNCTION(CallInEditor, BlueprintCallable, Category = "WorldForge|Settlement|Debug")
+    void Add100All(int32 SettlementID);
+
 private:
     TArray<FSettlementState> Settlements;
     int32 NextSettlementID = 0;

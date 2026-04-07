@@ -1,10 +1,44 @@
-#pragma once
+﻿#pragma once
 
 #include "CoreMinimal.h"
 #include "Subsystems/WorldSubsystem.h"
 #include "GameplayTagContainer.h"
+#include "Engine/TimerHandle.h"
 #include "../Data/WorldForgeDataTypes.h"
 #include "VoxelWorldManager.generated.h"
+
+class AVoxelWorld;
+class AStaticMeshActor;
+class UStaticMesh;
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnTerrainReady);
+
+USTRUCT(BlueprintType)
+struct FPerlinOctaveSettings
+{
+    GENERATED_BODY()
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Perlin")
+    float BaseFrequency = 0.005f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Perlin")
+    float BaseAmplitude = 12.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Perlin", meta = (ClampMin = "1", ClampMax = "8"))
+    int32 OctaveCount = 4;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Perlin", meta = (ClampMin = "1.5", ClampMax = "3.0"))
+    float Lacunarity = 2.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Perlin", meta = (ClampMin = "0.1", ClampMax = "0.9"))
+    float Persistence = 0.5f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Perlin", meta = (ClampMin = "2"))
+    int32 MinHeight = 4;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Perlin")
+    int32 SeedOffset = 0;
+};
 
 UCLASS(BlueprintType, Blueprintable)
 class WORLDFORGE_API UVoxelWorldManager : public UWorldSubsystem
@@ -14,64 +48,121 @@ class WORLDFORGE_API UVoxelWorldManager : public UWorldSubsystem
 public:
     virtual bool ShouldCreateSubsystem(UObject* Outer) const override { return true; }
     virtual void Initialize(FSubsystemCollectionBase& Collection) override;
+    virtual void Deinitialize() override;
 
-    // Phase V-C: finds the placed VoxelWorld actor in the current level and caches it.
     UFUNCTION(BlueprintCallable, Category = "WorldForge|Voxel")
     bool FindAndCacheVoxelWorld();
 
-    // Lazy readiness check: if not cached yet, attempts to find the VoxelWorld now.
     UFUNCTION(BlueprintCallable, Category = "WorldForge|Voxel")
     bool IsReady();
 
-    // Converts sim grid coordinates into UE world coordinates.
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
+    bool IsTerrainReadyForGameplay() const;
+
     UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
     FVector GridToWorld(FIntPoint GridCell, int32 ZLevel = 0) const;
 
-    // ADDED:
-    // Converts UE world coordinates back into sim grid coordinates.
-    // This is the BP-safe inverse helper for click-to-build workflows.
-    // Uses voxel-world origin offset when available and center-based snapping.
     UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
     FIntPoint WorldToGrid(FVector WorldPosition) const;
 
-    // ADDED:
-    // 3D helper for future vertical build workflows.
-    // Current player flow is XY-only, so this is additive and does not break existing BP.
     UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
     FIntVector WorldToGrid3D(FVector WorldPosition) const;
 
-    // Existing system: biome/chunk application pipeline
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
+    FIntPoint WorldToTerrainCell(FVector WorldPosition) const;
+
     UFUNCTION(BlueprintCallable, Category = "WorldForge|Voxel")
     void ApplyBiomeProfileToChunk(FIntPoint ChunkCoord, const FVoxelBiomeProfile& Profile);
 
-    // MODIFIED:
-    // Kept existing API exactly the same.
-    // This now also writes a visible log line in the .cpp for V-H manual validation.
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Voxel")
+    bool GenerateTerrainFromTiles(
+        const TArray<FWorldTileData>& WorldTiles,
+        int32 GridWidth,
+        int32 GridHeight,
+        ETerrainMode TerrainMode = ETerrainMode::Smooth,
+        int32 BlockHeightStep = 4);
+
     UFUNCTION(BlueprintCallable, Category = "WorldForge|Voxel")
     void PlaceVoxelBlock(FVector WorldPosition, FGameplayTag MaterialTag);
 
     UFUNCTION(BlueprintCallable, Category = "WorldForge|Voxel")
     void NotifyVoxelDig(FVector WorldPosition, int32 AgentID);
 
-    // Existing validation path
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
+    bool HasCachedTerrainData() const;
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
+    bool TryGetSurfaceWorldLocation(FIntPoint GridCell, FVector& OutWorldLocation, float ZOffset = 50.0f) const;
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
+    bool IsSpawnableTerrainCell(FIntPoint GridCell) const;
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Voxel")
+    bool FindNearestSpawnableTerrainCell(FIntPoint StartCell, FIntPoint& OutCell, int32 MaxSearchRadius = 16) const;
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
+    FIntPoint ClampTerrainCellToBounds(FIntPoint GridCell) const;
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
+    FIntPoint VoxelCellToChunkCell(FIntPoint VoxelCell) const;
+
     bool ValidateSmoothSDF(const FVoxelBiomeProfile& Profile) const;
 
-    // Existing chunk sizing
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Perlin")
+    static float PerlinNoise2D(float X, float Y);
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Perlin")
+    static float FractalNoise2D(float X, float Y, const FPerlinOctaveSettings& Settings);
+
+    UPROPERTY(BlueprintAssignable, Category = "WorldForge|Voxel")
+    FOnTerrainReady OnTerrainReady;
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Voxel")
     float ChunkWorldSize = 3200.0f;
 
-    // Added for GridToWorld helper
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Voxel")
     float VoxelSize = 100.0f;
 
-    // ADDED:
-    // Optional debug logging for click-to-grid conversion validation.
-    // Useful for confirming repeated clicks on the same tile resolve to the same grid cell.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Voxel")
+    float TerrainSurfaceZOffset = 50.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Voxel")
+    bool bAddGlobalFoundation = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Voxel")
+    float GlobalFoundationDepthWorld = 5000.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Perlin")
+    FPerlinOctaveSettings DefaultPerlinSettings;
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Voxel|Debug")
-    bool bLogGridConversions = true;
+    bool bLogGridConversions = false;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Voxel|Debug")
+    bool bLogTerrainGeneration = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Voxel|Debug")
+    bool bLogTerrainRetry = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Voxel|Debug")
+    bool bUseFallbackPlacedBlockVisuals = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Voxel|Debug")
+    bool bPreferSurfaceAnchoredPlacedBlocks = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Voxel|Debug")
+    bool bLogPlacedBlockVisuals = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Voxel|Debug")
+    float FallbackPlacedBlockVerticalNudge = 50.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Voxel")
+    float TerrainRetryIntervalSeconds = 0.25f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Voxel")
+    int32 MaxTerrainRetryCount = 40;
 
 protected:
-    // Existing BP bridge events
     UFUNCTION(BlueprintImplementableEvent, Category = "WorldForge|Voxel")
     void OnBiomeChunkRequested(FIntPoint ChunkCoord, const FVoxelBiomeProfile& Profile);
 
@@ -82,12 +173,69 @@ protected:
     void OnVoxelDigged(FVector WorldPosition);
 
 private:
-    // ADDED:
-    // Returns the voxel-world origin if the actor is available.
-    // Falls back to world zero if no voxel actor is currently cached/found.
     FVector GetVoxelWorldOrigin() const;
 
-    // Added Phase V-C cache
+    bool IsVoxelRuntimeReady() const;
+    bool ApplyBiomeChunkNative(AVoxelWorld* VoxelWorld, FIntPoint ChunkCoord, const FVoxelBiomeProfile& Profile);
+    bool ApplyTerrainFromTilesInternal(AVoxelWorld* VoxelWorld, const TArray<FWorldTileData>& WorldTiles, int32 GridWidth, int32 GridHeight);
+    bool ApplyGlobalFoundationNative(AVoxelWorld* VoxelWorld, int32 GridWidth, int32 GridHeight);
+    void CacheTerrainMetadata(const TArray<FWorldTileData>& WorldTiles, int32 GridWidth, int32 GridHeight);
+    void ClearTerrainCache();
+    void ClearPlacedBlockVisuals();
+
+    int32 GetChunkSizeInVoxels() const;
+    int32 ComputeChunkSurfaceHeightVoxels(FIntPoint ChunkCoord, const FVoxelBiomeProfile& Profile) const;
+    int32 ComputeChunkBaseDepthVoxels(const FVoxelBiomeProfile& Profile) const;
+    int32 GetEffectiveBlockHeightStep() const;
+
+    int32 ComputeSmoothSurfaceHeightAtVoxel(int32 VoxelX, int32 VoxelY, const FVoxelBiomeProfile& Profile) const;
+    float ComputeSmoothSurfaceHeightAtWorldGrid(FIntPoint GridCell, const FVoxelBiomeProfile& Profile) const;
+
+    FPerlinOctaveSettings GetOctaveSettingsForProfile(const FVoxelBiomeProfile& Profile) const;
+
+    static float Fade(float T);
+    static float Lerp(float T, float A, float B);
+    static float Grad(int32 Hash, float X, float Y);
+    static const int32 PermutationTable[512];
+
+    bool IsValidTerrainCell(FIntPoint GridCell) const;
+    int32 TerrainIndex(FIntPoint GridCell) const;
+
+    bool TryGetCachedSurfaceHeightWorldForVoxelCell(FIntPoint VoxelCell, float& OutSurfaceHeightWorld) const;
+    FVector ResolvePlacedBlockVisualWorldPosition(const FVector& RequestedWorldPosition) const;
+    AStaticMeshActor* SpawnFallbackPlacedBlockActor(const FIntVector& GridCell3D, const FVector& SpawnWorldPosition, FGameplayTag MaterialTag);
+
+    void ScheduleTerrainRetry();
+    void RetryPendingTerrainGeneration();
+    void ClearPendingTerrainRequest();
+    void BroadcastTerrainReadyIfNeeded();
+
     UPROPERTY()
     AActor* VoxelWorldActor = nullptr;
+
+    UPROPERTY(Transient)
+    TArray<FWorldTileData> PendingWorldTiles;
+
+    UPROPERTY(Transient)
+    TArray<float> CachedSurfaceHeightsVoxels;
+
+    UPROPERTY(Transient)
+    TArray<FGameplayTag> CachedBiomeTags;
+
+    UPROPERTY(Transient)
+    TMap<FIntVector, TObjectPtr<AStaticMeshActor>> FallbackPlacedBlockActors;
+
+    int32 CachedTerrainGridWidth = 0;
+    int32 CachedTerrainGridHeight = 0;
+
+    int32 PendingGridWidth = 0;
+    int32 PendingGridHeight = 0;
+    int32 TerrainRetryCount = 0;
+    bool bTerrainRetryScheduled = false;
+    bool bTerrainReadyBroadcasted = false;
+
+    ETerrainMode CurrentTerrainMode = ETerrainMode::Smooth;
+    int32 CurrentBlockHeightStep = 4;
+
+    FTimerHandle TerrainRetryTimerHandle;
 };

@@ -55,11 +55,29 @@ public:
     UFUNCTION(BlueprintCallable)
     bool CommitCustomBuild(int32 AgentID);
 
+    // Legacy prefab path kept for compatibility with older callers.
     UFUNCTION(BlueprintCallable)
     bool CommitPrefabBuild(
         EBuildingPurpose Purpose,
         int32 EraIndex,
         FIntPoint Origin,
+        int32 AgentID
+    );
+
+    // Legacy-compatible prefab path (rotation = 0).
+    UFUNCTION(BlueprintCallable)
+    bool CommitPrefabBuildByTag(
+        FGameplayTag BuildingTag,
+        FIntPoint Origin,
+        int32 AgentID
+    );
+
+    // New preferred prefab path: commits explicit 3D blocks with rotation.
+    UFUNCTION(BlueprintCallable)
+    bool CommitPrefabBuildByTagWithRotation(
+        FGameplayTag BuildingTag,
+        FIntPoint Origin,
+        int32 RotationIndex,
         int32 AgentID
     );
 
@@ -69,6 +87,25 @@ public:
 private:
 
     void SetLastCommitResultMessage(const FString& Message);
+
+    bool TryParseExplicitPrefabDimensions(
+        const FString& Source,
+        int32& OutWidth,
+        int32& OutDepth,
+        int32& OutHeight
+    ) const;
+
+    FIntPoint RotateLocalCell(FIntPoint LocalXY, int32 RotationIndex, int32 Width, int32 Depth) const;
+
+    bool BuildExplicitPrefabBlockList(
+        FGameplayTag BuildingTag,
+        FIntPoint Origin,
+        int32 RotationIndex,
+        TArray<FIntVector>& OutBlocks,
+        FGameplayTag& OutMaterialTag
+    ) const;
+
+    int32 GetLegacyPrefabBlockCount(FGameplayTag BuildingTag) const;
 
     // Selected grid cells for the current build.
     UPROPERTY()

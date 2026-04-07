@@ -6,6 +6,7 @@
 #include "../Civilization/WorldHistory/WorldHistoryGenerator.h"
 #include "../Civilization/WorldHistory/WorldHistoryContext.h"
 #include "../Economy/WorldEconomySimulation.h"
+#include "VoxelWorldManager.h"
 
 namespace
 {
@@ -123,6 +124,7 @@ void UWorldGenPipeline::Step01_InitializeSeed()
 void UWorldGenPipeline::Step02_GenerateHeightmap()
 {
     UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step02: Heightmap..."));
+
     for (int32 Y = 0; Y < GridHeight; Y++)
     {
         for (int32 X = 0; X < GridWidth; X++)
@@ -133,6 +135,7 @@ void UWorldGenPipeline::Step02_GenerateHeightmap()
             Tile.Rainfall = RNGRef->NextFloat(UWorldForgeRNG::BRANCH_BIOME);
         }
     }
+
     UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step02 done"));
 }
 
@@ -144,6 +147,7 @@ void UWorldGenPipeline::Step03_RunTectonics()
 void UWorldGenPipeline::Step04_AssignBiomes()
 {
     UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step04: Biomes..."));
+
     for (FWorldTileData& Tile : WorldTiles)
     {
         if (Tile.Elevation > 0.80f)
@@ -178,25 +182,94 @@ void UWorldGenPipeline::Step04_AssignBiomes()
         Tile.VoxelProfile.OctaveCount = 4;
         Tile.VoxelProfile.bEnableCaves = (Tile.Elevation > 0.4f);
     }
+
     UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step04 done"));
 }
 
-// Steps 05-08: stubs
-void UWorldGenPipeline::Step05_InitVoxelChunks() { UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step05 -- TODO")); }
-void UWorldGenPipeline::Step06_PCGDecorationPass() { UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step06 -- TODO")); }
-void UWorldGenPipeline::Step07_ApplyWorldDriver() { UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step07 -- TODO")); }
-void UWorldGenPipeline::Step08_SeedResources() { UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step08 -- TODO")); }
+void UWorldGenPipeline::Step05_InitVoxelChunks()
+{
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step05: Init voxel chunks..."));
 
-// Steps 12,14,15,16: stubs
-void UWorldGenPipeline::Step12_GenerateCosmicRoster() { UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step12 -- TODO")); }
-void UWorldGenPipeline::Step14_AssignWorldTraits() { UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step14 -- TODO")); }
-void UWorldGenPipeline::Step15_RecordFinalState() { UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step15 -- TODO")); }
-void UWorldGenPipeline::Step16_FinalizeWorldMap() { UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step16 -- TODO")); }
+    if (!WorldRef)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[WorldGen] Step05 failed: WorldRef is null."));
+        return;
+    }
+
+    UVoxelWorldManager* VoxelMgr = WorldRef->GetSubsystem<UVoxelWorldManager>();
+    if (!VoxelMgr)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[WorldGen] Step05 failed: UVoxelWorldManager not found."));
+        return;
+    }
+
+    const bool bAccepted = VoxelMgr->GenerateTerrainFromTiles(
+        WorldTiles,
+        GridWidth,
+        GridHeight,
+        CurrentConfig.TerrainMode,
+        CurrentConfig.BlockHeightStep);
+
+    if (!bAccepted)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[WorldGen] Step05: terrain request was not accepted."));
+        return;
+    }
+
+    UE_LOG(
+        LogTemp,
+        Log,
+        TEXT("[WorldGen] Step05 done. TerrainMode=%s BlockHeightStep=%d"),
+        CurrentConfig.TerrainMode == ETerrainMode::Blocky ? TEXT("Blocky") : TEXT("Smooth"),
+        CurrentConfig.BlockHeightStep
+    );
+}
+
+// Steps 06-08 remain stubs for now
+void UWorldGenPipeline::Step06_PCGDecorationPass()
+{
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step06 -- TODO"));
+}
+
+void UWorldGenPipeline::Step07_ApplyWorldDriver()
+{
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step07 -- TODO"));
+}
+
+void UWorldGenPipeline::Step08_SeedResources()
+{
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step08 -- TODO"));
+}
+
+// Steps 12, 14, 15, 16 remain stubs for now
+void UWorldGenPipeline::Step12_GenerateCosmicRoster()
+{
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step12 -- TODO"));
+}
+
+void UWorldGenPipeline::Step14_AssignWorldTraits()
+{
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step14 -- TODO"));
+}
+
+void UWorldGenPipeline::Step15_RecordFinalState()
+{
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step15 -- TODO"));
+}
+
+void UWorldGenPipeline::Step16_FinalizeWorldMap()
+{
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step16 -- TODO"));
+}
 
 void UWorldGenPipeline::Step09_PlaceCivilizations()
 {
     UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step09: Placing civilizations..."));
-    if (!RNGRef) return;
+
+    if (!RNGRef)
+    {
+        return;
+    }
 
     UCivilizationGenerator* CivGen = NewObject<UCivilizationGenerator>(this);
     Civilizations = CivGen->GenerateCivilizations(
@@ -208,7 +281,11 @@ void UWorldGenPipeline::Step09_PlaceCivilizations()
 void UWorldGenPipeline::Step10_GenerateCulturalDNA()
 {
     UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step10: Cultural DNA..."));
-    if (!RNGRef) return;
+
+    if (!RNGRef)
+    {
+        return;
+    }
 
     UCivilizationGenerator* CivGen = NewObject<UCivilizationGenerator>(this);
     CivGen->GenerateCulturalDNA(Civilizations, WorldTiles, RNGRef);
@@ -241,7 +318,11 @@ void UWorldGenPipeline::Step11_GenerateEconomyLayer()
 void UWorldGenPipeline::Step13_RunPreHistory()
 {
     UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step13: Pre-history..."));
-    if (!RNGRef) return;
+
+    if (!RNGRef)
+    {
+        return;
+    }
 
     FHistoricalSimConfig SimCfg;
     SimCfg.TotalYears = CurrentConfig.PreHistoryYears;
@@ -254,7 +335,6 @@ void UWorldGenPipeline::Step13_RunPreHistory()
 
     UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step13: %d events"), HistoryLog.Num());
 
-    // === WORLD HISTORY PIPELINE (Phase 3.5) ===
     {
         FWorldHistoryContext Context;
         Context.RNG = RNGRef;

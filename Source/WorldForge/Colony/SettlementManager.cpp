@@ -214,3 +214,43 @@ void USettlementManager::RestoreFromSave(const TArray<FSettlementState>& Saved)
         NextSettlementID = FMath::Max(NextSettlementID, S.SettlementID + 1);
     }
 }
+
+// TEMP DEBUG HELPERS
+// NOTE: These are temporary testing utilities for resource injection.
+// Reminder: revert/remove before shipping or when proper debug tooling exists.
+//
+// Existing stockpile/resource flow remains unchanged above; these helpers are
+// intentionally additive for testing so the normal sim/resource path is easy to restore.
+
+void USettlementManager::Add10Stone(int32 SettlementID)
+{
+    static const FGameplayTag StoneTag = FGameplayTag::RequestGameplayTag(TEXT("WorldForge.Item.Stone"));
+
+    if (!AddToStockpile(SettlementID, StoneTag, 10))
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[SettlementManager][Debug] Add10Stone failed for SettlementID=%d"), SettlementID);
+        return;
+    }
+
+    UE_LOG(LogTemp, Warning, TEXT("[SettlementManager][Debug] Added 10 Stone to SettlementID=%d"), SettlementID);
+}
+
+void USettlementManager::Add100All(int32 SettlementID)
+{
+    static const FGameplayTag FoodTag = FGameplayTag::RequestGameplayTag(TEXT("WorldForge.Item.Food"));
+    static const FGameplayTag WoodTag = FGameplayTag::RequestGameplayTag(TEXT("WorldForge.Item.Wood"));
+    static const FGameplayTag StoneTag = FGameplayTag::RequestGameplayTag(TEXT("WorldForge.Item.Stone"));
+
+    bool bOk = true;
+    bOk &= AddToStockpile(SettlementID, FoodTag, 100);
+    bOk &= AddToStockpile(SettlementID, WoodTag, 100);
+    bOk &= AddToStockpile(SettlementID, StoneTag, 100);
+
+    if (!bOk)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[SettlementManager][Debug] Add100All failed for SettlementID=%d"), SettlementID);
+        return;
+    }
+
+    UE_LOG(LogTemp, Warning, TEXT("[SettlementManager][Debug] Added 100 Food/Wood/Stone to SettlementID=%d"), SettlementID);
+}

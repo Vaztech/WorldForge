@@ -4,41 +4,17 @@
 #include "ProcessorManager.h"
 #include "SimulationTimeManager.h"
 #include "Engine/World.h"
-#include "UObject/UObjectGlobals.h" // CHANGE MADE:
-// Required for StaticLoadClass used to load the Blueprint
-// colonist class at runtime from a content path.
-
-// Optional but recommended if you already have this subsystem in your project.
-// If the include path is different in your project, adjust it.
-// This is only used to read the voxel/cell size so visuals line up with the sim.
+#include "TimerManager.h"
+#include "UObject/UObjectGlobals.h"
 #include "VoxelWorldManager.h"
 
 void UColonistVisualManager::Initialize(FSubsystemCollectionBase& Collection)
 {
-    // Make sure these subsystems are created before we try to bind/use them.
     Collection.InitializeDependency<UProcessorManager>();
     Collection.InitializeDependency<USimulationTimeManager>();
 
     Super::Initialize(Collection);
 
-    // CHANGE MADE:
-    // Try to assign a Blueprint colonist visual class automatically if one has not
-    // already been provided through defaults or another setup path.
-    //
-    // IMPORTANT:
-    // This must use StaticLoadClass here because ConstructorHelpers::FClassFinder
-    // is only valid inside constructors.
-    //
-    // Update the asset path below if your BP_WorldForgeColonist asset lives in a different folder.
-    // The path format for StaticLoadClass must include the generated class suffix:
-    //
-    //   /Game/<FolderPath>/<AssetName>.<AssetName>_C
-    //
-    // Example:
-    //   /Game/BP_WorldForgeColonist.BP_WorldForgeColonist_C
-    //
-    // If lookup fails, the system safely falls back to AWorldForgeColonist::StaticClass()
-    // later during spawn.
     if (!ColonistActorClass)
     {
         UClass* LoadedBlueprintClass = StaticLoadClass(
@@ -62,7 +38,7 @@ void UColonistVisualManager::Initialize(FSubsystemCollectionBase& Collection)
             UE_LOG(
                 LogTemp,
                 Warning,
-                TEXT("[ColonistVisualManager] Failed to load BP_WorldForgeColonist at /Game/BP_WorldForgeColonist.BP_WorldForgeColonist_C. Falling back to native class.")
+                TEXT("[ColonistVisualManager] Failed to load BP_WorldForgeColonist at /Game/WorldForge/BluePrints/BP_WorldForgeColonist.BP_WorldForgeColonist_C. Falling back to native class.")
             );
         }
     }
@@ -102,15 +78,66 @@ void UColonistVisualManager::Deinitialize()
         );
     }
 
+    if (UWorld* World = GetWorld())
+    {
+        World->GetTimerManager().ClearTimer(DeferredSpawnTimerHandle);
+    }
+
     DestroyAllColonistActors();
 
     CachedProcessorManager = nullptr;
     CachedSimulationTimeManager = nullptr;
+    PendingSpawnSettlementID = INDEX_NONE;
+    bSpawnDeferredScheduled = false;
 
     Super::Deinitialize();
 }
 
 void UColonistVisualManager::SpawnColonistActors(int32 InSettlementID)
+{
+    UWorld* World = GetWorld();
+    if (!World)
+    {
+        return;
+    }
+
+    ActiveSettlementID = InSettlementID;
+    PendingSpawnSettlementID = InSettlementID;
+
+    World->GetTimerManager().ClearTimer(DeferredSpawnTimerHandle);
+    World->GetTimerManager().SetTimer(
+        DeferredSpawnTimerHandle,
+        this,
+        &UColonistVisualManager::HandleDeferredSpawn,
+        InitialSpawnDelaySeconds,
+        false
+    );
+
+    bSpawnDeferredScheduled = true;
+
+    UE_LOG(
+        LogTemp,
+        Log,
+        TEXT("[ColonistVisualManager] Deferred colonist spawn for settlement=%d by %.2f seconds."),
+        InSettlementID,
+        InitialSpawnDelaySeconds
+    );
+}
+
+void UColonistVisualManager::HandleDeferredSpawn()
+{
+    bSpawnDeferredScheduled = false;
+
+    if (PendingSpawnSettlementID == INDEX_NONE)
+    {
+        return;
+    }
+
+    InternalSpawnColonistActors(PendingSpawnSettlementID);
+    PendingSpawnSettlementID = INDEX_NONE;
+}
+
+void UColonistVisualManager::InternalSpawnColonistActors(int32 InSettlementID)
 {
     UWorld* World = GetWorld();
     if (!World)
@@ -138,13 +165,11 @@ void UColonistVisualManager::SpawnColonistActors(int32 InSettlementID)
 
     for (const FAgentData& AgentData : Agents)
     {
-        // Skip dead agents. They should not get a new visible actor.
         if (AgentData.State == EAgentState::Dead)
         {
             continue;
         }
 
-        // Skip if already spawned.
         if (ColonistActors.Contains(AgentData.AgentID))
         {
             continue;
@@ -152,7 +177,7 @@ void UColonistVisualManager::SpawnColonistActors(int32 InSettlementID)
 
         if (SpawnActorFromData(AgentData, CellSize))
         {
-            SpawnedCount++;
+            ++SpawnedCount;
         }
     }
 
@@ -169,6 +194,11 @@ void UColonistVisualManager::SpawnColonistActors(int32 InSettlementID)
 void UColonistVisualManager::SyncActorsToAgents(int32 InSettlementID)
 {
     if (bIsSyncInProgress)
+    {
+        return;
+    }
+
+    if (bSpawnDeferredScheduled)
     {
         return;
     }
@@ -199,7 +229,6 @@ void UColonistVisualManager::SyncActorsToAgents(int32 InSettlementID)
     const float CellSize = ResolveCellSize();
     const TArray<FAgentData>& Agents = CachedProcessorManager->GetAgentsForSettlement(InSettlementID);
 
-    // Build a quick lookup of which agents still exist this step.
     TSet<int32> LiveAgentIDs;
     LiveAgentIDs.Reserve(Agents.Num());
 
@@ -207,7 +236,6 @@ void UColonistVisualManager::SyncActorsToAgents(int32 InSettlementID)
     {
         LiveAgentIDs.Add(AgentData.AgentID);
 
-        // Remove dead agents instead of leaving hidden actors around forever.
         if (AgentData.State == EAgentState::Dead)
         {
             DestroyActorForAgent(AgentData.AgentID);
@@ -216,25 +244,17 @@ void UColonistVisualManager::SyncActorsToAgents(int32 InSettlementID)
 
         AWorldForgeColonist* ExistingActor = GetActorForAgent(AgentData.AgentID);
 
-        // Spawn any visual actor that does not exist yet.
         if (!ExistingActor)
         {
             ExistingActor = SpawnActorFromData(AgentData, CellSize);
         }
 
-        // Push the latest simulation snapshot into the actor.
-        //
-        // Important:
-        // This actor is presentation-only. UpdateVisuals caches target position/state
-        // and the actor handles interpolation locally.
         if (ExistingActor)
         {
             ExistingActor->UpdateVisuals(AgentData, 0.0f, CellSize);
         }
     }
 
-    // Destroy actors whose agents no longer exist in the simulation.
-    // We gather keys first so we can safely modify the map during removal.
     TArray<int32> TrackedAgentIDs;
     ColonistActors.GetKeys(TrackedAgentIDs);
 
@@ -274,25 +294,31 @@ void UColonistVisualManager::DestroyAllColonistActors()
 
 void UColonistVisualManager::HandleSimulationStep(int32 StepNumber)
 {
-    // If nothing has chosen a settlement yet, do nothing.
     if (ActiveSettlementID == INDEX_NONE)
+    {
+        return;
+    }
+
+    if (bSpawnDeferredScheduled)
     {
         return;
     }
 
     SyncActorsToAgents(ActiveSettlementID);
 
-    if (StepNumber % 25 == 0)
-    {
-        UE_LOG(
-            LogTemp,
-            Verbose,
-            TEXT("[ColonistVisualManager] Synced settlement=%d at step=%d trackedActors=%d"),
-            ActiveSettlementID,
-            StepNumber,
-            ColonistActors.Num()
-        );
-    }
+    // Log every step at Log level so we can confirm the simulation is actually
+    // ticking and the visual sync is running. If colonists ever appear static in
+    // PIE, the absence of these lines is a strong indicator that sim time
+    // is not advancing (most often caused by a long Interval / slow Speed setting
+    // on USimulationTimeManager, not a visual-layer bug).
+    UE_LOG(
+        LogTemp,
+        Log,
+        TEXT("[ColonistVisualManager] HandleSimulationStep settlement=%d step=%d trackedActors=%d"),
+        ActiveSettlementID,
+        StepNumber,
+        ColonistActors.Num()
+    );
 }
 
 AWorldForgeColonist* UColonistVisualManager::SpawnActorFromData(const FAgentData& AgentData, float CellSize)
@@ -303,11 +329,6 @@ AWorldForgeColonist* UColonistVisualManager::SpawnActorFromData(const FAgentData
         return nullptr;
     }
 
-    // Use a configurable actor class if one has been assigned.
-    // This allows the visual manager to spawn BP_WorldForgeColonist so the
-    // Blueprint graph, Blueprint sprite component, and flipbook renderer all run.
-    //
-    // If no class is assigned, fall back safely to the native C++ actor.
     UClass* ColonistClass = ColonistActorClass
         ? ColonistActorClass.Get()
         : AWorldForgeColonist::StaticClass();
@@ -319,8 +340,7 @@ AWorldForgeColonist* UColonistVisualManager::SpawnActorFromData(const FAgentData
     }
 
     FActorSpawnParameters SpawnParams;
-    SpawnParams.SpawnCollisionHandlingOverride =
-        ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+    SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
     AWorldForgeColonist* NewActor = World->SpawnActor<AWorldForgeColonist>(
         ColonistClass,
@@ -340,7 +360,6 @@ AWorldForgeColonist* UColonistVisualManager::SpawnActorFromData(const FAgentData
         return nullptr;
     }
 
-    // Initialize from current sim snapshot so first frame starts in the correct place.
     NewActor->InitializeFromAgentData(AgentData, CellSize);
 
     ColonistActors.Add(AgentData.AgentID, NewActor);
@@ -386,10 +405,17 @@ float UColonistVisualManager::ResolveCellSize() const
     {
         if (const UVoxelWorldManager* VoxelWorldManager = World->GetSubsystem<UVoxelWorldManager>())
         {
+            // Colonist CurrentGridPos and the settlement origin it gets added to
+            // are both in voxel-cell space (1 unit = VoxelSize UE). The chunk-indexed
+            // terrain cache is only reached through VoxelCellToChunkCell in
+            // AWorldForgeColonist::ResolveWorldLocationFromAgentData; here we must
+            // hand back the voxel-space cell size so any deep-fallback placement
+            // code that multiplies cell coordinates by CellSize produces the
+            // correct world location.
             return VoxelWorldManager->VoxelSize;
         }
     }
 
-    // Matches your current colonist actor default fallback.
-    return 200.0f;
+    // Keep fallback aligned with voxel-space cell scale.
+    return 100.0f;
 }

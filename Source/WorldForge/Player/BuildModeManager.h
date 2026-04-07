@@ -1,5 +1,4 @@
-﻿// Source/WorldForge/Player/BuildModeManager.h
-#pragma once
+﻿#pragma once
 
 #include "CoreMinimal.h"
 #include "Subsystems/WorldSubsystem.h"
@@ -59,6 +58,22 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "WorldForge|Build")
 	bool HasValidHoveredCell() const { return bHoveredCellValid; }
+
+	// ================================
+	// Live Cost / Availability Queries
+	// ================================
+
+	UFUNCTION(BlueprintPure, Category = "WorldForge|Build|Cost")
+	FGameplayTag GetCurrentRequiredItemTag() const;
+
+	UFUNCTION(BlueprintPure, Category = "WorldForge|Build|Cost")
+	int32 GetCurrentRequiredUnits() const;
+
+	UFUNCTION(BlueprintPure, Category = "WorldForge|Build|Cost")
+	int32 GetCurrentAvailableUnits() const;
+
+	UFUNCTION(BlueprintPure, Category = "WorldForge|Build|Cost")
+	bool CanAffordCurrentSelection() const;
 
 	// ================================
 	// Mode Entry / Exit
@@ -147,6 +162,7 @@ private:
 	int32 RotationIndex = 0;
 	FIntPoint CurrentHoveredCell = FIntPoint::ZeroValue;
 	bool bHoveredCellValid = false;
+	float LastHitZ = 0.0f;
 
 	// Custom draw selection (mirrors PlayerBuildContext but local for preview)
 	TArray<FIntPoint> SelectedCells;

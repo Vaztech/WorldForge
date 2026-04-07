@@ -23,9 +23,8 @@ public:
     UFUNCTION(BlueprintCallable)
     int32 StartBuildTask(int32 SID, FGameplayTag BuildTag, FIntPoint Origin, int32 AgentID);
 
-    // Starts a custom construction task using an explicit list of grid cells
-    // instead of the legacy prefab footprint logic.
-    // This is the minimal Section I entry point for player-authored shapes.
+    // Legacy flat custom-build entry point kept for compatibility.
+    // Internally converted into a 3D block list at Z=0.
     int32 StartCustomBuildTask(
         int32 SID,
         const TArray<FIntPoint>& Blocks,
@@ -33,38 +32,65 @@ public:
         int32 AgentID
     );
 
+    // New uncapped 3D custom-build entry point.
+    int32 StartCustomBuildTask3D(
+        int32 SID,
+        const TArray<FIntVector>& Blocks,
+        FGameplayTag MaterialTag,
+        int32 AgentID
+    );
+
+    // New explicit prefab/build entry point using a full 3D block list.
+    int32 StartBuildTaskFromBlocks(
+        int32 SID,
+        FGameplayTag BuildTag,
+        const TArray<FIntVector>& Blocks,
+        FGameplayTag MaterialTag,
+        int32 AgentID
+    );
+
     bool PlaceNextBlock(int32 TaskID, UWorld* World);
     bool IsTaskComplete(int32 TaskID) const;
 
-    // Legacy query kept for any callers that still want to know if a given
-    // building tag is currently under construction anywhere in the settlement.
     bool HasActiveTask(int32 SID, FGameplayTag BuildTag) const;
 
     FActiveBuildTask* GetMutableTask(int32 TaskID);
-
     FActiveBuildTask* GetMutableTaskForAgent(int32 AgentID);
 
     const TArray<FActiveBuildTask>& GetAllTasks() const { return ActiveTasks; }
 
     void RestoreFromSave(const TArray<FActiveBuildTask>& Saved);
 
+    int32 GetRequiredUnitsForPrefab(FGameplayTag BuildTag) const;
+    int32 GetRequiredUnitsForCustom(int32 CellCount) const;
+
+    FGameplayTag GetRequiredItemForPrefab(FGameplayTag BuildTag) const;
+    FGameplayTag GetRequiredItemForMaterial(FGameplayTag MaterialTag) const;
+
+    int32 GetAvailableUnitsForPrefab(int32 SettlementID, FGameplayTag BuildTag, UWorld* World) const;
+    int32 GetAvailableUnitsForMaterial(int32 SettlementID, FGameplayTag MaterialTag, UWorld* World) const;
+
+    bool CanAffordPrefab(int32 SettlementID, FGameplayTag BuildTag, UWorld* World) const;
+    bool CanAffordCustom(int32 SettlementID, FGameplayTag MaterialTag, int32 CellCount, UWorld* World) const;
+
 private:
     void FinalizeBuilding(const FActiveBuildTask& Task, UWorld* World);
 
     int32 GetBlockCount(FGameplayTag BuildTag) const;
 
-    // Reject only truly conflicting prefab tasks at the same placement cell,
-    // instead of blocking every active task with the same building tag.
-    bool HasConflictingTaskAtOrigin(int32 SettlementID, FIntPoint Origin) const;
+    // Builds an explicit 3D block list for legacy prefab placement.
+    TArray<FIntVector> BuildPrefabBlockList(FGameplayTag BuildTag, FIntPoint Origin) const;
 
-    // Resolve which stockpile item should gate this build.
-    // For now this is intentionally minimal and deterministic:
-    // voxel wood -> Item.Wood
-    // everything else defaults to Item.Stone
+    // Convert any task into its effective 3D block list.
+    void GetEffectiveBlockList3D(const FActiveBuildTask& Task, TArray<FIntVector>& OutBlocks) const;
+
+    bool TaskOccupiesBlock(const FActiveBuildTask& Task, const FIntVector& Block) const;
+
+    bool HasConflictingTaskAtOrigin(int32 SettlementID, FIntPoint Origin) const;
+    bool HasConflictingTaskInBlockList(int32 SettlementID, const TArray<FIntVector>& Blocks) const;
+
     FGameplayTag ResolveRequiredStockpileItem(FGameplayTag MaterialTag) const;
 
-    // Returns true only if settlement has enough material in stockpile
-    // to create the task up front.
     bool HasEnoughStockpileForTask(
         int32 SettlementID,
         FGameplayTag MaterialTag,

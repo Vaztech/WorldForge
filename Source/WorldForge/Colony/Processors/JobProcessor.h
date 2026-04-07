@@ -112,10 +112,11 @@ public:
     float SleepCriticalThreshold = 20.f;
 
     // Number of grid cells an agent moves per simulation step.
-    // Phase 2 default is 1.
-    // Phase 3 can extend this with race/terrain/path modifiers.
+    // Phase 2 default was 1; bumped to 4 during testing so colonist motion is
+    // visible at typical PIE camera distances. Phase 3 can extend this with
+    // race/terrain/path modifiers.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Simulation|Movement")
-    int32 MovementCellsPerStep = 1;
+    int32 MovementCellsPerStep = 4;
 
 private:
 
