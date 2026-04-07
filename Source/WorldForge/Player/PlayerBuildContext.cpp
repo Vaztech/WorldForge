@@ -105,6 +105,75 @@ bool UPlayerBuildContext::CommitCustomBuild(int32 AgentID)
     return true;
 }
 
+bool UPlayerBuildContext::CommitCustomBuild3D(const TArray<FIntVector>& Cells3D, int32 AgentID)
+{
+    UWorld* World = GetWorld();
+
+    if (!World)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[PlayerBuildContext] CommitCustomBuild3D failed: World null"));
+        SetLastCommitResultMessage(TEXT("Custom build failed: world unavailable."));
+        return false;
+    }
+
+    if (Cells3D.Num() == 0)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[PlayerBuildContext] CommitCustomBuild3D failed: No cells supplied"));
+        SetLastCommitResultMessage(TEXT("Custom build failed: no cells selected."));
+        return false;
+    }
+
+    if (ActiveSettlementID < 0)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[PlayerBuildContext] CommitCustomBuild3D failed: Invalid SettlementID"));
+        SetLastCommitResultMessage(TEXT("Custom build failed: invalid settlement."));
+        return false;
+    }
+
+    UVoxelConstructionSystem* Construction = World->GetSubsystem<UVoxelConstructionSystem>();
+    if (!Construction)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[PlayerBuildContext] CommitCustomBuild3D failed: Construction system missing"));
+        SetLastCommitResultMessage(TEXT("Custom build failed: construction system missing."));
+        return false;
+    }
+
+    const int32 CommittedCellCount = Cells3D.Num();
+
+    const int32 TaskID = Construction->StartCustomBuildTask3D(
+        ActiveSettlementID,
+        Cells3D,
+        SelectedMaterial,
+        AgentID
+    );
+
+    if (TaskID < 0)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[PlayerBuildContext] CommitCustomBuild3D failed: Task creation failed"));
+        SetLastCommitResultMessage(TEXT("Custom build failed: task creation was rejected."));
+        return false;
+    }
+
+    UE_LOG(
+        LogTemp,
+        Log,
+        TEXT("[PlayerBuildContext] Custom build committed (3D): %d cells, material=%s"),
+        CommittedCellCount,
+        *SelectedMaterial.ToString()
+    );
+
+    SetLastCommitResultMessage(
+        FString::Printf(
+            TEXT("Custom build committed: %d cells of %s."),
+            CommittedCellCount,
+            SelectedMaterial.IsValid() ? *SelectedMaterial.ToString() : TEXT("UnknownMaterial")
+        )
+    );
+
+    ClearSelection();
+    return true;
+}
+
 bool UPlayerBuildContext::CommitPrefabBuild(
     EBuildingPurpose Purpose,
     int32 EraIndex,
@@ -208,6 +277,100 @@ bool UPlayerBuildContext::CommitPrefabBuildByTagWithRotation(
             *BuildingTag.ToString(),
             Origin.X,
             Origin.Y
+        )
+    );
+
+    return true;
+}
+
+bool UPlayerBuildContext::CommitPrefabBuildByTagWithRotation3D(
+    FGameplayTag BuildingTag,
+    FIntVector Origin,
+    int32 RotationIndex,
+    int32 AgentID)
+{
+    UWorld* World = GetWorld();
+    if (!World)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[PlayerBuildContext] CommitPrefabBuildByTagWithRotation3D failed: World null"));
+        SetLastCommitResultMessage(TEXT("Prefab build failed: world unavailable."));
+        return false;
+    }
+
+    if (ActiveSettlementID < 0)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[PlayerBuildContext] CommitPrefabBuildByTagWithRotation3D failed: Invalid SettlementID"));
+        SetLastCommitResultMessage(TEXT("Prefab build failed: invalid settlement."));
+        return false;
+    }
+
+    if (!BuildingTag.IsValid())
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[PlayerBuildContext] CommitPrefabBuildByTagWithRotation3D failed: Invalid building tag"));
+        SetLastCommitResultMessage(TEXT("Prefab build failed: invalid building tag."));
+        return false;
+    }
+
+    UVoxelConstructionSystem* Construction = World->GetSubsystem<UVoxelConstructionSystem>();
+    if (!Construction)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[PlayerBuildContext] CommitPrefabBuildByTagWithRotation3D failed: Construction system missing"));
+        SetLastCommitResultMessage(TEXT("Prefab build failed: construction system missing."));
+        return false;
+    }
+
+    TArray<FIntVector> Blocks;
+    FGameplayTag MaterialTag;
+    if (!BuildExplicitPrefabBlockList3D(BuildingTag, Origin, RotationIndex, Blocks, MaterialTag))
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[PlayerBuildContext] CommitPrefabBuildByTagWithRotation3D failed: Could not build explicit block list"));
+        SetLastCommitResultMessage(TEXT("Prefab build failed: could not resolve block layout."));
+        return false;
+    }
+
+    const int32 TaskID = Construction->StartBuildTaskFromBlocks(
+        ActiveSettlementID,
+        BuildingTag,
+        Blocks,
+        MaterialTag,
+        AgentID
+    );
+
+    if (TaskID < 0)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[PlayerBuildContext] CommitPrefabBuildByTagWithRotation3D failed: Task creation failed"));
+
+        SetLastCommitResultMessage(
+            FString::Printf(
+                TEXT("Could not place %s at (%d, %d, %d). A task may already exist there or requirements were not met."),
+                *BuildingTag.ToString(),
+                Origin.X,
+                Origin.Y,
+                Origin.Z
+            )
+        );
+        return false;
+    }
+
+    UE_LOG(
+        LogTemp,
+        Log,
+        TEXT("[PlayerBuildContext] Prefab build committed (3D): Tag=%s Origin=(%d,%d,%d) Rotation=%d Blocks=%d"),
+        *BuildingTag.ToString(),
+        Origin.X,
+        Origin.Y,
+        Origin.Z,
+        RotationIndex,
+        Blocks.Num()
+    );
+
+    SetLastCommitResultMessage(
+        FString::Printf(
+            TEXT("Placed %s task at (%d, %d, %d)."),
+            *BuildingTag.ToString(),
+            Origin.X,
+            Origin.Y,
+            Origin.Z
         )
     );
 
@@ -424,6 +587,86 @@ bool UPlayerBuildContext::BuildExplicitPrefabBlockList(
             Origin.X + RotatedLocal.X,
             Origin.Y + RotatedLocal.Y,
             Layer
+        ));
+    }
+
+    return OutBlocks.Num() > 0;
+}
+
+bool UPlayerBuildContext::BuildExplicitPrefabBlockList3D(
+    FGameplayTag BuildingTag,
+    FIntVector Origin,
+    int32 RotationIndex,
+    TArray<FIntVector>& OutBlocks,
+    FGameplayTag& OutMaterialTag
+) const
+{
+    OutBlocks.Reset();
+    OutMaterialTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Voxel.Material.Stone")));
+
+    if (!BuildingTag.IsValid())
+    {
+        return false;
+    }
+
+    int32 Width = 0;
+    int32 Depth = 0;
+    int32 Height = 0;
+
+    if (TryParseExplicitPrefabDimensions(BuildingTag.ToString(), Width, Depth, Height))
+    {
+        OutBlocks.Reserve(Width * Depth * Height);
+
+        for (int32 Z = 0; Z < Height; ++Z)
+        {
+            for (int32 Y = 0; Y < Depth; ++Y)
+            {
+                for (int32 X = 0; X < Width; ++X)
+                {
+                    const FIntPoint RotatedLocal = RotateLocalCell(FIntPoint(X, Y), RotationIndex, Width, Depth);
+                    OutBlocks.Add(FIntVector(
+                        Origin.X + RotatedLocal.X,
+                        Origin.Y + RotatedLocal.Y,
+                        Origin.Z + Z
+                    ));
+                }
+            }
+        }
+
+        OutBlocks.Sort([](const FIntVector& A, const FIntVector& B)
+            {
+                if (A.Z != B.Z) return A.Z < B.Z;
+                if (A.Y != B.Y) return A.Y < B.Y;
+                return A.X < B.X;
+            });
+
+        return OutBlocks.Num() > 0;
+    }
+
+    const int32 RequiredBlocks = GetLegacyPrefabBlockCount(BuildingTag);
+    OutBlocks.Reserve(RequiredBlocks);
+
+    for (int32 BlockNumber = 0; BlockNumber < RequiredBlocks; ++BlockNumber)
+    {
+        const int32 Layer = BlockNumber / 4;
+        const int32 BlockIndexWithinLayer = BlockNumber % 4;
+
+        FIntPoint LocalOffset = FIntPoint::ZeroValue;
+        switch (BlockIndexWithinLayer)
+        {
+        case 0: LocalOffset = FIntPoint(0, 0); break;
+        case 1: LocalOffset = FIntPoint(1, 0); break;
+        case 2: LocalOffset = FIntPoint(0, 1); break;
+        case 3: LocalOffset = FIntPoint(1, 1); break;
+        default: break;
+        }
+
+        const FIntPoint RotatedLocal = RotateLocalCell(LocalOffset, RotationIndex, 2, 2);
+
+        OutBlocks.Add(FIntVector(
+            Origin.X + RotatedLocal.X,
+            Origin.Y + RotatedLocal.Y,
+            Origin.Z + Layer
         ));
     }
 

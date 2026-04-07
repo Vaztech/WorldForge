@@ -161,11 +161,24 @@ private:
 	FGameplayTag SelectedMaterialTag;
 	int32 RotationIndex = 0;
 	FIntPoint CurrentHoveredCell = FIntPoint::ZeroValue;
+
+	// 3D hover target. Tracked alongside CurrentHoveredCell so existing
+	// 2D UI bindings keep working unchanged. Populated by UpdateFromMouse
+	// from either terrain-derived Z or support-block face attachment when the
+	// cursor is directly over an existing placed voxel block or a pending
+	// selected ghost block.
+	FIntVector CurrentHoveredVoxel = FIntVector::ZeroValue;
+
 	bool bHoveredCellValid = false;
 	float LastHitZ = 0.0f;
 
 	// Custom draw selection (mirrors PlayerBuildContext but local for preview)
 	TArray<FIntPoint> SelectedCells;
+
+	// Canonical 3D custom-draw selection. Kept in lockstep with SelectedCells
+	// (one entry per click) so existing UI / count broadcasts continue to work
+	// against SelectedCells while CommitCustomBuild submits the 3D version.
+	TArray<FIntVector> SelectedCells3D;
 
 	// Config
 	int32 ActiveSettlementID = -1;
@@ -194,6 +207,14 @@ private:
 	void BroadcastSelectionChanged();
 	void BroadcastFeedback(const FString& Message);
 
-	// Raycast from screen to terrain
-	bool RaycastToTerrain(APlayerController* PC, FVector& OutHitLocation) const;
+	// Raycast from screen to terrain / support blocks. Terrain still
+	// provides a fallback anchor, while a directly hit placed block or pending
+	// selected ghost block returns its supporting voxel and hit normal so
+	// callers can place on the exact face that was clicked.
+	bool RaycastToTerrain(
+		APlayerController* PC,
+		FVector& OutHitLocation,
+		bool& bOutHitPlacedBlock,
+		FIntVector& OutSupportBlockVoxel,
+		FVector& OutHitNormal) const;
 };

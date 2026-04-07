@@ -147,14 +147,23 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Voxel|Debug")
     bool bUseFallbackPlacedBlockVisuals = true;
 
+    // Currently unused. Was previously consumed by ResolvePlacedBlockVisualWorldPosition
+    // to enable a chunk-resolution surface-snap that produced floating prefab
+    // towers and dip-invisible free-build cubes. The function is now an
+    // unconditional passthrough; this flag is kept (defaulted false) only so
+    // existing SaveGame data and BP defaults that reference it stay readable.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Voxel|Debug")
-    bool bPreferSurfaceAnchoredPlacedBlocks = true;
+    bool bPreferSurfaceAnchoredPlacedBlocks = false;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Voxel|Debug")
     bool bLogPlacedBlockVisuals = true;
 
+    // Small upward nudge applied to placed-block visuals to prevent z-fighting
+    // with the underlying terrain mesh. 1.0 UE unit (1 cm) is well below
+    // visual perception but above z-fight tolerance. Was previously 50.0
+    // (half a voxel), which contributed to a "looks slightly floating" feel.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Voxel|Debug")
-    float FallbackPlacedBlockVerticalNudge = 50.0f;
+    float FallbackPlacedBlockVerticalNudge = 1.0f;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Voxel")
     float TerrainRetryIntervalSeconds = 0.25f;

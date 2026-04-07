@@ -6,6 +6,63 @@
 #include "Engine/StaticMesh.h"
 #include "UObject/ConstructorHelpers.h"
 
+namespace
+{
+    static const FName PendingGhostSupportTag(TEXT("WorldForgePendingBlockGhost"));
+    static const FName PendingGhostCursorTag(TEXT("WorldForgePendingCursorGhost"));
+
+    static void ConfigureAsPendingGhostSupport(UStaticMeshComponent* Comp)
+    {
+        if (!Comp)
+        {
+            return;
+        }
+
+        Comp->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+        Comp->SetCollisionResponseToAllChannels(ECR_Ignore);
+        Comp->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
+        Comp->SetGenerateOverlapEvents(false);
+
+        Comp->ComponentTags.Remove(PendingGhostCursorTag);
+        if (!Comp->ComponentHasTag(PendingGhostSupportTag))
+        {
+            Comp->ComponentTags.Add(PendingGhostSupportTag);
+        }
+    }
+
+    static void ConfigureAsPendingGhostCursor(UStaticMeshComponent* Comp)
+    {
+        if (!Comp)
+        {
+            return;
+        }
+
+        Comp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+        Comp->SetCollisionResponseToAllChannels(ECR_Ignore);
+        Comp->SetGenerateOverlapEvents(false);
+
+        Comp->ComponentTags.Remove(PendingGhostSupportTag);
+        if (!Comp->ComponentHasTag(PendingGhostCursorTag))
+        {
+            Comp->ComponentTags.Add(PendingGhostCursorTag);
+        }
+    }
+
+    static void DisableGhostTrace(UStaticMeshComponent* Comp)
+    {
+        if (!Comp)
+        {
+            return;
+        }
+
+        Comp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+        Comp->SetCollisionResponseToAllChannels(ECR_Ignore);
+        Comp->SetGenerateOverlapEvents(false);
+        Comp->ComponentTags.Remove(PendingGhostSupportTag);
+        Comp->ComponentTags.Remove(PendingGhostCursorTag);
+    }
+}
+
 ABuildGhostActor::ABuildGhostActor()
 {
     PrimaryActorTick.bCanEverTick = false;
@@ -72,6 +129,7 @@ void ABuildGhostActor::SetGhostState(EBuildGhostState State)
             if (CellHighlightPool.IsValidIndex(i) && CellHighlightPool[i])
             {
                 CellHighlightPool[i]->SetVisibility(false);
+                DisableGhostTrace(CellHighlightPool[i]);
             }
         }
         return;
@@ -291,7 +349,7 @@ void ABuildGhostActor::UpdatePrefabGhost(
 
     EnsurePoolSize(PreviewBlocks.Num());
 
-    const FIntPoint OriginCell = VoxelManager->WorldToGrid(WorldPosition);
+    const FIntVector OriginVoxel = VoxelManager->WorldToGrid3D(WorldPosition);
 
     int32 Idx = 0;
     for (const FIntVector& LocalBlock : PreviewBlocks)
@@ -299,16 +357,15 @@ void ABuildGhostActor::UpdatePrefabGhost(
         UStaticMeshComponent* Comp = GetOrCreateHighlight(Idx);
         if (Comp)
         {
-            FVector Pos = VoxelManager->GridToWorld(
-                FIntPoint(OriginCell.X + LocalBlock.X, OriginCell.Y + LocalBlock.Y),
-                LocalBlock.Z
+            const FVector Pos = VoxelManager->GridToWorld(
+                FIntPoint(OriginVoxel.X + LocalBlock.X, OriginVoxel.Y + LocalBlock.Y),
+                OriginVoxel.Z + LocalBlock.Z
             );
-
-            Pos.Z = SurfaceZ + (LocalBlock.Z * VoxelManager->VoxelSize);
 
             Comp->SetWorldLocation(Pos);
             Comp->SetVisibility(true);
-            Comp->SetWorldScale3D(FVector(1.0f));
+            Comp->SetWorldScale3D(FVector(GhostCubeInsetScale));
+            DisableGhostTrace(Comp);
 
             if (CellValidMaterial)
             {
@@ -323,6 +380,7 @@ void ABuildGhostActor::UpdatePrefabGhost(
         if (CellHighlightPool.IsValidIndex(i) && CellHighlightPool[i])
         {
             CellHighlightPool[i]->SetVisibility(false);
+            DisableGhostTrace(CellHighlightPool[i]);
         }
     }
 
@@ -359,8 +417,8 @@ void ABuildGhostActor::UpdateCustomDrawCells(
                 Comp->SetMaterial(0, CellValidMaterial);
             }
 
-            // Needed fix: keep free-build ghost as full voxel cubes, not flattened slabs.
             Comp->SetWorldScale3D(FVector(1.0f));
+            ConfigureAsPendingGhostSupport(Comp);
         }
         ++Idx;
     }
@@ -379,8 +437,8 @@ void ABuildGhostActor::UpdateCustomDrawCells(
                 Comp->SetMaterial(0, CellCursorMaterial);
             }
 
-            // Needed fix: cursor ghost is also a full voxel cube.
             Comp->SetWorldScale3D(FVector(1.0f));
+            ConfigureAsPendingGhostCursor(Comp);
         }
         ++Idx;
     }
@@ -390,6 +448,80 @@ void ABuildGhostActor::UpdateCustomDrawCells(
         if (CellHighlightPool.IsValidIndex(i) && CellHighlightPool[i])
         {
             CellHighlightPool[i]->SetVisibility(false);
+            DisableGhostTrace(CellHighlightPool[i]);
+        }
+    }
+
+    ActiveHighlightCount = Idx;
+}
+
+void ABuildGhostActor::UpdateCustomDrawCells3D(
+    const TArray<FIntVector>& SelectedCells3D,
+    FIntVector CursorVoxel,
+    UVoxelWorldManager* VoxelManager)
+{
+    if (!VoxelManager) return;
+
+    GhostMesh->SetVisibility(false);
+
+    const int32 TotalNeeded = SelectedCells3D.Num() + 1;
+    EnsurePoolSize(TotalNeeded);
+
+    int32 Idx = 0;
+
+    for (const FIntVector& Cell : SelectedCells3D)
+    {
+        UStaticMeshComponent* Comp = GetOrCreateHighlight(Idx);
+        if (Comp)
+        {
+            const FVector Pos = VoxelManager->GridToWorld(
+                FIntPoint(Cell.X, Cell.Y),
+                Cell.Z
+            );
+
+            Comp->SetWorldLocation(Pos);
+            Comp->SetVisibility(true);
+
+            if (CellValidMaterial)
+            {
+                Comp->SetMaterial(0, CellValidMaterial);
+            }
+
+            Comp->SetWorldScale3D(FVector(GhostCubeInsetScale));
+            ConfigureAsPendingGhostSupport(Comp);
+        }
+        ++Idx;
+    }
+
+    {
+        UStaticMeshComponent* Comp = GetOrCreateHighlight(Idx);
+        if (Comp)
+        {
+            const FVector Pos = VoxelManager->GridToWorld(
+                FIntPoint(CursorVoxel.X, CursorVoxel.Y),
+                CursorVoxel.Z
+            );
+
+            Comp->SetWorldLocation(Pos);
+            Comp->SetVisibility(true);
+
+            if (CellCursorMaterial)
+            {
+                Comp->SetMaterial(0, CellCursorMaterial);
+            }
+
+            Comp->SetWorldScale3D(FVector(GhostCubeInsetScale));
+            ConfigureAsPendingGhostCursor(Comp);
+        }
+        ++Idx;
+    }
+
+    for (int32 i = Idx; i < ActiveHighlightCount; ++i)
+    {
+        if (CellHighlightPool.IsValidIndex(i) && CellHighlightPool[i])
+        {
+            CellHighlightPool[i]->SetVisibility(false);
+            DisableGhostTrace(CellHighlightPool[i]);
         }
     }
 
@@ -403,6 +535,7 @@ void ABuildGhostActor::ClearAllHighlights()
         if (CellHighlightPool[i])
         {
             CellHighlightPool[i]->SetVisibility(false);
+            DisableGhostTrace(CellHighlightPool[i]);
         }
     }
     ActiveHighlightCount = 0;
@@ -423,6 +556,8 @@ UStaticMeshComponent* ABuildGhostActor::GetOrCreateHighlight(int32 Index)
     NewComp->SetupAttachment(GetRootComponent());
     NewComp->RegisterComponent();
     NewComp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+    NewComp->SetCollisionResponseToAllChannels(ECR_Ignore);
+    NewComp->SetGenerateOverlapEvents(false);
     NewComp->SetCastShadow(false);
     NewComp->SetVisibility(false);
 
@@ -431,8 +566,8 @@ UStaticMeshComponent* ABuildGhostActor::GetOrCreateHighlight(int32 Index)
         NewComp->SetStaticMesh(GhostMesh->GetStaticMesh());
     }
 
-    // Default to full voxel cube. Custom/prefab update functions can override if needed.
     NewComp->SetWorldScale3D(FVector(1.0f));
+    DisableGhostTrace(NewComp);
 
     if (Index < CellHighlightPool.Num())
     {

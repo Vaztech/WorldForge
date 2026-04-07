@@ -55,6 +55,12 @@ public:
     UFUNCTION(BlueprintCallable)
     bool CommitCustomBuild(int32 AgentID);
 
+    // Canonical 3D custom-build commit. Cells3D is the explicit voxel list
+    // (X/Y/Z) the player drew. Forwards to UVoxelConstructionSystem::
+    // StartCustomBuildTask3D so stacking on top of placed cubes works.
+    UFUNCTION(BlueprintCallable)
+    bool CommitCustomBuild3D(const TArray<FIntVector>& Cells3D, int32 AgentID);
+
     // Legacy prefab path kept for compatibility with older callers.
     UFUNCTION(BlueprintCallable)
     bool CommitPrefabBuild(
@@ -72,11 +78,22 @@ public:
         int32 AgentID
     );
 
-    // New preferred prefab path: commits explicit 3D blocks with rotation.
+    // Legacy-compatible rotated prefab path at base Z = 0.
     UFUNCTION(BlueprintCallable)
     bool CommitPrefabBuildByTagWithRotation(
         FGameplayTag BuildingTag,
         FIntPoint Origin,
+        int32 RotationIndex,
+        int32 AgentID
+    );
+
+    // New preferred prefab path: commits explicit 3D blocks with rotation
+    // anchored at the supplied voxel origin, so prefabs can stack on top of
+    // existing placed cubes instead of always starting at Z = 0.
+    UFUNCTION(BlueprintCallable)
+    bool CommitPrefabBuildByTagWithRotation3D(
+        FGameplayTag BuildingTag,
+        FIntVector Origin,
         int32 RotationIndex,
         int32 AgentID
     );
@@ -100,6 +117,15 @@ private:
     bool BuildExplicitPrefabBlockList(
         FGameplayTag BuildingTag,
         FIntPoint Origin,
+        int32 RotationIndex,
+        TArray<FIntVector>& OutBlocks,
+        FGameplayTag& OutMaterialTag
+    ) const;
+
+    // New canonical explicit prefab builder with full voxel origin.
+    bool BuildExplicitPrefabBlockList3D(
+        FGameplayTag BuildingTag,
+        FIntVector Origin,
         int32 RotationIndex,
         TArray<FIntVector>& OutBlocks,
         FGameplayTag& OutMaterialTag

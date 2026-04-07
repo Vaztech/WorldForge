@@ -792,31 +792,35 @@ bool UVoxelWorldManager::TryGetCachedSurfaceHeightWorldForVoxelCell(FIntPoint Vo
 
 FVector UVoxelWorldManager::ResolvePlacedBlockVisualWorldPosition(const FVector& RequestedWorldPosition) const
 {
+    // The caller (PlaceVoxelBlock -> VoxelConstructionSystem::PlaceNextBlock)
+    // already supplies a fully-resolved 3D world position computed from
+    // GridToWorld(FIntPoint(B.X, B.Y), B.Z), which is the exact inverse of
+    // WorldToGrid3D. Trust it.
+    //
+    // The previous implementation tried to "snap to surface" by reading the
+    // chunk-resolution surface-height cache and reconstructing world Z as
+    // (cached_chunk_surface + GridZ * VoxelSize). That was wrong for two
+    // reasons:
+    //   1. The cache is one height per 32x32 voxel chunk, so any voxel cell
+    //      whose true surface differs from the chunk average (dips, peaks,
+    //      cliffs) got its placement Z biased toward the chunk average.
+    //   2. It treated GridZ as a layer offset on top of the surface, but
+    //      GridZ from WorldToGrid3D is an absolute coordinate. Adding the
+    //      two stacked the bias on top of the absolute coordinate.
+    //
+    // Symptoms that fix removes:
+    //   - Prefab towers floating above terrain (chunk averaging biased the
+    //     base block up, then per-layer Z stacked on top of the bias).
+    //   - Free-build cubes invisible inside dips (the cube was teleported
+    //     up to ~surrounding-terrain height, hidden by the dip's lip).
+    //   - Cursor/cube coordinate mismatch when stacking, because the stored
+    //     grid cell did not match the cube's actual world position.
+    //
+    // Free-build, prefab placement, and stacking all rely on this function
+    // being a faithful passthrough. The only adjustment is a small vertical
+    // nudge to keep the visual cube from z-fighting with terrain meshes.
     FVector Result = RequestedWorldPosition;
-
-    if (!bPreferSurfaceAnchoredPlacedBlocks)
-    {
-        Result.Z += FallbackPlacedBlockVerticalNudge;
-        return Result;
-    }
-
-    const FIntVector GridCell3D = WorldToGrid3D(RequestedWorldPosition);
-    float SurfaceHeightWorld = 0.0f;
-
-    if (TryGetCachedSurfaceHeightWorldForVoxelCell(FIntPoint(GridCell3D.X, GridCell3D.Y), SurfaceHeightWorld))
-    {
-        const FVector Origin = GetVoxelWorldOrigin();
-        Result = FVector(
-            Origin.X + (GridCell3D.X * VoxelSize),
-            Origin.Y + (GridCell3D.Y * VoxelSize),
-            Origin.Z + SurfaceHeightWorld + (GridCell3D.Z * VoxelSize) + FallbackPlacedBlockVerticalNudge
-        );
-    }
-    else
-    {
-        Result.Z += FallbackPlacedBlockVerticalNudge;
-    }
-
+    Result.Z += FallbackPlacedBlockVerticalNudge;
     return Result;
 }
 
@@ -865,7 +869,12 @@ AStaticMeshActor* UVoxelWorldManager::SpawnFallbackPlacedBlockActor(const FIntVe
     // Needed fix: mobility must be set before SetStaticMesh at runtime.
     MeshComp->SetMobility(EComponentMobility::Movable);
     MeshComp->SetStaticMesh(CubeMesh);
-    MeshComp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+    // Use QueryOnly so build-mode raycasts (ECC_Visibility) can hit placed
+    // cubes for stacking, while still leaving zero physics collision so
+    // colonists, voxel sim, and other physics queries are unaffected.
+    MeshComp->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+    MeshComp->SetCollisionResponseToAllChannels(ECR_Ignore);
+    MeshComp->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
     MeshComp->SetGenerateOverlapEvents(false);
     MeshComp->SetWorldScale3D(FVector(
         VoxelSize / 100.0f,
@@ -874,7 +883,9 @@ AStaticMeshActor* UVoxelWorldManager::SpawnFallbackPlacedBlockActor(const FIntVe
     ));
     MeshComp->SetCastShadow(true);
 
-    BlockActor->SetActorEnableCollision(false);
+    // Actor-level collision must also be enabled or the component-level
+    // QueryOnly setting is overridden and the cube remains untargetable.
+    BlockActor->SetActorEnableCollision(true);
     BlockActor->Tags.Add(FName(TEXT("WorldForgePlacedBlock")));
     BlockActor->Tags.Add(FName(*MaterialTag.ToString()));
 

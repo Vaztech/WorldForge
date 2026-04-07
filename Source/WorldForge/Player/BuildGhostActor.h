@@ -39,6 +39,15 @@ public:
         UVoxelWorldManager* VoxelManager,
         float SurfaceZ = 0.0f);
 
+    // Canonical 3D custom-draw ghost. Each cell renders at its actual voxel
+    // Z (so stacked cubes show real height) and cubes are slightly inset so
+    // adjacent cubes have a visible seam between them instead of merging
+    // into a single solid block.
+    void UpdateCustomDrawCells3D(
+        const TArray<FIntVector>& SelectedCells3D,
+        FIntVector CursorVoxel,
+        UVoxelWorldManager* VoxelManager);
+
     // Remove all cell highlights
     void ClearAllHighlights();
 
@@ -65,6 +74,11 @@ private:
     int32 ActiveHighlightCount = 0;
 
     static constexpr float GhostOpacity = 0.4f;
+
+    // Slight inset (~8%) applied to every ghost cube so adjacent cubes show
+    // a visible seam between them instead of merging into one solid mass.
+    // This is what makes stacked cubes read as distinct cubes at a glance.
+    static constexpr float GhostCubeInsetScale = 0.92f;
 
     FLinearColor GetColorForState(EBuildGhostState State) const;
     UStaticMeshComponent* GetOrCreateHighlight(int32 Index);

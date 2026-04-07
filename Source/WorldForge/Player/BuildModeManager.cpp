@@ -7,6 +7,64 @@
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 #include "CollisionQueryParams.h"
+#include "EngineUtils.h"
+#include "GameFramework/Actor.h"
+#include "Components/PrimitiveComponent.h"
+
+namespace
+{
+    static bool IsPlacedBlockActor(const AActor* Actor)
+    {
+        return Actor && Actor->ActorHasTag(FName(TEXT("WorldForgePlacedBlock")));
+    }
+
+    static bool IsPendingGhostSupportComponent(const UPrimitiveComponent* Component)
+    {
+        return Component && Component->ComponentHasTag(FName(TEXT("WorldForgePendingBlockGhost")));
+    }
+
+    static FIntVector GetFaceOffsetFromNormal(const FVector& InNormal)
+    {
+        const FVector N = InNormal.GetSafeNormal();
+
+        if (FMath::Abs(N.Z) >= FMath::Abs(N.X) && FMath::Abs(N.Z) >= FMath::Abs(N.Y))
+        {
+            return (N.Z >= 0.0f) ? FIntVector(0, 0, 1) : FIntVector(0, 0, -1);
+        }
+
+        if (FMath::Abs(N.X) >= FMath::Abs(N.Y))
+        {
+            return (N.X >= 0.0f) ? FIntVector(1, 0, 0) : FIntVector(-1, 0, 0);
+        }
+
+        return (N.Y >= 0.0f) ? FIntVector(0, 1, 0) : FIntVector(0, -1, 0);
+    }
+
+    static bool HasPlacedBlockAtVoxel(UWorld* World, UVoxelWorldManager* VM, const FIntVector& TargetVoxel)
+    {
+        if (!World || !VM)
+        {
+            return false;
+        }
+
+        for (TActorIterator<AActor> It(World); It; ++It)
+        {
+            AActor* Actor = *It;
+            if (!IsPlacedBlockActor(Actor))
+            {
+                continue;
+            }
+
+            const FIntVector ActorVoxel = VM->WorldToGrid3D(Actor->GetActorLocation());
+            if (ActorVoxel == TargetVoxel)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+}
 
 void UBuildModeManager::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -166,6 +224,7 @@ void UBuildModeManager::EnterPrefabMode(FGameplayTag BuildingTag)
     SelectedMaterialTag = FGameplayTag::EmptyTag;
     RotationIndex = 0;
     SelectedCells.Empty();
+    SelectedCells3D.Empty();
     bHoveredCellValid = false;
 
     SpawnGhost();
@@ -191,6 +250,7 @@ void UBuildModeManager::EnterCustomDrawMode(FGameplayTag MaterialTag)
     SelectedBuildingTag = FGameplayTag::EmptyTag;
     RotationIndex = 0;
     SelectedCells.Empty();
+    SelectedCells3D.Empty();
     bHoveredCellValid = false;
 
     if (UPlayerBuildContext* Ctx = GetBuildContext())
@@ -222,8 +282,12 @@ void UBuildModeManager::ExitBuildMode()
     SelectedBuildingTag = FGameplayTag::EmptyTag;
     SelectedMaterialTag = FGameplayTag::EmptyTag;
     SelectedCells.Empty();
+    SelectedCells3D.Empty();
+    CurrentHoveredCell = FIntPoint::ZeroValue;
+    CurrentHoveredVoxel = FIntVector::ZeroValue;
     RotationIndex = 0;
     bHoveredCellValid = false;
+    LastHitZ = 0.0f;
 
     DestroyGhost();
 
@@ -262,11 +326,14 @@ void UBuildModeManager::HandlePrimaryClick()
     UE_LOG(
         LogTemp,
         Warning,
-        TEXT("[BuildMode] HandlePrimaryClick: Mode=%d HoverValid=%s HoveredCell=(%d,%d) SettlementID=%d BuildingTag=%s"),
+        TEXT("[BuildMode] HandlePrimaryClick: Mode=%d HoverValid=%s HoveredCell=(%d,%d) HoveredVoxel=(%d,%d,%d) SettlementID=%d BuildingTag=%s"),
         static_cast<int32>(CurrentMode),
         bHoveredCellValid ? TEXT("true") : TEXT("false"),
         CurrentHoveredCell.X,
         CurrentHoveredCell.Y,
+        CurrentHoveredVoxel.X,
+        CurrentHoveredVoxel.Y,
+        CurrentHoveredVoxel.Z,
         GetEffectiveSettlementID(),
         SelectedBuildingTag.IsValid() ? *SelectedBuildingTag.ToString() : TEXT("Invalid")
     );
@@ -293,40 +360,76 @@ void UBuildModeManager::HandlePrimaryClick()
     {
         UE_LOG(LogTemp, Warning, TEXT("[BuildMode] HandlePrimaryClick -> CustomDraw"));
 
-        if (!SelectedCells.Contains(CurrentHoveredCell))
-        {
-            SelectedCells.Add(CurrentHoveredCell);
-
-            if (UPlayerBuildContext* Ctx = GetBuildContext())
-            {
-                Ctx->AddCell(CurrentHoveredCell);
-            }
-
-            UE_LOG(
-                LogTemp,
-                Log,
-                TEXT("[BuildMode] Added cell (%d, %d) — %d total"),
-                CurrentHoveredCell.X,
-                CurrentHoveredCell.Y,
-                SelectedCells.Num()
-            );
-
-            OnCellCountChanged.Broadcast(SelectedCells.Num());
-            BroadcastFeedback(FString::Printf(TEXT("Added cell (%d, %d). Total: %d"), CurrentHoveredCell.X, CurrentHoveredCell.Y, SelectedCells.Num()));
-            UpdateGhost();
-        }
-        else
+        if (SelectedCells3D.Contains(CurrentHoveredVoxel))
         {
             UE_LOG(
                 LogTemp,
                 Warning,
-                TEXT("[BuildMode] HandlePrimaryClick -> CustomDraw skipped: cell already selected (%d,%d)"),
-                CurrentHoveredCell.X,
-                CurrentHoveredCell.Y
+                TEXT("[BuildMode] HandlePrimaryClick -> CustomDraw skipped: cell already selected (%d,%d,%d)"),
+                CurrentHoveredVoxel.X,
+                CurrentHoveredVoxel.Y,
+                CurrentHoveredVoxel.Z
             );
 
-            BroadcastFeedback(FString::Printf(TEXT("Cell (%d, %d) is already selected."), CurrentHoveredCell.X, CurrentHoveredCell.Y));
+            BroadcastFeedback(FString::Printf(
+                TEXT("Cell (%d, %d, %d) is already selected."),
+                CurrentHoveredVoxel.X,
+                CurrentHoveredVoxel.Y,
+                CurrentHoveredVoxel.Z));
+            return;
         }
+
+        if (UWorld* World = GetWorld())
+        {
+            if (UVoxelWorldManager* VM = GetVoxelManager())
+            {
+                if (HasPlacedBlockAtVoxel(World, VM, CurrentHoveredVoxel))
+                {
+                    UE_LOG(
+                        LogTemp,
+                        Warning,
+                        TEXT("[BuildMode] HandlePrimaryClick -> CustomDraw skipped: occupied by placed block (%d,%d,%d)"),
+                        CurrentHoveredVoxel.X,
+                        CurrentHoveredVoxel.Y,
+                        CurrentHoveredVoxel.Z
+                    );
+
+                    BroadcastFeedback(FString::Printf(
+                        TEXT("Cell (%d, %d, %d) is already occupied."),
+                        CurrentHoveredVoxel.X,
+                        CurrentHoveredVoxel.Y,
+                        CurrentHoveredVoxel.Z));
+                    return;
+                }
+            }
+        }
+
+        SelectedCells3D.Add(CurrentHoveredVoxel);
+        SelectedCells.Add(CurrentHoveredCell);
+
+        if (UPlayerBuildContext* Ctx = GetBuildContext())
+        {
+            Ctx->AddCell(CurrentHoveredCell);
+        }
+
+        UE_LOG(
+            LogTemp,
+            Log,
+            TEXT("[BuildMode] Added cell (%d, %d, %d) — %d total"),
+            CurrentHoveredVoxel.X,
+            CurrentHoveredVoxel.Y,
+            CurrentHoveredVoxel.Z,
+            SelectedCells3D.Num()
+        );
+
+        OnCellCountChanged.Broadcast(SelectedCells.Num());
+        BroadcastFeedback(FString::Printf(
+            TEXT("Added cell (%d, %d, %d). Total: %d"),
+            CurrentHoveredVoxel.X,
+            CurrentHoveredVoxel.Y,
+            CurrentHoveredVoxel.Z,
+            SelectedCells3D.Num()));
+        UpdateGhost();
     }
 }
 
@@ -336,12 +439,16 @@ void UBuildModeManager::HandleSecondaryClick()
 
 void UBuildModeManager::HandleUndo()
 {
-    if (CurrentMode != EBuildMode::CustomDraw || SelectedCells.Num() == 0)
+    if (CurrentMode != EBuildMode::CustomDraw || SelectedCells3D.Num() == 0)
     {
         return;
     }
 
-    const FIntPoint Removed = SelectedCells.Pop();
+    const FIntVector Removed3D = SelectedCells3D.Pop();
+    if (SelectedCells.Num() > 0)
+    {
+        SelectedCells.Pop();
+    }
 
     if (UPlayerBuildContext* Ctx = GetBuildContext())
     {
@@ -355,14 +462,18 @@ void UBuildModeManager::HandleUndo()
     UE_LOG(
         LogTemp,
         Log,
-        TEXT("[BuildMode] Undo cell (%d, %d) — %d remaining"),
-        Removed.X,
-        Removed.Y,
-        SelectedCells.Num()
+        TEXT("[BuildMode] Undo cell (%d, %d, %d) — %d remaining"),
+        Removed3D.X,
+        Removed3D.Y,
+        Removed3D.Z,
+        SelectedCells3D.Num()
     );
 
     OnCellCountChanged.Broadcast(SelectedCells.Num());
-    BroadcastFeedback(FString::Printf(TEXT("Undid cell (%d, %d). Remaining: %d"), Removed.X, Removed.Y, SelectedCells.Num()));
+    BroadcastFeedback(FString::Printf(
+        TEXT("Undid cell (%d, %d, %d). Remaining: %d"),
+        Removed3D.X, Removed3D.Y, Removed3D.Z,
+        SelectedCells3D.Num()));
     UpdateGhost();
 }
 
@@ -405,21 +516,81 @@ void UBuildModeManager::HandleCancel()
 
 void UBuildModeManager::UpdateFromMouse(APlayerController* PC)
 {
-    if (CurrentMode == EBuildMode::None || !PC) return;
+    if (CurrentMode == EBuildMode::None || !PC)
+    {
+        return;
+    }
 
-    FVector HitLocation;
-    if (RaycastToTerrain(PC, HitLocation))
+    FVector HitLocation = FVector::ZeroVector;
+    bool bHitPlacedBlock = false;
+    FIntVector SupportBlockVoxel = FIntVector::ZeroValue;
+    FVector HitNormal = FVector::UpVector;
+
+    if (RaycastToTerrain(PC, HitLocation, bHitPlacedBlock, SupportBlockVoxel, HitNormal))
     {
         UVoxelWorldManager* VM = GetVoxelManager();
-        if (VM)
-        {
-            const FIntPoint NewCell = VM->WorldToGrid(HitLocation);
+        UWorld* World = GetWorld();
 
-            if (NewCell != CurrentHoveredCell || !bHoveredCellValid)
+        if (VM && World)
+        {
+            const FIntPoint TerrainCell = VM->WorldToTerrainCell(HitLocation);
+
+            FIntVector NewVoxel = VM->WorldToGrid3D(HitLocation);
+            NewVoxel.X = TerrainCell.X;
+            NewVoxel.Y = TerrainCell.Y;
+
+            if (bHitPlacedBlock)
             {
+                const FIntVector FaceOffset = GetFaceOffsetFromNormal(HitNormal);
+                NewVoxel = SupportBlockVoxel + FaceOffset;
+            }
+            else
+            {
+                int32 HighestZ = NewVoxel.Z;
+
+                for (const FIntVector& Cell : SelectedCells3D)
+                {
+                    if (Cell.X == TerrainCell.X && Cell.Y == TerrainCell.Y)
+                    {
+                        if (Cell.Z >= HighestZ)
+                        {
+                            HighestZ = Cell.Z + 1;
+                        }
+                    }
+                }
+
+                NewVoxel.Z = HighestZ;
+            }
+
+            const bool bPendingOccupied = SelectedCells3D.Contains(NewVoxel);
+            const bool bPlacedOccupied = HasPlacedBlockAtVoxel(World, VM, NewVoxel);
+
+            if (bPendingOccupied || bPlacedOccupied)
+            {
+                bHoveredCellValid = false;
+
+                if (GhostActor)
+                {
+                    GhostActor->SetGhostState(EBuildGhostState::Hidden);
+                }
+
+                return;
+            }
+
+            const FIntPoint NewCell(NewVoxel.X, NewVoxel.Y);
+
+            const bool bChanged =
+                (NewVoxel != CurrentHoveredVoxel) ||
+                (NewCell != CurrentHoveredCell) ||
+                !bHoveredCellValid;
+
+            if (bChanged)
+            {
+                CurrentHoveredVoxel = NewVoxel;
                 CurrentHoveredCell = NewCell;
                 bHoveredCellValid = true;
                 LastHitZ = HitLocation.Z;
+
                 OnHoveredCellChanged.Broadcast(CurrentHoveredCell);
                 UpdateGhost();
             }
@@ -445,34 +616,112 @@ void UBuildModeManager::UpdateFromMouse(APlayerController* PC)
 // Raycast
 // ================================
 
-bool UBuildModeManager::RaycastToTerrain(APlayerController* PC, FVector& OutHitLocation) const
+bool UBuildModeManager::RaycastToTerrain(
+    APlayerController* PC,
+    FVector& OutHitLocation,
+    bool& bOutHitPlacedBlock,
+    FIntVector& OutSupportBlockVoxel,
+    FVector& OutHitNormal) const
 {
-    if (!PC) return false;
+    bOutHitPlacedBlock = false;
+    OutSupportBlockVoxel = FIntVector::ZeroValue;
+    OutHitNormal = FVector::UpVector;
 
-    FVector WorldLocation, WorldDirection;
+    if (!PC)
+    {
+        return false;
+    }
+
+    FVector WorldLocation = FVector::ZeroVector;
+    FVector WorldDirection = FVector::ZeroVector;
     if (!PC->DeprojectMousePositionToWorld(WorldLocation, WorldDirection))
     {
         return false;
     }
 
-    const FVector TraceStart = WorldLocation;
-    const FVector TraceEnd = WorldLocation + (WorldDirection * 50000.f);
+    UWorld* W = GetWorld();
+    if (!W)
+    {
+        return false;
+    }
 
-    FHitResult Hit;
-    FCollisionQueryParams Params;
-    Params.bTraceComplex = false;
+    UVoxelWorldManager* VM = GetVoxelManager();
+    if (!VM)
+    {
+        return false;
+    }
+
+    const FVector TraceStart = WorldLocation;
+    const FVector TraceEnd = WorldLocation + (WorldDirection * 50000.0f);
+
+    // Terrain-only fallback trace: ignore ghost + placed blocks so we can still
+    // recover a terrain anchor when no support block face is under the cursor.
+    FCollisionQueryParams TerrainParams(SCENE_QUERY_STAT(BuildModeTerrainTrace), false);
+    TerrainParams.bTraceComplex = false;
 
     if (GhostActor)
     {
-        Params.AddIgnoredActor(GhostActor);
+        TerrainParams.AddIgnoredActor(GhostActor);
     }
 
-    UWorld* W = GetWorld();
-    if (!W) return false;
-
-    if (W->LineTraceSingleByChannel(Hit, TraceStart, TraceEnd, ECC_Visibility, Params))
+    for (TActorIterator<AActor> It(W); It; ++It)
     {
-        OutHitLocation = Hit.ImpactPoint;
+        AActor* Actor = *It;
+        if (IsPlacedBlockActor(Actor))
+        {
+            TerrainParams.AddIgnoredActor(Actor);
+        }
+    }
+
+    FHitResult TerrainHit;
+    const bool bHitTerrain = W->LineTraceSingleByChannel(
+        TerrainHit,
+        TraceStart,
+        TraceEnd,
+        ECC_Visibility,
+        TerrainParams
+    );
+
+    // Full support trace: DO NOT ignore ghost actor here.
+    // This is what lets pending selected ghost cubes act as support for
+    // additional side attachments before construction completes.
+    FCollisionQueryParams FullParams(SCENE_QUERY_STAT(BuildModeFullTrace), false);
+    FullParams.bTraceComplex = false;
+
+    FHitResult FullHit;
+    const bool bHitFull = W->LineTraceSingleByChannel(
+        FullHit,
+        TraceStart,
+        TraceEnd,
+        ECC_Visibility,
+        FullParams
+    );
+
+    if (bHitFull)
+    {
+        if (IsPlacedBlockActor(FullHit.GetActor()))
+        {
+            bOutHitPlacedBlock = true;
+            OutSupportBlockVoxel = VM->WorldToGrid3D(FullHit.GetActor()->GetActorLocation());
+            OutHitLocation = FullHit.ImpactPoint;
+            OutHitNormal = FullHit.ImpactNormal;
+            return true;
+        }
+
+        if (IsPendingGhostSupportComponent(FullHit.GetComponent()))
+        {
+            bOutHitPlacedBlock = true;
+            OutSupportBlockVoxel = VM->WorldToGrid3D(FullHit.GetComponent()->GetComponentLocation());
+            OutHitLocation = FullHit.ImpactPoint;
+            OutHitNormal = FullHit.ImpactNormal;
+            return true;
+        }
+    }
+
+    if (bHitTerrain)
+    {
+        OutHitLocation = TerrainHit.ImpactPoint;
+        OutHitNormal = TerrainHit.ImpactNormal;
         return true;
     }
 
@@ -492,11 +741,14 @@ bool UBuildModeManager::CommitPrefabBuild()
         UE_LOG(
             LogTemp,
             Warning,
-            TEXT("[BuildMode] CommitPrefab: invalid state. HoverValid=%s SettlementID=%d Cell=(%d,%d) BuildingTag=%s"),
+            TEXT("[BuildMode] CommitPrefab: invalid state. HoverValid=%s SettlementID=%d Cell=(%d,%d) Voxel=(%d,%d,%d) BuildingTag=%s"),
             bHoveredCellValid ? TEXT("true") : TEXT("false"),
             EffectiveSettlementID,
             CurrentHoveredCell.X,
             CurrentHoveredCell.Y,
+            CurrentHoveredVoxel.X,
+            CurrentHoveredVoxel.Y,
+            CurrentHoveredVoxel.Z,
             SelectedBuildingTag.IsValid() ? *SelectedBuildingTag.ToString() : TEXT("Invalid")
         );
 
@@ -524,18 +776,21 @@ bool UBuildModeManager::CommitPrefabBuild()
     UE_LOG(
         LogTemp,
         Warning,
-        TEXT("[BuildMode] CommitPrefab: calling PlayerBuildContext::CommitPrefabBuildByTagWithRotation at Cell=(%d,%d), SettlementID=%d, AgentID=%d, Rotation=%d, BuildingTag=%s"),
+        TEXT("[BuildMode] CommitPrefab: calling PlayerBuildContext::CommitPrefabBuildByTagWithRotation3D at Cell=(%d,%d), HoveredVoxel=(%d,%d,%d), SettlementID=%d, AgentID=%d, Rotation=%d, BuildingTag=%s"),
         CurrentHoveredCell.X,
         CurrentHoveredCell.Y,
+        CurrentHoveredVoxel.X,
+        CurrentHoveredVoxel.Y,
+        CurrentHoveredVoxel.Z,
         EffectiveSettlementID,
         BuildAgentID,
         RotationIndex,
         *SelectedBuildingTag.ToString()
     );
 
-    const bool bSuccess = Ctx->CommitPrefabBuildByTagWithRotation(
+    const bool bSuccess = Ctx->CommitPrefabBuildByTagWithRotation3D(
         SelectedBuildingTag,
-        CurrentHoveredCell,
+        CurrentHoveredVoxel,
         RotationIndex,
         BuildAgentID
     );
@@ -545,9 +800,10 @@ bool UBuildModeManager::CommitPrefabBuild()
         UE_LOG(
             LogTemp,
             Log,
-            TEXT("[BuildMode] Prefab committed at (%d, %d)"),
-            CurrentHoveredCell.X,
-            CurrentHoveredCell.Y
+            TEXT("[BuildMode] Prefab committed at (%d, %d, %d)"),
+            CurrentHoveredVoxel.X,
+            CurrentHoveredVoxel.Y,
+            CurrentHoveredVoxel.Z
         );
 
         BroadcastFeedback(Ctx->GetLastCommitResultMessage());
@@ -557,7 +813,7 @@ bool UBuildModeManager::CommitPrefabBuild()
         UE_LOG(
             LogTemp,
             Warning,
-            TEXT("[BuildMode] CommitPrefab: PlayerBuildContext::CommitPrefabBuildByTagWithRotation returned false.")
+            TEXT("[BuildMode] CommitPrefab: PlayerBuildContext::CommitPrefabBuildByTagWithRotation3D returned false.")
         );
 
         BroadcastFeedback(Ctx->GetLastCommitResultMessage());
@@ -568,7 +824,7 @@ bool UBuildModeManager::CommitPrefabBuild()
 
 bool UBuildModeManager::CommitCustomBuild()
 {
-    if (SelectedCells.Num() == 0)
+    if (SelectedCells3D.Num() == 0)
     {
         UE_LOG(LogTemp, Warning, TEXT("[BuildMode] CommitCustom: no cells selected."));
         BroadcastFeedback(TEXT("Select at least one cell first."));
@@ -593,13 +849,14 @@ bool UBuildModeManager::CommitCustomBuild()
 
     Ctx->SetActiveSettlement(EffectiveSettlementID);
 
-    const bool bSuccess = Ctx->CommitCustomBuild(BuildAgentID);
+    const bool bSuccess = Ctx->CommitCustomBuild3D(SelectedCells3D, BuildAgentID);
 
     if (bSuccess)
     {
-        UE_LOG(LogTemp, Log, TEXT("[BuildMode] Custom build committed: %d cells"), SelectedCells.Num());
+        UE_LOG(LogTemp, Log, TEXT("[BuildMode] Custom build committed: %d cells"), SelectedCells3D.Num());
 
         SelectedCells.Empty();
+        SelectedCells3D.Empty();
         OnCellCountChanged.Broadcast(0);
         BroadcastFeedback(Ctx->GetLastCommitResultMessage());
     }
@@ -650,21 +907,30 @@ void UBuildModeManager::DestroyGhost()
 
 void UBuildModeManager::UpdateGhost()
 {
-    if (!GhostActor || !bHoveredCellValid) return;
+    if (!GhostActor || !bHoveredCellValid)
+    {
+        return;
+    }
 
     UVoxelWorldManager* VM = GetVoxelManager();
-    if (!VM) return;
+    if (!VM)
+    {
+        return;
+    }
 
     if (CurrentMode == EBuildMode::Prefab)
     {
-        FVector WorldPos = VM->GridToWorld(CurrentHoveredCell, 0);
-        WorldPos.Z = LastHitZ;
-        GhostActor->UpdatePrefabGhost(WorldPos, RotationIndex, SelectedBuildingTag, VM, LastHitZ);
+        const FVector WorldPos = VM->GridToWorld(
+            FIntPoint(CurrentHoveredVoxel.X, CurrentHoveredVoxel.Y),
+            CurrentHoveredVoxel.Z
+        );
+
+        GhostActor->UpdatePrefabGhost(WorldPos, RotationIndex, SelectedBuildingTag, VM, WorldPos.Z);
         GhostActor->SetGhostState(EBuildGhostState::Valid);
     }
     else if (CurrentMode == EBuildMode::CustomDraw)
     {
-        GhostActor->UpdateCustomDrawCells(SelectedCells, CurrentHoveredCell, VM, LastHitZ);
+        GhostActor->UpdateCustomDrawCells3D(SelectedCells3D, CurrentHoveredVoxel, VM);
         GhostActor->SetGhostState(EBuildGhostState::Valid);
     }
 }
