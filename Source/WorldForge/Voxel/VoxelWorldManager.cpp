@@ -562,6 +562,7 @@ void UVoxelWorldManager::CacheTerrainMetadata(const TArray<FWorldTileData>& Worl
     CachedTerrainGridHeight = GridHeight;
 
     CachedSurfaceHeightsVoxels.SetNumZeroed(GridWidth * GridHeight);
+    CachedVoxelProfiles.SetNum(GridWidth * GridHeight);
     CachedBiomeTags.SetNum(GridWidth * GridHeight);
 
     for (int32 Y = 0; Y < GridHeight; ++Y)
@@ -575,6 +576,7 @@ void UVoxelWorldManager::CacheTerrainMetadata(const TArray<FWorldTileData>& Worl
                 ComputeChunkSurfaceHeightVoxels(FIntPoint(X, Y), Tile.VoxelProfile)
                 );
 
+            CachedVoxelProfiles[Index] = Tile.VoxelProfile;
             CachedBiomeTags[Index] = Tile.BiomeType;
         }
     }
@@ -597,6 +599,7 @@ void UVoxelWorldManager::CacheTerrainMetadata(const TArray<FWorldTileData>& Worl
 void UVoxelWorldManager::ClearTerrainCache()
 {
     CachedSurfaceHeightsVoxels.Reset();
+    CachedVoxelProfiles.Reset();
     CachedBiomeTags.Reset();
     CachedTerrainGridWidth = 0;
     CachedTerrainGridHeight = 0;
@@ -662,6 +665,7 @@ bool UVoxelWorldManager::HasCachedTerrainData() const
         CachedTerrainGridWidth > 0 &&
         CachedTerrainGridHeight > 0 &&
         CachedSurfaceHeightsVoxels.Num() == (CachedTerrainGridWidth * CachedTerrainGridHeight) &&
+        CachedVoxelProfiles.Num() == (CachedTerrainGridWidth * CachedTerrainGridHeight) &&
         CachedBiomeTags.Num() == (CachedTerrainGridWidth * CachedTerrainGridHeight);
 }
 
@@ -787,6 +791,41 @@ bool UVoxelWorldManager::TryGetCachedSurfaceHeightWorldForVoxelCell(FIntPoint Vo
     }
 
     OutSurfaceHeightWorld = CachedSurfaceHeightsVoxels[Index] * VoxelSize;
+    return true;
+}
+
+bool UVoxelWorldManager::TryGetTerrainSurfaceVoxelZ(FIntPoint VoxelXY, int32& OutVoxelZ) const
+{
+    OutVoxelZ = 0;
+
+    if (!HasCachedTerrainData())
+    {
+        return false;
+    }
+
+    const FIntPoint ChunkCell = VoxelCellToChunkCell(VoxelXY);
+    if (!IsValidTerrainCell(ChunkCell))
+    {
+        return false;
+    }
+
+    const int32 Index = TerrainIndex(ChunkCell);
+    if (!CachedVoxelProfiles.IsValidIndex(Index))
+    {
+        return false;
+    }
+
+    const FVoxelBiomeProfile& Profile = CachedVoxelProfiles[Index];
+
+    int32 SurfaceVoxelZ = ComputeSmoothSurfaceHeightAtVoxel(VoxelXY.X, VoxelXY.Y, Profile);
+
+    if (CurrentTerrainMode == ETerrainMode::Blocky)
+    {
+        SurfaceVoxelZ = FMath::GridSnap(SurfaceVoxelZ, GetEffectiveBlockHeightStep());
+        SurfaceVoxelZ = FMath::Max(4, SurfaceVoxelZ);
+    }
+
+    OutVoxelZ = SurfaceVoxelZ;
     return true;
 }
 

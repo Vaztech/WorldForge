@@ -71,6 +71,9 @@ private:
     UPROPERTY()
     UMaterialInstanceDynamic* CellCursorMaterial;
 
+    UPROPERTY()
+    UMaterialInstanceDynamic* CellInvalidMaterial;
+
     int32 ActiveHighlightCount = 0;
 
     static constexpr float GhostOpacity = 0.4f;

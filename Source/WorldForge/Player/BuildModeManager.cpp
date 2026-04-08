@@ -226,6 +226,14 @@ void UBuildModeManager::EnterPrefabMode(FGameplayTag BuildingTag)
     SelectedCells.Empty();
     SelectedCells3D.Empty();
     bHoveredCellValid = false;
+    bJustCommitted = false;
+    bHasLastValidVoxel = false;
+    LastValidVoxel = FIntVector::ZeroValue;
+    bIsDraggingBuild = false;
+    LastPlacedDragVoxel = FIntVector(INT32_MIN);
+    bHasDragStart = false;
+    DragStartVoxel = FIntVector::ZeroValue;
+    bDragStartedFromBlock = false;
 
     SpawnGhost();
 
@@ -252,6 +260,14 @@ void UBuildModeManager::EnterCustomDrawMode(FGameplayTag MaterialTag)
     SelectedCells.Empty();
     SelectedCells3D.Empty();
     bHoveredCellValid = false;
+    bJustCommitted = false;
+    bHasLastValidVoxel = false;
+    LastValidVoxel = FIntVector::ZeroValue;
+    bIsDraggingBuild = false;
+    LastPlacedDragVoxel = FIntVector(INT32_MIN);
+    bHasDragStart = false;
+    DragStartVoxel = FIntVector::ZeroValue;
+    bDragStartedFromBlock = false;
 
     if (UPlayerBuildContext* Ctx = GetBuildContext())
     {
@@ -288,6 +304,14 @@ void UBuildModeManager::ExitBuildMode()
     RotationIndex = 0;
     bHoveredCellValid = false;
     LastHitZ = 0.0f;
+    bJustCommitted = false;
+    bHasLastValidVoxel = false;
+    LastValidVoxel = FIntVector::ZeroValue;
+    bIsDraggingBuild = false;
+    LastPlacedDragVoxel = FIntVector(INT32_MIN);
+    bHasDragStart = false;
+    DragStartVoxel = FIntVector::ZeroValue;
+    bDragStartedFromBlock = false;
 
     DestroyGhost();
 
@@ -317,12 +341,27 @@ void UBuildModeManager::SetBuildAgentID(int32 AgentID)
     BuildAgentID = AgentID;
 }
 
+void UBuildModeManager::SetDragBuildActive(bool bActive)
+{
+    bIsDraggingBuild = bActive;
+
+    if (!bActive)
+    {
+        LastPlacedDragVoxel = FIntVector(INT32_MIN);
+        bHasDragStart = false;
+        DragStartVoxel = FIntVector::ZeroValue;
+        bDragStartedFromBlock = false;
+    }
+}
+
 // ================================
 // Input Handlers
 // ================================
 
 void UBuildModeManager::HandlePrimaryClick()
 {
+    bJustCommitted = false;
+
     UE_LOG(
         LogTemp,
         Warning,
@@ -345,6 +384,12 @@ void UBuildModeManager::HandlePrimaryClick()
         return;
     }
 
+    bIsDraggingBuild = true;
+    LastPlacedDragVoxel = FIntVector(INT32_MIN);
+    DragStartVoxel = CurrentHoveredVoxel;
+    bHasDragStart = true;
+    bDragStartedFromBlock = false;
+
     if (CurrentMode == EBuildMode::Prefab)
     {
         UE_LOG(LogTemp, Warning, TEXT("[BuildMode] HandlePrimaryClick -> Prefab"));
@@ -355,8 +400,10 @@ void UBuildModeManager::HandlePrimaryClick()
             TEXT("[BuildMode] HandlePrimaryClick -> Prefab result: %s"),
             bCommitted ? TEXT("SUCCESS") : TEXT("FAILED")
         );
+        return;
     }
-    else if (CurrentMode == EBuildMode::CustomDraw)
+
+    if (CurrentMode == EBuildMode::CustomDraw)
     {
         UE_LOG(LogTemp, Warning, TEXT("[BuildMode] HandlePrimaryClick -> CustomDraw"));
 
@@ -370,12 +417,6 @@ void UBuildModeManager::HandlePrimaryClick()
                 CurrentHoveredVoxel.Y,
                 CurrentHoveredVoxel.Z
             );
-
-            BroadcastFeedback(FString::Printf(
-                TEXT("Cell (%d, %d, %d) is already selected."),
-                CurrentHoveredVoxel.X,
-                CurrentHoveredVoxel.Y,
-                CurrentHoveredVoxel.Z));
             return;
         }
 
@@ -393,22 +434,20 @@ void UBuildModeManager::HandlePrimaryClick()
                         CurrentHoveredVoxel.Y,
                         CurrentHoveredVoxel.Z
                     );
-
-                    BroadcastFeedback(FString::Printf(
-                        TEXT("Cell (%d, %d, %d) is already occupied."),
-                        CurrentHoveredVoxel.X,
-                        CurrentHoveredVoxel.Y,
-                        CurrentHoveredVoxel.Z));
                     return;
                 }
             }
         }
 
+        SelectedCells3D.Empty();
+        SelectedCells.Empty();
         SelectedCells3D.Add(CurrentHoveredVoxel);
         SelectedCells.Add(CurrentHoveredCell);
+        LastPlacedDragVoxel = CurrentHoveredVoxel;
 
         if (UPlayerBuildContext* Ctx = GetBuildContext())
         {
+            Ctx->ClearSelection();
             Ctx->AddCell(CurrentHoveredCell);
         }
 
@@ -435,10 +474,22 @@ void UBuildModeManager::HandlePrimaryClick()
 
 void UBuildModeManager::HandleSecondaryClick()
 {
+    bIsDraggingBuild = false;
+    LastPlacedDragVoxel = FIntVector(INT32_MIN);
+    bHasDragStart = false;
+    DragStartVoxel = FIntVector::ZeroValue;
+    bDragStartedFromBlock = false;
 }
 
 void UBuildModeManager::HandleUndo()
 {
+    bJustCommitted = false;
+    bIsDraggingBuild = false;
+    LastPlacedDragVoxel = FIntVector(INT32_MIN);
+    bHasDragStart = false;
+    DragStartVoxel = FIntVector::ZeroValue;
+    bDragStartedFromBlock = false;
+
     if (CurrentMode != EBuildMode::CustomDraw || SelectedCells3D.Num() == 0)
     {
         return;
@@ -479,6 +530,13 @@ void UBuildModeManager::HandleUndo()
 
 void UBuildModeManager::HandleRotate(bool bClockwise)
 {
+    bJustCommitted = false;
+    bIsDraggingBuild = false;
+    LastPlacedDragVoxel = FIntVector(INT32_MIN);
+    bHasDragStart = false;
+    DragStartVoxel = FIntVector::ZeroValue;
+    bDragStartedFromBlock = false;
+
     if (CurrentMode != EBuildMode::Prefab) return;
 
     RotationIndex = bClockwise
@@ -499,9 +557,22 @@ void UBuildModeManager::HandleRotate(bool bClockwise)
 
 void UBuildModeManager::HandleConfirm()
 {
+    if (bJustCommitted)
+    {
+        return;
+    }
+
     if (CurrentMode == EBuildMode::CustomDraw)
     {
-        CommitCustomBuild();
+        if (CommitCustomBuild())
+        {
+            bJustCommitted = true;
+            bIsDraggingBuild = false;
+            LastPlacedDragVoxel = FIntVector(INT32_MIN);
+            bHasDragStart = false;
+            DragStartVoxel = FIntVector::ZeroValue;
+            bDragStartedFromBlock = false;
+        }
     }
 }
 
@@ -526,90 +597,254 @@ void UBuildModeManager::UpdateFromMouse(APlayerController* PC)
     FIntVector SupportBlockVoxel = FIntVector::ZeroValue;
     FVector HitNormal = FVector::UpVector;
 
-    if (RaycastToTerrain(PC, HitLocation, bHitPlacedBlock, SupportBlockVoxel, HitNormal))
+    const bool bHit = RaycastToTerrain(PC, HitLocation, bHitPlacedBlock, SupportBlockVoxel, HitNormal);
+
+    UVoxelWorldManager* VM = GetVoxelManager();
+    UWorld* World = GetWorld();
+    if (!VM || !World)
     {
-        UVoxelWorldManager* VM = GetVoxelManager();
-        UWorld* World = GetWorld();
+        return;
+    }
 
-        if (VM && World)
+    if (!bHit)
+    {
+        if (bHasLastValidVoxel)
         {
-            const FIntPoint TerrainCell = VM->WorldToTerrainCell(HitLocation);
+            CurrentHoveredVoxel = LastValidVoxel;
+            CurrentHoveredCell = FIntPoint(CurrentHoveredVoxel.X, CurrentHoveredVoxel.Y);
+            bHoveredCellValid = true;
+            UpdateGhost();
+        }
+        else
+        {
+            bHoveredCellValid = false;
 
-            FIntVector NewVoxel = VM->WorldToGrid3D(HitLocation);
-            NewVoxel.X = TerrainCell.X;
-            NewVoxel.Y = TerrainCell.Y;
-
-            if (bHitPlacedBlock)
+            if (GhostActor)
             {
-                const FIntVector FaceOffset = GetFaceOffsetFromNormal(HitNormal);
-                NewVoxel = SupportBlockVoxel + FaceOffset;
-            }
-            else
-            {
-                int32 HighestZ = NewVoxel.Z;
-
-                for (const FIntVector& Cell : SelectedCells3D)
-                {
-                    if (Cell.X == TerrainCell.X && Cell.Y == TerrainCell.Y)
-                    {
-                        if (Cell.Z >= HighestZ)
-                        {
-                            HighestZ = Cell.Z + 1;
-                        }
-                    }
-                }
-
-                NewVoxel.Z = HighestZ;
-            }
-
-            const bool bPendingOccupied = SelectedCells3D.Contains(NewVoxel);
-            const bool bPlacedOccupied = HasPlacedBlockAtVoxel(World, VM, NewVoxel);
-
-            if (bPendingOccupied || bPlacedOccupied)
-            {
-                bHoveredCellValid = false;
-
-                if (GhostActor)
-                {
-                    GhostActor->SetGhostState(EBuildGhostState::Hidden);
-                }
-
-                return;
-            }
-
-            const FIntPoint NewCell(NewVoxel.X, NewVoxel.Y);
-
-            const bool bChanged =
-                (NewVoxel != CurrentHoveredVoxel) ||
-                (NewCell != CurrentHoveredCell) ||
-                !bHoveredCellValid;
-
-            if (bChanged)
-            {
-                CurrentHoveredVoxel = NewVoxel;
-                CurrentHoveredCell = NewCell;
-                bHoveredCellValid = true;
-                LastHitZ = HitLocation.Z;
-
-                OnHoveredCellChanged.Broadcast(CurrentHoveredCell);
+                GhostActor->SetGhostState(EBuildGhostState::Invalid);
                 UpdateGhost();
             }
-            else
-            {
-                bHoveredCellValid = true;
-                LastHitZ = HitLocation.Z;
-            }
         }
+        return;
+    }
+
+    const FIntPoint TerrainCell = VM->WorldToTerrainCell(HitLocation);
+
+    FIntVector NewVoxel = VM->WorldToGrid3D(HitLocation);
+    NewVoxel.X = TerrainCell.X;
+    NewVoxel.Y = TerrainCell.Y;
+
+    if (bHitPlacedBlock)
+    {
+        const FIntVector FaceOffset = GetFaceOffsetFromNormal(HitNormal);
+        NewVoxel = SupportBlockVoxel + FaceOffset;
     }
     else
+    {
+        if (!(bIsDraggingBuild && CurrentMode == EBuildMode::CustomDraw))
+        {
+            int32 HighestZ = NewVoxel.Z;
+
+            for (const FIntVector& Cell : SelectedCells3D)
+            {
+                if (Cell.X == TerrainCell.X && Cell.Y == TerrainCell.Y)
+                {
+                    if (Cell.Z >= HighestZ)
+                    {
+                        HighestZ = Cell.Z + 1;
+                    }
+                }
+            }
+
+            NewVoxel.Z = HighestZ;
+        }
+    }
+
+    const bool bPendingOccupied = SelectedCells3D.Contains(NewVoxel);
+    const bool bPlacedOccupied = HasPlacedBlockAtVoxel(World, VM, NewVoxel);
+
+    const bool bSkipOccupancyGateForDrag =
+        bIsDraggingBuild &&
+        CurrentMode == EBuildMode::CustomDraw &&
+        bHasDragStart;
+
+    if ((bPendingOccupied || bPlacedOccupied) && !bSkipOccupancyGateForDrag)
     {
         bHoveredCellValid = false;
 
         if (GhostActor)
         {
-            GhostActor->SetGhostState(EBuildGhostState::Hidden);
+            GhostActor->SetGhostState(EBuildGhostState::Invalid);
+            UpdateGhost();
+        }
+
+        return;
+    }
+
+    LastValidVoxel = NewVoxel;
+    bHasLastValidVoxel = true;
+
+    const bool bChanged =
+        (NewVoxel != CurrentHoveredVoxel) ||
+        !bHoveredCellValid;
+
+    CurrentHoveredVoxel = NewVoxel;
+    CurrentHoveredCell = FIntPoint(NewVoxel.X, NewVoxel.Y);
+    bHoveredCellValid = true;
+    LastHitZ = HitLocation.Z;
+
+    if (bChanged)
+    {
+        OnHoveredCellChanged.Broadcast(CurrentHoveredCell);
+        UpdateGhost();
+    }
+
+    if (!bIsDraggingBuild || CurrentMode != EBuildMode::CustomDraw || !bHasDragStart)
+    {
+        return;
+    }
+
+    if (SelectedCells3D.Num() <= 1)
+    {
+        bDragStartedFromBlock = (DragStartVoxel != CurrentHoveredVoxel) && bHitPlacedBlock;
+    }
+
+    TArray<FIntVector> LineCells3D;
+    TArray<FIntPoint> LineCells2D;
+    const FIntVector EndVoxel = CurrentHoveredVoxel;
+
+    if (bDragStartedFromBlock)
+    {
+        const int32 Dx = EndVoxel.X - DragStartVoxel.X;
+        const int32 Dy = EndVoxel.Y - DragStartVoxel.Y;
+        const int32 Dz = EndVoxel.Z - DragStartVoxel.Z;
+
+        const int32 Steps = FMath::Max3(
+            FMath::Abs(Dx),
+            FMath::Abs(Dy),
+            FMath::Abs(Dz)
+        );
+
+        for (int32 Index = 0; Index <= Steps; ++Index)
+        {
+            const float Alpha = (Steps == 0) ? 0.0f : static_cast<float>(Index) / static_cast<float>(Steps);
+
+            FIntVector LineVoxel;
+            LineVoxel.X = FMath::RoundToInt(FMath::Lerp(static_cast<float>(DragStartVoxel.X), static_cast<float>(EndVoxel.X), Alpha));
+            LineVoxel.Y = FMath::RoundToInt(FMath::Lerp(static_cast<float>(DragStartVoxel.Y), static_cast<float>(EndVoxel.Y), Alpha));
+            LineVoxel.Z = FMath::RoundToInt(FMath::Lerp(static_cast<float>(DragStartVoxel.Z), static_cast<float>(EndVoxel.Z), Alpha));
+
+            if (LineCells3D.Contains(LineVoxel))
+            {
+                continue;
+            }
+
+            if (HasPlacedBlockAtVoxel(World, VM, LineVoxel))
+            {
+                continue;
+            }
+
+            LineCells3D.Add(LineVoxel);
+            LineCells2D.Add(FIntPoint(LineVoxel.X, LineVoxel.Y));
         }
     }
+    else
+    {
+        const int32 Dx = EndVoxel.X - DragStartVoxel.X;
+        const int32 Dy = EndVoxel.Y - DragStartVoxel.Y;
+
+        const int32 Steps = FMath::Max(
+            FMath::Abs(Dx),
+            FMath::Abs(Dy)
+        );
+
+        bool bHasPreviousTerrainPoint = false;
+        int32 PreviousX = 0;
+        int32 PreviousY = 0;
+        int32 PreviousZ = 0;
+
+        for (int32 Index = 0; Index <= Steps; ++Index)
+        {
+            const float Alpha = (Steps == 0) ? 0.0f : static_cast<float>(Index) / static_cast<float>(Steps);
+
+            const int32 LineX = FMath::RoundToInt(FMath::Lerp(static_cast<float>(DragStartVoxel.X), static_cast<float>(EndVoxel.X), Alpha));
+            const int32 LineY = FMath::RoundToInt(FMath::Lerp(static_cast<float>(DragStartVoxel.Y), static_cast<float>(EndVoxel.Y), Alpha));
+
+            int32 SurfaceVoxelZ = DragStartVoxel.Z;
+            VM->TryGetTerrainSurfaceVoxelZ(FIntPoint(LineX, LineY), SurfaceVoxelZ);
+
+            if (!bHasPreviousTerrainPoint)
+            {
+                const FIntVector FirstVoxel(LineX, LineY, SurfaceVoxelZ);
+
+                if (!LineCells3D.Contains(FirstVoxel) &&
+                    !HasPlacedBlockAtVoxel(World, VM, FirstVoxel))
+                {
+                    LineCells3D.Add(FirstVoxel);
+                    LineCells2D.Add(FIntPoint(FirstVoxel.X, FirstVoxel.Y));
+                }
+
+                PreviousX = LineX;
+                PreviousY = LineY;
+                PreviousZ = SurfaceVoxelZ;
+                bHasPreviousTerrainPoint = true;
+                continue;
+            }
+
+            const int32 DeltaZ = SurfaceVoxelZ - PreviousZ;
+            const int32 ZStepDir = (DeltaZ > 0) ? 1 : ((DeltaZ < 0) ? -1 : 0);
+
+            if (ZStepDir != 0)
+            {
+                for (int32 BridgeZ = PreviousZ; BridgeZ != SurfaceVoxelZ + ZStepDir; BridgeZ += ZStepDir)
+                {
+                    const FIntVector BridgeVoxel(PreviousX, PreviousY, BridgeZ);
+
+                    if (LineCells3D.Contains(BridgeVoxel))
+                    {
+                        continue;
+                    }
+
+                    if (HasPlacedBlockAtVoxel(World, VM, BridgeVoxel))
+                    {
+                        continue;
+                    }
+
+                    LineCells3D.Add(BridgeVoxel);
+                    LineCells2D.Add(FIntPoint(BridgeVoxel.X, BridgeVoxel.Y));
+                }
+            }
+
+            const FIntVector CurrentVoxel(LineX, LineY, SurfaceVoxelZ);
+
+            if (!LineCells3D.Contains(CurrentVoxel) &&
+                !HasPlacedBlockAtVoxel(World, VM, CurrentVoxel))
+            {
+                LineCells3D.Add(CurrentVoxel);
+                LineCells2D.Add(FIntPoint(CurrentVoxel.X, CurrentVoxel.Y));
+            }
+
+            PreviousX = LineX;
+            PreviousY = LineY;
+            PreviousZ = SurfaceVoxelZ;
+        }
+    }
+
+    SelectedCells3D = LineCells3D;
+    SelectedCells = LineCells2D;
+    LastPlacedDragVoxel = CurrentHoveredVoxel;
+
+    if (UPlayerBuildContext* Ctx = GetBuildContext())
+    {
+        Ctx->ClearSelection();
+        for (const FIntPoint& Cell : SelectedCells)
+        {
+            Ctx->AddCell(Cell);
+        }
+    }
+
+    OnCellCountChanged.Broadcast(SelectedCells.Num());
+    UpdateGhost();
 }
 
 // ================================
@@ -654,8 +889,6 @@ bool UBuildModeManager::RaycastToTerrain(
     const FVector TraceStart = WorldLocation;
     const FVector TraceEnd = WorldLocation + (WorldDirection * 50000.0f);
 
-    // Terrain-only fallback trace: ignore ghost + placed blocks so we can still
-    // recover a terrain anchor when no support block face is under the cursor.
     FCollisionQueryParams TerrainParams(SCENE_QUERY_STAT(BuildModeTerrainTrace), false);
     TerrainParams.bTraceComplex = false;
 
@@ -682,9 +915,6 @@ bool UBuildModeManager::RaycastToTerrain(
         TerrainParams
     );
 
-    // Full support trace: DO NOT ignore ghost actor here.
-    // This is what lets pending selected ghost cubes act as support for
-    // additional side attachments before construction completes.
     FCollisionQueryParams FullParams(SCENE_QUERY_STAT(BuildModeFullTrace), false);
     FullParams.bTraceComplex = false;
 
@@ -907,7 +1137,7 @@ void UBuildModeManager::DestroyGhost()
 
 void UBuildModeManager::UpdateGhost()
 {
-    if (!GhostActor || !bHoveredCellValid)
+    if (!GhostActor)
     {
         return;
     }
@@ -915,6 +1145,25 @@ void UBuildModeManager::UpdateGhost()
     UVoxelWorldManager* VM = GetVoxelManager();
     if (!VM)
     {
+        return;
+    }
+
+    if (!bHoveredCellValid)
+    {
+        if (CurrentMode == EBuildMode::CustomDraw)
+        {
+            GhostActor->UpdateCustomDrawCells3D(SelectedCells3D, CurrentHoveredVoxel, VM);
+        }
+        else if (CurrentMode == EBuildMode::Prefab)
+        {
+            const FVector WorldPos = VM->GridToWorld(
+                FIntPoint(CurrentHoveredVoxel.X, CurrentHoveredVoxel.Y),
+                CurrentHoveredVoxel.Z
+            );
+
+            GhostActor->UpdatePrefabGhost(WorldPos, RotationIndex, SelectedBuildingTag, VM, WorldPos.Z);
+        }
+
         return;
     }
 

@@ -92,45 +92,38 @@ public:
 	// Input Handlers (called by PlayerController)
 	// ================================
 
-	// Left click: place prefab or add cell in custom draw
 	UFUNCTION(BlueprintCallable, Category = "WorldForge|Build")
 	void HandlePrimaryClick();
 
-	// Right click: exit build mode (camera pan is handled by the camera Blueprint)
 	UFUNCTION(BlueprintCallable, Category = "WorldForge|Build")
 	void HandleSecondaryClick();
 
-	// Z: undo last cell in custom draw
 	UFUNCTION(BlueprintCallable, Category = "WorldForge|Build")
 	void HandleUndo();
 
-	// R / Shift+R: rotate prefab
 	UFUNCTION(BlueprintCallable, Category = "WorldForge|Build")
 	void HandleRotate(bool bClockwise);
 
-	// Enter: commit custom draw build
 	UFUNCTION(BlueprintCallable, Category = "WorldForge|Build")
 	void HandleConfirm();
 
-	// Escape: exit build mode
 	UFUNCTION(BlueprintCallable, Category = "WorldForge|Build")
 	void HandleCancel();
 
-	// Called each frame by PlayerController while in build mode.
-	// Raycasts from mouse to terrain and updates the hovered cell + ghost.
 	UFUNCTION(BlueprintCallable, Category = "WorldForge|Build")
 	void UpdateFromMouse(APlayerController* PC);
+
+	// Batch 2: external drag state from PlayerController press/release
+	UFUNCTION(BlueprintCallable, Category = "WorldForge|Build")
+	void SetDragBuildActive(bool bActive);
 
 	// ================================
 	// Configuration
 	// ================================
 
-	// Which settlement builds are committed to.
-	// Set this before entering build mode.
 	UFUNCTION(BlueprintCallable, Category = "WorldForge|Build")
 	void SetActiveSettlement(int32 SettlementID);
 
-	// Agent assigned to construction tasks. -1 = auto-assign.
 	UFUNCTION(BlueprintCallable, Category = "WorldForge|Build")
 	void SetBuildAgentID(int32 AgentID);
 
@@ -155,7 +148,6 @@ public:
 
 private:
 
-	// Current state
 	EBuildMode CurrentMode = EBuildMode::None;
 	FGameplayTag SelectedBuildingTag;
 	FGameplayTag SelectedMaterialTag;
@@ -172,32 +164,39 @@ private:
 	bool bHoveredCellValid = false;
 	float LastHitZ = 0.0f;
 
-	// Custom draw selection (mirrors PlayerBuildContext but local for preview)
-	TArray<FIntPoint> SelectedCells;
+	// Batch 1: suppress repeated confirm input immediately after a successful commit
+	bool bJustCommitted = false;
 
-	// Canonical 3D custom-draw selection. Kept in lockstep with SelectedCells
-	// (one entry per click) so existing UI / count broadcasts continue to work
-	// against SelectedCells while CommitCustomBuild submits the 3D version.
+	// Batch 2: keep last valid hover so the ghost stays stable when the cursor
+	// briefly loses a clean trace hit while moving quickly.
+	bool bHasLastValidVoxel = false;
+	FIntVector LastValidVoxel = FIntVector::ZeroValue;
+
+	// Batch 2: click-and-drag continuous build support.
+	bool bIsDraggingBuild = false;
+	FIntVector LastPlacedDragVoxel = FIntVector(INT32_MIN);
+
+	// Batch 2 fix: proper drag anchor state owned by the subsystem.
+	bool bHasDragStart = false;
+	FIntVector DragStartVoxel = FIntVector::ZeroValue;
+	bool bDragStartedFromBlock = false;
+
+	TArray<FIntPoint> SelectedCells;
 	TArray<FIntVector> SelectedCells3D;
 
-	// Config
 	int32 ActiveSettlementID = -1;
 	int32 BuildAgentID = -1;
 
-	// Ghost actor
 	UPROPERTY()
 	ABuildGhostActor* GhostActor = nullptr;
 
-	// Subsystem helpers
 	UPlayerBuildContext* GetBuildContext() const;
 	UVoxelWorldManager* GetVoxelManager() const;
 	UVoxelConstructionSystem* GetConstructionSystem() const;
 	USettlementManager* GetSettlementManager() const;
 
-	// Fallback settlement resolver for build commit paths.
 	int32 GetEffectiveSettlementID() const;
 
-	// Internal
 	bool CommitPrefabBuild();
 	bool CommitCustomBuild();
 	void SpawnGhost();
@@ -207,10 +206,6 @@ private:
 	void BroadcastSelectionChanged();
 	void BroadcastFeedback(const FString& Message);
 
-	// Raycast from screen to terrain / support blocks. Terrain still
-	// provides a fallback anchor, while a directly hit placed block or pending
-	// selected ghost block returns its supporting voxel and hit normal so
-	// callers can place on the exact face that was clicked.
 	bool RaycastToTerrain(
 		APlayerController* PC,
 		FVector& OutHitLocation,

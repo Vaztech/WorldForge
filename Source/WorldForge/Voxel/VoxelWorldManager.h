@@ -94,6 +94,12 @@ public:
     UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
     bool TryGetSurfaceWorldLocation(FIntPoint GridCell, FVector& OutWorldLocation, float ZOffset = 50.0f) const;
 
+    // Returns the cached terrain surface voxel Z for any voxel X/Y. Used by
+    // build-mode drag-line generation so terrain-following lines can query the
+    // local surface height instead of staying frozen at the drag-start Z.
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
+    bool TryGetTerrainSurfaceVoxelZ(FIntPoint VoxelXY, int32& OutVoxelZ) const;
+
     UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
     bool IsSpawnableTerrainCell(FIntPoint GridCell) const;
 
@@ -227,6 +233,13 @@ private:
 
     UPROPERTY(Transient)
     TArray<float> CachedSurfaceHeightsVoxels;
+
+    // One biome/voxel profile per cached terrain chunk cell. This lets
+    // systems that operate at voxel resolution (for example build-mode drag
+    // lines) reconstruct the actual local terrain surface height for any
+    // voxel X/Y instead of reusing the chunk-averaged cache height.
+    UPROPERTY(Transient)
+    TArray<FVoxelBiomeProfile> CachedVoxelProfiles;
 
     UPROPERTY(Transient)
     TArray<FGameplayTag> CachedBiomeTags;

@@ -114,6 +114,13 @@ void ABuildGhostActor::BeginPlay()
             CellCursorMaterial->SetVectorParameterValue(FName("BaseColor"), FLinearColor(0.2f, 0.5f, 1.0f, GhostOpacity));
             CellCursorMaterial->SetScalarParameterValue(FName("Opacity"), GhostOpacity);
         }
+
+        CellInvalidMaterial = UMaterialInstanceDynamic::Create(BaseMat, this);
+        if (CellInvalidMaterial)
+        {
+            CellInvalidMaterial->SetVectorParameterValue(FName("BaseColor"), FLinearColor(0.9f, 0.1f, 0.1f, GhostOpacity));
+            CellInvalidMaterial->SetScalarParameterValue(FName("Opacity"), GhostOpacity);
+        }
     }
 }
 
@@ -367,7 +374,11 @@ void ABuildGhostActor::UpdatePrefabGhost(
             Comp->SetWorldScale3D(FVector(GhostCubeInsetScale));
             DisableGhostTrace(Comp);
 
-            if (CellValidMaterial)
+            if (CurrentState == EBuildGhostState::Invalid && CellInvalidMaterial)
+            {
+                Comp->SetMaterial(0, CellInvalidMaterial);
+            }
+            else if (CellValidMaterial)
             {
                 Comp->SetMaterial(0, CellValidMaterial);
             }
@@ -412,7 +423,11 @@ void ABuildGhostActor::UpdateCustomDrawCells(
             Comp->SetWorldLocation(Pos);
             Comp->SetVisibility(true);
 
-            if (CellValidMaterial)
+            if (CurrentState == EBuildGhostState::Invalid && CellInvalidMaterial)
+            {
+                Comp->SetMaterial(0, CellInvalidMaterial);
+            }
+            else if (CellValidMaterial)
             {
                 Comp->SetMaterial(0, CellValidMaterial);
             }
@@ -432,7 +447,11 @@ void ABuildGhostActor::UpdateCustomDrawCells(
             Comp->SetWorldLocation(Pos);
             Comp->SetVisibility(true);
 
-            if (CellCursorMaterial)
+            if (CurrentState == EBuildGhostState::Invalid && CellInvalidMaterial)
+            {
+                Comp->SetMaterial(0, CellInvalidMaterial);
+            }
+            else if (CellCursorMaterial)
             {
                 Comp->SetMaterial(0, CellCursorMaterial);
             }
@@ -482,7 +501,11 @@ void ABuildGhostActor::UpdateCustomDrawCells3D(
             Comp->SetWorldLocation(Pos);
             Comp->SetVisibility(true);
 
-            if (CellValidMaterial)
+            if (CurrentState == EBuildGhostState::Invalid && CellInvalidMaterial)
+            {
+                Comp->SetMaterial(0, CellInvalidMaterial);
+            }
+            else if (CellValidMaterial)
             {
                 Comp->SetMaterial(0, CellValidMaterial);
             }
@@ -505,7 +528,11 @@ void ABuildGhostActor::UpdateCustomDrawCells3D(
             Comp->SetWorldLocation(Pos);
             Comp->SetVisibility(true);
 
-            if (CellCursorMaterial)
+            if (CurrentState == EBuildGhostState::Invalid && CellInvalidMaterial)
+            {
+                Comp->SetMaterial(0, CellInvalidMaterial);
+            }
+            else if (CellCursorMaterial)
             {
                 Comp->SetMaterial(0, CellCursorMaterial);
             }

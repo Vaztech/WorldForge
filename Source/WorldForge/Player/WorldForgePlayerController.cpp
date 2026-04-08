@@ -17,10 +17,6 @@ AWorldForgePlayerController::AWorldForgePlayerController()
     bEnableClickEvents = true;
     bEnableMouseOverEvents = true;
 
-    // =========================================
-    // DEBUG: Attach CheatManager
-    // NOTE: Remove or disable before shipping
-    // =========================================
     CheatClass = UWorldForgeCheatManager::StaticClass();
 }
 
@@ -79,7 +75,9 @@ void AWorldForgePlayerController::SetupInputComponent()
     {
         if (IA_BuildClick)
         {
-            EIC->BindAction(IA_BuildClick, ETriggerEvent::Triggered, this, &AWorldForgePlayerController::OnBuildClick);
+            EIC->BindAction(IA_BuildClick, ETriggerEvent::Started, this, &AWorldForgePlayerController::OnBuildClickStarted);
+            EIC->BindAction(IA_BuildClick, ETriggerEvent::Completed, this, &AWorldForgePlayerController::OnBuildClickReleased);
+            EIC->BindAction(IA_BuildClick, ETriggerEvent::Canceled, this, &AWorldForgePlayerController::OnBuildClickReleased);
         }
         if (IA_BuildSecondary)
         {
@@ -149,7 +147,7 @@ bool AWorldForgePlayerController::IsBuildCameraSuppressed() const
 
 void AWorldForgePlayerController::RefreshBuildInputSuppression()
 {
-    const bool bShouldSuppress = false; // WASD now allowed even in build mode.
+    const bool bShouldSuppress = false;
 
     if (bShouldSuppress == bBuildInputSuppressed)
     {
@@ -158,7 +156,6 @@ void AWorldForgePlayerController::RefreshBuildInputSuppression()
 
     bBuildInputSuppressed = bShouldSuppress;
 
-    // Keep move input enabled.
     SetIgnoreMoveInput(false);
 
     const bool bInBuildMode = BuildModeManager && BuildModeManager->IsInBuildMode();
@@ -175,7 +172,7 @@ void AWorldForgePlayerController::RefreshBuildInputSuppression()
 // Input handlers
 // ===================================================================
 
-void AWorldForgePlayerController::OnBuildClick(const FInputActionValue& Value)
+void AWorldForgePlayerController::OnBuildClickStarted(const FInputActionValue& Value)
 {
     if (!BuildModeManager) return;
     if (!BuildModeManager->IsInBuildMode()) return;
@@ -194,11 +191,18 @@ void AWorldForgePlayerController::OnBuildClick(const FInputActionValue& Value)
     BuildModeManager->HandlePrimaryClick();
 }
 
+void AWorldForgePlayerController::OnBuildClickReleased(const FInputActionValue& Value)
+{
+    if (!BuildModeManager) return;
+    if (!BuildModeManager->IsInBuildMode()) return;
+
+    BuildModeManager->SetDragBuildActive(false);
+}
+
 void AWorldForgePlayerController::OnBuildSecondary(const FInputActionValue& Value)
 {
     if (!BuildModeManager || !BuildModeManager->IsInBuildMode()) return;
 
-    // Leave RMB to camera pan/orbit. BuildModeManager secondary is intentionally blank now.
     BuildModeManager->HandleSecondaryClick();
 }
 

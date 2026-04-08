@@ -23,15 +23,9 @@ class WORLDFORGE_API AWorldForgePlayerController : public APlayerController
 public:
     AWorldForgePlayerController();
 
-    /** Exposed for BP_WorldForgeCamera so it can suppress its own pan/edge-scroll while building. */
     UFUNCTION(BlueprintPure, Category = "WorldForge|Build")
     bool IsBuildCameraSuppressed() const;
 
-    /**
-     * Returns true when WASD translation and Tick rotation should be locked.
-     * RMB pan is intentionally NOT locked — the camera Blueprint should gate
-     * IA_Move and Tick rotation on this, but let IA_MousePan pass through.
-     */
     UFUNCTION(BlueprintPure, Category = "WorldForge|Build")
     bool ShouldLockBuildCamera() const;
 
@@ -45,8 +39,6 @@ protected:
 
     UPROPERTY(EditDefaultsOnly, Category = "Input|Build")
     int32 BuildMappingPriority = 1;
-
-    // --- Input Actions ---
 
     UPROPERTY(EditDefaultsOnly, Category = "Input|Build")
     TObjectPtr<UInputAction> IA_BuildClick;
@@ -66,11 +58,8 @@ protected:
     UPROPERTY(EditDefaultsOnly, Category = "Input|Build")
     TObjectPtr<UInputAction> IA_BuildToggle;
 
-    /** Z key — undo last cell in custom draw mode. */
     UPROPERTY(EditDefaultsOnly, Category = "Input|Build")
     TObjectPtr<UInputAction> IA_BuildUndo;
-
-    // --- UI ---
 
     UPROPERTY(EditDefaultsOnly, Category = "UI")
     TSubclassOf<UBuildModeWidget> BuildWidgetClass;
@@ -81,14 +70,12 @@ protected:
     UPROPERTY(Transient)
     TObjectPtr<UBuildModeWidget> BuildWidgetInstance;
 
-    // --- Debounce ---
-
-    /** Minimum seconds between accepted LMB build clicks. Prevents multi-fire. */
     UPROPERTY(EditDefaultsOnly, Category = "Input|Build", meta = (ClampMin = "0.05", ClampMax = "1.0"))
     float BuildClickDebounceSeconds = 0.2f;
 
 private:
-    void OnBuildClick(const FInputActionValue& Value);
+    void OnBuildClickStarted(const FInputActionValue& Value);
+    void OnBuildClickReleased(const FInputActionValue& Value);
     void OnBuildSecondary(const FInputActionValue& Value);
     void OnBuildRotate(const FInputActionValue& Value);
     void OnBuildConfirm(const FInputActionValue& Value);
@@ -103,6 +90,5 @@ private:
     bool bBuildWidgetVisible = false;
     bool bBuildInputSuppressed = false;
 
-    /** World time of the last accepted build click (for debounce). */
     double LastBuildClickTime = 0.0;
 };
