@@ -13,6 +13,16 @@ class UStaticMesh;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnTerrainReady);
 
+UENUM(BlueprintType)
+enum class EWorldForgeTerrainType : uint8
+{
+    Grass UMETA(DisplayName = "Grass"),
+    Dirt  UMETA(DisplayName = "Dirt"),
+    Rock  UMETA(DisplayName = "Rock"),
+    Sand  UMETA(DisplayName = "Sand"),
+    Snow  UMETA(DisplayName = "Snow")
+};
+
 USTRUCT(BlueprintType)
 struct FPerlinOctaveSettings
 {
@@ -60,6 +70,15 @@ public:
     bool IsTerrainReadyForGameplay() const;
 
     UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
+    bool IsTerrainRuntimeStable() const;
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
+    bool IsSurfaceReady() const
+    {
+        return bTerrainReadyBroadcasted && IsTerrainRuntimeStable();
+    }
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
     FVector GridToWorld(FIntPoint GridCell, int32 ZLevel = 0) const;
 
     UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
@@ -70,6 +89,9 @@ public:
 
     UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
     FIntPoint WorldToTerrainCell(FVector WorldPosition) const;
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
+    FVector TerrainCellToWorld(FIntPoint GridCell, float WorldZ = 0.0f, bool bCenterInCell = true) const;
 
     UFUNCTION(BlueprintCallable, Category = "WorldForge|Voxel")
     void ApplyBiomeProfileToChunk(FIntPoint ChunkCoord, const FVoxelBiomeProfile& Profile);
@@ -94,9 +116,6 @@ public:
     UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
     bool TryGetSurfaceWorldLocation(FIntPoint GridCell, FVector& OutWorldLocation, float ZOffset = 50.0f) const;
 
-    // Returns the cached terrain surface voxel Z for any voxel X/Y. Used by
-    // build-mode drag-line generation so terrain-following lines can query the
-    // local surface height instead of staying frozen at the drag-start Z.
     UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
     bool TryGetTerrainSurfaceVoxelZ(FIntPoint VoxelXY, int32& OutVoxelZ) const;
 
@@ -111,6 +130,18 @@ public:
 
     UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
     FIntPoint VoxelCellToChunkCell(FIntPoint VoxelCell) const;
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel|Terrain")
+    bool GetTerrainTypeAtCell(FIntPoint GridCell, EWorldForgeTerrainType& OutTerrainType) const;
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel|Terrain")
+    bool GetTerrainTypeAtVoxel(FIntPoint VoxelXY, EWorldForgeTerrainType& OutTerrainType) const;
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel|Terrain")
+    bool GetTerrainSlopeAtCell(FIntPoint GridCell, float& OutSlopeDegrees) const;
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel|Terrain")
+    bool GetTerrainSlopeAtVoxel(FIntPoint VoxelXY, float& OutSlopeDegrees) const;
 
     bool ValidateSmoothSDF(const FVoxelBiomeProfile& Profile) const;
 
@@ -141,6 +172,15 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Perlin")
     FPerlinOctaveSettings DefaultPerlinSettings;
 
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Voxel|Terrain", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float SandMaxElevationNormalized = 0.35f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Voxel|Terrain", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float RockMinElevationNormalized = 0.75f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Voxel|Terrain", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float SnowMinElevationNormalized = 0.90f;
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Voxel|Debug")
     bool bLogGridConversions = false;
 
@@ -153,21 +193,12 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Voxel|Debug")
     bool bUseFallbackPlacedBlockVisuals = true;
 
-    // Currently unused. Was previously consumed by ResolvePlacedBlockVisualWorldPosition
-    // to enable a chunk-resolution surface-snap that produced floating prefab
-    // towers and dip-invisible free-build cubes. The function is now an
-    // unconditional passthrough; this flag is kept (defaulted false) only so
-    // existing SaveGame data and BP defaults that reference it stay readable.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Voxel|Debug")
     bool bPreferSurfaceAnchoredPlacedBlocks = false;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Voxel|Debug")
     bool bLogPlacedBlockVisuals = true;
 
-    // Small upward nudge applied to placed-block visuals to prevent z-fighting
-    // with the underlying terrain mesh. 1.0 UE unit (1 cm) is well below
-    // visual perception but above z-fight tolerance. Was previously 50.0
-    // (half a voxel), which contributed to a "looks slightly floating" feel.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Voxel|Debug")
     float FallbackPlacedBlockVerticalNudge = 1.0f;
 
@@ -189,9 +220,12 @@ protected:
 
 private:
     FVector GetVoxelWorldOrigin() const;
+    float GetTerrainCellWorldSize() const;
+    float GetRenderVoxelSize() const;
+    bool HasPendingTerrainRequest() const;
 
     bool IsVoxelRuntimeReady() const;
-    bool ApplyBiomeChunkNative(AVoxelWorld* VoxelWorld, FIntPoint ChunkCoord, const FVoxelBiomeProfile& Profile);
+    bool ApplyBiomeChunkNative(AVoxelWorld* VoxelWorld, FIntPoint ChunkCoord, const FVoxelBiomeProfile& Profile, float TileElevation);
     bool ApplyTerrainFromTilesInternal(AVoxelWorld* VoxelWorld, const TArray<FWorldTileData>& WorldTiles, int32 GridWidth, int32 GridHeight);
     bool ApplyGlobalFoundationNative(AVoxelWorld* VoxelWorld, int32 GridWidth, int32 GridHeight);
     void CacheTerrainMetadata(const TArray<FWorldTileData>& WorldTiles, int32 GridWidth, int32 GridHeight);
@@ -199,7 +233,7 @@ private:
     void ClearPlacedBlockVisuals();
 
     int32 GetChunkSizeInVoxels() const;
-    int32 ComputeChunkSurfaceHeightVoxels(FIntPoint ChunkCoord, const FVoxelBiomeProfile& Profile) const;
+    int32 ComputeChunkSurfaceHeightVoxels(FIntPoint ChunkCoord, const FVoxelBiomeProfile& Profile, float TileElevation) const;
     int32 ComputeChunkBaseDepthVoxels(const FVoxelBiomeProfile& Profile) const;
     int32 GetEffectiveBlockHeightStep() const;
 
@@ -207,6 +241,10 @@ private:
     float ComputeSmoothSurfaceHeightAtWorldGrid(FIntPoint GridCell, const FVoxelBiomeProfile& Profile) const;
 
     FPerlinOctaveSettings GetOctaveSettingsForProfile(const FVoxelBiomeProfile& Profile) const;
+
+    EWorldForgeTerrainType ClassifyTerrainCellInternal(FIntPoint GridCell) const;
+    float GetNormalizedElevationForTerrainCell(FIntPoint GridCell) const;
+    float ComputeTerrainSlopeDegreesInternal(FIntPoint GridCell) const;
 
     static float Fade(float T);
     static float Lerp(float T, float A, float B);
@@ -234,10 +272,9 @@ private:
     UPROPERTY(Transient)
     TArray<float> CachedSurfaceHeightsVoxels;
 
-    // One biome/voxel profile per cached terrain chunk cell. This lets
-    // systems that operate at voxel resolution (for example build-mode drag
-    // lines) reconstruct the actual local terrain surface height for any
-    // voxel X/Y instead of reusing the chunk-averaged cache height.
+    UPROPERTY(Transient)
+    TArray<float> CachedTileElevations;
+
     UPROPERTY(Transient)
     TArray<FVoxelBiomeProfile> CachedVoxelProfiles;
 
@@ -247,17 +284,33 @@ private:
     UPROPERTY(Transient)
     TMap<FIntVector, TObjectPtr<AStaticMeshActor>> FallbackPlacedBlockActors;
 
+    UPROPERTY(Transient)
+    FTimerHandle TerrainRetryTimerHandle;
+
+    UPROPERTY(Transient)
+    int32 PendingGridWidth = 0;
+
+    UPROPERTY(Transient)
+    int32 PendingGridHeight = 0;
+
+    UPROPERTY(Transient)
     int32 CachedTerrainGridWidth = 0;
+
+    UPROPERTY(Transient)
     int32 CachedTerrainGridHeight = 0;
 
-    int32 PendingGridWidth = 0;
-    int32 PendingGridHeight = 0;
+    UPROPERTY(Transient)
     int32 TerrainRetryCount = 0;
+
+    UPROPERTY(Transient)
     bool bTerrainRetryScheduled = false;
+
+    UPROPERTY(Transient)
     bool bTerrainReadyBroadcasted = false;
 
+    UPROPERTY(Transient)
     ETerrainMode CurrentTerrainMode = ETerrainMode::Smooth;
-    int32 CurrentBlockHeightStep = 4;
 
-    FTimerHandle TerrainRetryTimerHandle;
+    UPROPERTY(Transient)
+    int32 CurrentBlockHeightStep = 4;
 };

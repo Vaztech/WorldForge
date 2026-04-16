@@ -104,6 +104,18 @@ void UWorldGenPipeline::GenerateWorld(
         HistoryLog.Num(), Currencies.Num());
 }
 
+void UWorldGenPipeline::HandlePCGDecorationPass_Implementation(const TArray<FWorldTileData>& InWorldTiles, int32 InGridWidth, int32 InGridHeight)
+{
+    UE_LOG(
+        LogTemp,
+        Log,
+        TEXT("[WorldGen] HandlePCGDecorationPass default implementation. Tiles=%d Grid=%dx%d"),
+        InWorldTiles.Num(),
+        InGridWidth,
+        InGridHeight
+    );
+}
+
 int32 UWorldGenPipeline::GetDimension(EWorldSize S) const
 {
     switch (S)
@@ -141,7 +153,44 @@ void UWorldGenPipeline::Step02_GenerateHeightmap()
 
 void UWorldGenPipeline::Step03_RunTectonics()
 {
-    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step03: Tectonics -- TODO"));
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step03: Tectonics..."));
+
+    const float RidgeStrength = 0.35f;
+    const float ValleyStrength = 0.25f;
+    const float PlateScale = 0.005f;
+    const float RidgeScale = 0.02f;
+
+    for (int32 Y = 0; Y < GridHeight; Y++)
+    {
+        for (int32 X = 0; X < GridWidth; X++)
+        {
+            const int32 Index = TileIndex(X, Y);
+            FWorldTileData& Tile = WorldTiles[Index];
+
+            float Elevation = Tile.Elevation;
+
+            const float PlateNoise =
+                FMath::PerlinNoise2D(FVector2D(X * PlateScale, Y * PlateScale));
+
+            Elevation += PlateNoise * 0.2f;
+
+            const float RidgeNoise =
+                FMath::Abs(FMath::PerlinNoise2D(FVector2D(X * RidgeScale, Y * RidgeScale)));
+
+            Elevation += RidgeNoise * RidgeStrength;
+
+            const float ValleyNoise =
+                FMath::PerlinNoise2D(FVector2D((X + 1000) * RidgeScale, (Y + 1000) * RidgeScale));
+
+            Elevation -= FMath::Abs(ValleyNoise) * ValleyStrength;
+
+            Elevation = FMath::Clamp(Elevation, 0.0f, 1.0f);
+
+            Tile.Elevation = Elevation;
+        }
+    }
+
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step03 done"));
 }
 
 void UWorldGenPipeline::Step04_AssignBiomes()
@@ -177,10 +226,38 @@ void UWorldGenPipeline::Step04_AssignBiomes()
 
         // Voxel profile -- bSmoothSDF ALWAYS true
         Tile.VoxelProfile.bSmoothSDF = true;
-        Tile.VoxelProfile.NoiseAmplitude = 50.0f + Tile.Elevation * 100.0f;
-        Tile.VoxelProfile.NoiseFrequency = 0.02f;
-        Tile.VoxelProfile.OctaveCount = 4;
-        Tile.VoxelProfile.bEnableCaves = (Tile.Elevation > 0.4f);
+
+        // Strengthen the bridge from tectonic elevation into visible voxel terrain.
+        // Higher elevation tiles become much taller and slightly rougher.
+        // Lower elevation/coastal tiles become flatter and smoother.
+        const float ElevationAlpha = FMath::Clamp(Tile.Elevation, 0.0f, 1.0f);
+
+        Tile.VoxelProfile.NoiseAmplitude = FMath::Lerp(20.0f, 220.0f, ElevationAlpha);
+        Tile.VoxelProfile.NoiseFrequency = FMath::Lerp(0.008f, 0.028f, ElevationAlpha);
+        Tile.VoxelProfile.OctaveCount = (ElevationAlpha > 0.75f) ? 5 : ((ElevationAlpha > 0.45f) ? 4 : 3);
+        Tile.VoxelProfile.bEnableCaves = (Tile.Elevation > 0.55f);
+
+        // Keep mountains distinctly stronger than other high tiles.
+        if (Tile.BiomeType.MatchesTag(FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Mountain")))))
+        {
+            Tile.VoxelProfile.NoiseAmplitude = FMath::Max(Tile.VoxelProfile.NoiseAmplitude, 260.0f);
+            Tile.VoxelProfile.NoiseFrequency = FMath::Max(Tile.VoxelProfile.NoiseFrequency, 0.030f);
+            Tile.VoxelProfile.OctaveCount = FMath::Max(Tile.VoxelProfile.OctaveCount, 5);
+            Tile.VoxelProfile.bEnableCaves = true;
+        }
+        else if (Tile.BiomeType.MatchesTag(FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Coastal")))))
+        {
+            Tile.VoxelProfile.NoiseAmplitude = FMath::Min(Tile.VoxelProfile.NoiseAmplitude, 28.0f);
+            Tile.VoxelProfile.NoiseFrequency = FMath::Min(Tile.VoxelProfile.NoiseFrequency, 0.010f);
+            Tile.VoxelProfile.OctaveCount = 2;
+            Tile.VoxelProfile.bEnableCaves = false;
+        }
+        else if (Tile.BiomeType.MatchesTag(FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Desert")))))
+        {
+            Tile.VoxelProfile.NoiseAmplitude = FMath::Min(Tile.VoxelProfile.NoiseAmplitude, 65.0f);
+            Tile.VoxelProfile.NoiseFrequency = FMath::Min(Tile.VoxelProfile.NoiseFrequency, 0.014f);
+            Tile.VoxelProfile.OctaveCount = 3;
+        }
     }
 
     UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step04 done"));
@@ -225,10 +302,13 @@ void UWorldGenPipeline::Step05_InitVoxelChunks()
     );
 }
 
-// Steps 06-08 remain stubs for now
 void UWorldGenPipeline::Step06_PCGDecorationPass()
 {
-    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step06 -- TODO"));
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step06: Decoration hook..."));
+
+    HandlePCGDecorationPass(WorldTiles, GridWidth, GridHeight);
+
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step06 done"));
 }
 
 void UWorldGenPipeline::Step07_ApplyWorldDriver()
@@ -238,7 +318,73 @@ void UWorldGenPipeline::Step07_ApplyWorldDriver()
 
 void UWorldGenPipeline::Step08_SeedResources()
 {
-    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step08 -- TODO"));
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step08: Seeding resources..."));
+
+    const FGameplayTag StoneTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Resource.Stone")));
+    const FGameplayTag WoodTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Resource.Wood")));
+    const FGameplayTag OreTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Resource.Ore")));
+
+    const FGameplayTag MountainTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Mountain")));
+    const FGameplayTag ForestTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Forest")));
+    const FGameplayTag DesertTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Desert")));
+
+    for (FWorldTileData& Tile : WorldTiles)
+    {
+        Tile.ResourceTags.Reset();
+
+        // -----------------------------
+        // Mountain: Stone + Ore
+        // -----------------------------
+        if (Tile.BiomeType.MatchesTag(MountainTag))
+        {
+            Tile.ResourceTags.Add(StoneTag);
+
+            if (RNGRef->NextFloat(UWorldForgeRNG::BRANCH_RESOURCES) > 0.5f)
+            {
+                Tile.ResourceTags.Add(OreTag);
+            }
+        }
+
+        // -----------------------------
+        // Forest: Wood
+        // -----------------------------
+        else if (Tile.BiomeType.MatchesTag(ForestTag))
+        {
+            Tile.ResourceTags.Add(WoodTag);
+
+            // small chance of stone in forest
+            if (RNGRef->NextFloat(UWorldForgeRNG::BRANCH_RESOURCES) > 0.8f)
+            {
+                Tile.ResourceTags.Add(StoneTag);
+            }
+        }
+
+        // -----------------------------
+        // Desert: mostly empty
+        // -----------------------------
+        else if (Tile.BiomeType.MatchesTag(DesertTag))
+        {
+            // very low chance of stone
+            if (RNGRef->NextFloat(UWorldForgeRNG::BRANCH_RESOURCES) > 0.9f)
+            {
+                Tile.ResourceTags.Add(StoneTag);
+            }
+        }
+
+        // -----------------------------
+        // General fallback (mid terrain)
+        // -----------------------------
+        else
+        {
+            if (Tile.Elevation > 0.4f &&
+                RNGRef->NextFloat(UWorldForgeRNG::BRANCH_RESOURCES) > 0.7f)
+            {
+                Tile.ResourceTags.Add(StoneTag);
+            }
+        }
+    }
+
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step08 done"));
 }
 
 // Steps 12, 14, 15, 16 remain stubs for now

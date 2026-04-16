@@ -200,6 +200,14 @@ FIntPoint UNavigationContext::NavToWorld(int32 SettlementID, FIntPoint NavCell) 
     return Settlement->WorldOrigin + NavCell;
 }
 
+TArray<int32> UNavigationContext::GetRegisteredSettlementIDs() const
+{
+    TArray<int32> SettlementIDs;
+    SettlementGrids.GetKeys(SettlementIDs);
+    SettlementIDs.Sort();
+    return SettlementIDs;
+}
+
 const TMap<FIntPoint, FNavCell>& UNavigationContext::GetGrid(int32 SettlementID) const
 {
     const TMap<FIntPoint, FNavCell>* Grid = SettlementGrids.Find(SettlementID);

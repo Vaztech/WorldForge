@@ -12,7 +12,7 @@
 class UWorld;
 class UWorldForgeRNG;
 
-UCLASS(BlueprintType)
+UCLASS(BlueprintType, Blueprintable)
 class WORLDFORGE_API UWorldGenPipeline : public UObject
 {
     GENERATED_BODY()
@@ -30,6 +30,10 @@ public:
         FWorldGenConfig Config,
         UWorldForgeRNG* RNG
     );
+
+    UFUNCTION(BlueprintNativeEvent, Category = "WorldForge|WorldGen|Decoration")
+    void HandlePCGDecorationPass(const TArray<FWorldTileData>& InWorldTiles, int32 InGridWidth, int32 InGridHeight);
+    virtual void HandlePCGDecorationPass_Implementation(const TArray<FWorldTileData>& InWorldTiles, int32 InGridWidth, int32 InGridHeight);
 
     // Results -- read after GenerateWorld() completes
     const TArray<FWorldTileData>& GetWorldTiles() const { return WorldTiles; }

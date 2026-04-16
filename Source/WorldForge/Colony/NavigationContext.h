@@ -38,11 +38,11 @@ public:
     UFUNCTION(BlueprintCallable, Category = "WorldForge|Navigation")
     FIntPoint WorldToGrid(FVector Position, float CellSize = 200.f) const;
 
-    // NEW:
-    // Converts a settlement-local nav cell into a world terrain cell using the
-    // settlement's stored world origin.
     UFUNCTION(BlueprintCallable, Category = "WorldForge|Navigation")
     FIntPoint NavToWorld(int32 SettlementID, FIntPoint NavCell) const;
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Navigation")
+    TArray<int32> GetRegisteredSettlementIDs() const;
 
     const TMap<FIntPoint, FNavCell>& GetGrid(int32 SettlementID) const;
 

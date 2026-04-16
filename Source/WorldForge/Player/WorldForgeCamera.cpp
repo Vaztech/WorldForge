@@ -22,7 +22,12 @@ AWorldForgeCamera::AWorldForgeCamera()
 	CameraArm->bDoCollisionTest = false;
 
 	ColonyCamera = CreateDefaultSubobject<UCameraComponent>(TEXT("ColonyCamera"));
-	ColonyCamera->SetupAttachment(CameraArm);
+	ColonyCamera->SetupAttachment(CameraArm, USpringArmComponent::SocketName);
+	ColonyCamera->bUsePawnControlRotation = false;
+
+	bUseControllerRotationPitch = false;
+	bUseControllerRotationYaw = false;
+	bUseControllerRotationRoll = false;
 }
 
 void AWorldForgeCamera::BeginPlay()
@@ -34,8 +39,19 @@ void AWorldForgeCamera::BeginPlay()
 	TargetYaw = GetActorRotation().Yaw;
 	TargetPitch = -65.0f;
 
+	CameraArm->bUsePawnControlRotation = false;
+	CameraArm->SetUsingAbsoluteRotation(true);
+	CameraArm->SetAbsolute(false, true, false);
+	CameraArm->bInheritPitch = false;
+	CameraArm->bInheritYaw = false;
+	CameraArm->bInheritRoll = false;
 	CameraArm->TargetArmLength = TargetZoom;
-	CameraArm->SetRelativeRotation(FRotator(TargetPitch, 0.0f, 0.0f));
+	CameraArm->SetWorldRotation(FRotator(TargetPitch, TargetYaw, 0.0f));
+
+	if (ColonyCamera)
+	{
+		ColonyCamera->bUsePawnControlRotation = false;
+	}
 
 	if (APlayerController* PC = Cast<APlayerController>(GetController()))
 	{
@@ -67,17 +83,29 @@ void AWorldForgeCamera::Tick(float DeltaTime)
 		FMath::VInterpTo(GetActorLocation(), TargetLocation, DeltaTime, LocationLagSpeed);
 	SetActorLocation(NewLocation);
 
-	const FRotator CurrentRot = GetActorRotation();
-	const FRotator TargetRot(CurrentRot.Pitch, TargetYaw, CurrentRot.Roll);
-	SetActorRotation(FMath::RInterpTo(CurrentRot, TargetRot, DeltaTime, RotationLagSpeed));
+	const FRotator ArmRot = CameraArm->GetComponentRotation();
 
-	const FRotator ArmRot = CameraArm->GetRelativeRotation();
+	const float NewYaw =
+		FMath::FixedTurn(ArmRot.Yaw, TargetYaw, RotationLagSpeed * 100.0f * DeltaTime);
+
 	const float NewPitch =
 		FMath::FInterpTo(ArmRot.Pitch, TargetPitch, DeltaTime, RotationLagSpeed);
-	CameraArm->SetRelativeRotation(FRotator(NewPitch, 0.0f, 0.0f));
+
+	CameraArm->SetWorldRotation(FRotator(NewPitch, NewYaw, 0.0f));
 
 	CameraArm->TargetArmLength =
 		FMath::FInterpTo(CameraArm->TargetArmLength, TargetZoom, DeltaTime, ZoomLagSpeed);
+}
+
+void AWorldForgeCamera::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult)
+{
+	if (ColonyCamera)
+	{
+		ColonyCamera->GetCameraView(DeltaTime, OutResult);
+		return;
+	}
+
+	Super::CalcCamera(DeltaTime, OutResult);
 }
 
 void AWorldForgeCamera::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
@@ -106,6 +134,61 @@ void AWorldForgeCamera::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 			EIC->BindAction(IA_RotateKeys, ETriggerEvent::Triggered, this, &AWorldForgeCamera::HandleRotateKeys);
 		}
 	}
+}
+
+void AWorldForgeCamera::SnapToRTSView(const FVector& NewLocation, float NewYaw, float NewPitch, float NewZoom, bool bApplyImmediately)
+{
+	TargetLocation = NewLocation;
+	TargetYaw = FMath::UnwindDegrees(NewYaw);
+	TargetPitch = FMath::Clamp(NewPitch, MinPitch, MaxPitch);
+	TargetZoom = FMath::Clamp(NewZoom, ZoomMin, ZoomMax);
+
+	if (bApplyImmediately)
+	{
+		SetActorLocation(TargetLocation);
+
+		if (CameraArm)
+		{
+			CameraArm->TargetArmLength = TargetZoom;
+			CameraArm->SetWorldRotation(FRotator(TargetPitch, TargetYaw, 0.0f));
+		}
+
+		if (APlayerController* PC = Cast<APlayerController>(GetController()))
+		{
+			PC->SetControlRotation(FRotator(TargetPitch, TargetYaw, 0.0f));
+		}
+	}
+
+	if (CameraArm && ColonyCamera)
+	{
+		const FVector ArmLoc = CameraArm->GetComponentLocation();
+		const FRotator ArmRot = CameraArm->GetComponentRotation();
+		const FVector CamLoc = ColonyCamera->GetComponentLocation();
+		const FRotator CamRot = ColonyCamera->GetComponentRotation();
+
+		UE_LOG(
+			LogTemp,
+			Warning,
+			TEXT("[WorldForgeCamera] PostSnap ArmLoc=(%.1f, %.1f, %.1f) ArmRot=(%.1f, %.1f, %.1f) CamLoc=(%.1f, %.1f, %.1f) CamRot=(%.1f, %.1f, %.1f)"),
+			ArmLoc.X, ArmLoc.Y, ArmLoc.Z,
+			ArmRot.Pitch, ArmRot.Yaw, ArmRot.Roll,
+			CamLoc.X, CamLoc.Y, CamLoc.Z,
+			CamRot.Pitch, CamRot.Yaw, CamRot.Roll
+		);
+	}
+
+	UE_LOG(
+		LogTemp,
+		Log,
+		TEXT("[WorldForgeCamera] SnapToRTSView Location=(%.1f, %.1f, %.1f) Yaw=%.1f Pitch=%.1f Zoom=%.1f ApplyNow=%d"),
+		TargetLocation.X,
+		TargetLocation.Y,
+		TargetLocation.Z,
+		TargetYaw,
+		TargetPitch,
+		TargetZoom,
+		bApplyImmediately ? 1 : 0
+	);
 }
 
 void AWorldForgeCamera::HandleMove(const FInputActionValue& Value)

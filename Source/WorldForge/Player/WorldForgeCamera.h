@@ -22,6 +22,10 @@ public:
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaTime) override;
 	virtual void SetupPlayerInputComponent(UInputComponent* PlayerInputComponent) override;
+	virtual void CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult) override;
+
+	UFUNCTION(BlueprintCallable, Category = "Camera")
+	void SnapToRTSView(const FVector& NewLocation, float NewYaw, float NewPitch, float NewZoom, bool bApplyImmediately = true);
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Camera")
 	USceneComponent* DefaultSceneRoot;
@@ -32,9 +36,6 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Camera")
 	UCameraComponent* ColonyCamera;
 
-	// ==========================================
-	// Enhanced Input
-	// ==========================================
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Input")
 	UInputMappingContext* IMC_WorldForgeCamera = nullptr;
 
@@ -50,9 +51,6 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Input")
 	UInputAction* IA_RotateKeys = nullptr;
 
-	// ==========================================
-	// Movement
-	// ==========================================
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Movement", meta = (ClampMin = "100.0", ClampMax = "20000.0", UIMin = "500.0", UIMax = "8000.0"))
 	float MoveSpeed = 2500.0f;
 
@@ -65,9 +63,6 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Movement")
 	bool bInvertPanY = true;
 
-	// ==========================================
-	// Zoom
-	// ==========================================
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Zoom", meta = (ClampMin = "10.0", ClampMax = "3000.0", UIMin = "50.0", UIMax = "1000.0"))
 	float ZoomStep = 150.0f;
 
@@ -75,14 +70,11 @@ public:
 	float ZoomMin = 100.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Zoom", meta = (ClampMin = "500.0", ClampMax = "50000.0", UIMin = "3000.0", UIMax = "20000.0"))
-	float ZoomMax = 6000.0f;
+	float ZoomMax = 20000.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Zoom", meta = (ClampMin = "50.0", ClampMax = "10000.0", UIMin = "300.0", UIMax = "3000.0"))
 	float DefaultArmLength = 1500.0f;
 
-	// ==========================================
-	// Rotation
-	// ==========================================
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Rotation", meta = (ClampMin = "10.0", ClampMax = "1000.0", UIMin = "60.0", UIMax = "500.0"))
 	float RotationSpeedKeys = 180.0f;
 
@@ -95,9 +87,6 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Rotation", meta = (ClampMin = "-89.0", ClampMax = "0.0", UIMin = "-45.0", UIMax = "-5.0"))
 	float MaxPitch = -15.0f;
 
-	// ==========================================
-	// Smoothing
-	// ==========================================
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Smoothing", meta = (ClampMin = "0.1", ClampMax = "50.0", UIMin = "1.0", UIMax = "20.0"))
 	float LocationLagSpeed = 10.0f;
 

@@ -7,19 +7,43 @@ void USettlementManager::Initialize(FSubsystemCollectionBase& Collection)
     UE_LOG(LogTemp, Log, TEXT("[SettlementManager] Initialized."));
 }
 
-int32 USettlementManager::CreateSettlement(const FString& Name, int32 TileID)
+int32 USettlementManager::CreateSettlement(const FString& Name, int32 WorldTileID)
 {
-    FSettlementState S;
-    S.SettlementID = NextSettlementID++;
-    S.Name = Name;
-    S.WorldTileID = TileID;
-    S.Population = 0;
-    S.MoraleSummary = 50.f;
+    UE_LOG(
+        LogTemp,
+        Warning,
+        TEXT("[SettlementManager] CreateSettlement called. Existing settlement count=%d"),
+        Settlements.Num()
+    );
 
-    Settlements.Add(S);
+    if (Settlements.Num() > 0)
+    {
+        UE_LOG(
+            LogTemp,
+            Error,
+            TEXT("[SettlementManager] BLOCKED duplicate settlement creation. Returning existing SettlementID=%d"),
+            Settlements[0].SettlementID
+        );
 
-    UE_LOG(LogTemp, Log, TEXT("[SettlementManager] Created '%s' ID=%d"), *Name, S.SettlementID);
-    return S.SettlementID;
+        return Settlements[0].SettlementID;
+    }
+
+    FSettlementState NewSettlement;
+    NewSettlement.SettlementID = NextSettlementID++;
+    NewSettlement.Name = Name;
+    NewSettlement.WorldTileID = WorldTileID;
+
+    Settlements.Add(NewSettlement);
+
+    UE_LOG(
+        LogTemp,
+        Log,
+        TEXT("[SettlementManager] Created '%s' ID=%d"),
+        *Name,
+        NewSettlement.SettlementID
+    );
+
+    return NewSettlement.SettlementID;
 }
 
 bool USettlementManager::SettlementExists(int32 ID) const

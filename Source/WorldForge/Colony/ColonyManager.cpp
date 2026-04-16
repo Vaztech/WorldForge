@@ -7,10 +7,14 @@
 #include "SaveSubsystem.h"
 #include "VoxelConstructionSystem.h"
 #include "VoxelWorldManager.h"
+#include "WorldGenBootstrapActor.h"
 #include "WorldForgeTags.h"
+#include "Player/WorldForgeCamera.h"
 
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
+#include "EngineUtils.h"
+#include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
 #include "InputCoreTypes.h"
 #include "Kismet/GameplayStatics.h"
@@ -25,6 +29,30 @@ AColonyManager::AColonyManager()
 void AColonyManager::BeginPlay()
 {
     Super::BeginPlay();
+
+    if (!IsPrimaryColonyManagerInstance())
+    {
+        bIsDuplicateManagerInstance = true;
+
+        UE_LOG(
+            LogTemp,
+            Error,
+            TEXT("[ColonyManager] BLOCKED duplicate colony manager instance: %s"),
+            *GetName()
+        );
+
+        SetActorTickEnabled(false);
+        SetActorHiddenInGame(true);
+        SetActorEnableCollision(false);
+        return;
+    }
+
+    UE_LOG(
+        LogTemp,
+        Log,
+        TEXT("[ColonyManager] Primary colony manager accepted: %s"),
+        *GetName()
+    );
 
     if (!bBootstrapOnBeginPlay)
     {
@@ -57,15 +85,48 @@ void AColonyManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
     Super::EndPlay(EndPlayReason);
 }
 
+bool AColonyManager::IsPrimaryColonyManagerInstance() const
+{
+    const UWorld* World = GetWorld();
+    if (!World)
+    {
+        return false;
+    }
+
+    for (TActorIterator<AColonyManager> It(World); It; ++It)
+    {
+        AColonyManager* OtherManager = *It;
+        if (!IsValid(OtherManager) || OtherManager == this || OtherManager->IsActorBeingDestroyed())
+        {
+            continue;
+        }
+
+        return false;
+    }
+
+    return true;
+}
+
 void AColonyManager::StartBootstrapAttempt()
 {
-    if (bBootstrapComplete)
+    if (bIsDuplicateManagerInstance || bBootstrapComplete)
     {
         return;
     }
 
     if (!CacheSubsystems() || !AreRequiredSubsystemsReady())
     {
+        RetryBootstrap();
+        return;
+    }
+
+    if (!HasWorldGenBootstrapActor())
+    {
+        UE_LOG(
+            LogTemp,
+            Warning,
+            TEXT("[ColonyManager] Waiting for AWorldGenBootstrapActor before colony bootstrap.")
+        );
         RetryBootstrap();
         return;
     }
@@ -168,7 +229,7 @@ bool AColonyManager::AreRequiredSubsystemsReady() const
 
 bool AColonyManager::IsTerrainReadyForSpawn() const
 {
-    return VoxelWorldMgr && VoxelWorldMgr->IsTerrainReadyForGameplay();
+    return VoxelWorldMgr && VoxelWorldMgr->IsSurfaceReady();
 }
 
 void AColonyManager::BindToTerrainReadyEvent()
@@ -184,7 +245,7 @@ void AColonyManager::BindToTerrainReadyEvent()
 
 void AColonyManager::HandleTerrainReady()
 {
-    if (bBootstrapComplete)
+    if (bIsDuplicateManagerInstance || bBootstrapComplete)
     {
         return;
     }
@@ -199,9 +260,28 @@ void AColonyManager::HandleTerrainReady()
     FinishBootstrap();
 }
 
+bool AColonyManager::HasWorldGenBootstrapActor() const
+{
+    const UWorld* World = GetWorld();
+    if (!World)
+    {
+        return false;
+    }
+
+    for (TActorIterator<AWorldGenBootstrapActor> It(World); It; ++It)
+    {
+        if (IsValid(*It) && !(*It)->IsActorBeingDestroyed())
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 void AColonyManager::FinishBootstrap()
 {
-    if (bBootstrapComplete)
+    if (bIsDuplicateManagerInstance || bBootstrapComplete)
     {
         return;
     }
@@ -209,6 +289,12 @@ void AColonyManager::FinishBootstrap()
     if (!CacheSubsystems() || !AreRequiredSubsystemsReady())
     {
         UE_LOG(LogTemp, Error, TEXT("[ColonyManager] FinishBootstrap failed: required subsystems missing."));
+        return;
+    }
+
+    if (!HasWorldGenBootstrapActor())
+    {
+        UE_LOG(LogTemp, Error, TEXT("[ColonyManager] FinishBootstrap aborted: AWorldGenBootstrapActor is missing."));
         return;
     }
 
@@ -220,16 +306,10 @@ void AColonyManager::FinishBootstrap()
     }
 
     InitializeSettlement();
-
-    if (SettlementID == INDEX_NONE)
-    {
-        UE_LOG(LogTemp, Error, TEXT("[ColonyManager] Invalid SettlementID, aborting bootstrap."));
-        return;
-    }
-
     InitializeNavigation();
     SetupAgents();
     SetupInitialResources();
+    PositionPlayerCameraOverSettlement();
     BindDebugInput();
     StartSimulation();
 
@@ -253,11 +333,9 @@ void AColonyManager::InitializeSettlement()
         return;
     }
 
-    if (bAnchorSettlementToPlayerViewOnStart)
-    {
-        SettlementWorldOrigin = ResolveInitialSettlementWorldOrigin();
-        SpawnGridCenter = SettlementWorldOrigin;
-    }
+    const FIntPoint ResolvedSpawnCenter = ResolveInitialSettlementWorldOrigin();
+    SpawnGridCenter = ResolvedSpawnCenter;
+    SettlementWorldOrigin = ComputeSettlementOriginFromSpawnCenter(SpawnGridCenter);
 
     SettlementID = SettlementMgr->CreateSettlement(SettlementName, SettlementWorldTileID);
     ProcessorMgr->RegisterSettlement(SettlementID);
@@ -301,6 +379,7 @@ void AColonyManager::SetupAgents()
     }
 
     const int32 StartingAgentID = GetNextAgentID();
+    TSet<FIntPoint> ClaimedWorldCells;
 
     for (int32 i = 0; i < InitialAgentCount; ++i)
     {
@@ -308,8 +387,10 @@ void AColonyManager::SetupAgents()
 
         const FIntPoint DesiredLocalCell = ComputeInitialSpawnCell(i);
         const FIntPoint DesiredWorldCell = SettlementWorldOrigin + DesiredLocalCell;
-        const FIntPoint ValidWorldCell = ResolveValidSpawnCell(DesiredWorldCell);
-        const FIntPoint SpawnLocalCell = ValidWorldCell - SettlementWorldOrigin;
+        const FIntPoint ValidWorldCell = ResolveUniqueValidSpawnCell(DesiredWorldCell, ClaimedWorldCells);
+        const FIntPoint SpawnLocalCell = WorldCellToSettlementLocalCell(ValidWorldCell);
+
+        ClaimedWorldCells.Add(ValidWorldCell);
 
         FAgentData NewAgent;
         NewAgent.AgentID = AgentID;
@@ -409,10 +490,19 @@ void AColonyManager::BindDebugInput()
 
 FIntPoint AColonyManager::ResolveInitialSettlementWorldOrigin() const
 {
-    FIntPoint DesiredWorldCell = SettlementWorldOrigin;
-    bool bDerivedFromPlayerView = false;
+    FIntPoint DesiredWorldCell(
+        FMath::Max(0, NavigationGridWidth / 2),
+        FMath::Max(0, NavigationGridHeight / 2)
+    );
+    const TCHAR* SourceLabel = TEXT("MapCenter");
 
-    if (VoxelWorldMgr)
+    if (!bPreferMapCenterOnStart)
+    {
+        DesiredWorldCell = SettlementWorldOrigin;
+        SourceLabel = TEXT("Default");
+    }
+
+    if (bAnchorSettlementToPlayerViewOnStart && VoxelWorldMgr)
     {
         if (APlayerController* PC = UGameplayStatics::GetPlayerController(GetWorld(), 0))
         {
@@ -421,20 +511,13 @@ FIntPoint AColonyManager::ResolveInitialSettlementWorldOrigin() const
             PC->GetPlayerViewPoint(ViewLocation, ViewRotation);
 
             DesiredWorldCell = VoxelWorldMgr->WorldToTerrainCell(ViewLocation);
-            bDerivedFromPlayerView = true;
+            SourceLabel = TEXT("PlayerView");
         }
     }
 
-    // 🚨 FIX: REMOVE HEAVY CLAMPING
-    // We only lightly clamp to world bounds (NOT push inward by 24+ cells)
-
     if (VoxelWorldMgr && VoxelWorldMgr->HasCachedTerrainData())
     {
-        const int32 MaxCellX = NavigationGridWidth - 1;
-        const int32 MaxCellY = NavigationGridHeight - 1;
-
-        DesiredWorldCell.X = FMath::Clamp(DesiredWorldCell.X, 0, MaxCellX);
-        DesiredWorldCell.Y = FMath::Clamp(DesiredWorldCell.Y, 0, MaxCellY);
+        DesiredWorldCell = VoxelWorldMgr->ClampTerrainCellToBounds(DesiredWorldCell);
 
         UE_LOG(
             LogTemp,
@@ -451,7 +534,7 @@ FIntPoint AColonyManager::ResolveInitialSettlementWorldOrigin() const
         LogTemp,
         Log,
         TEXT("[ColonyManager] Initial settlement origin resolved. Source=%s Desired=(%d,%d) Resolved=(%d,%d)"),
-        bDerivedFromPlayerView ? TEXT("PlayerView") : TEXT("Default"),
+        SourceLabel,
         DesiredWorldCell.X,
         DesiredWorldCell.Y,
         ResolvedWorldCell.X,
@@ -461,20 +544,121 @@ FIntPoint AColonyManager::ResolveInitialSettlementWorldOrigin() const
     return ResolvedWorldCell;
 }
 
+FIntPoint AColonyManager::ComputeSettlementOriginFromSpawnCenter(const FIntPoint& InSpawnCenter) const
+{
+    const int32 GridSize = FMath::CeilToInt(FMath::Sqrt(static_cast<float>(InitialAgentCount)));
+    const int32 Spacing = FMath::Max(1, SpawnSpacingCells);
+
+    const int32 FormationWidth = FMath::Max(1, GridSize * Spacing);
+    const int32 FormationHeight = FMath::Max(1, FMath::CeilToInt(static_cast<float>(InitialAgentCount) / GridSize) * Spacing);
+
+    FIntPoint Origin(
+        InSpawnCenter.X - (FormationWidth / 2),
+        InSpawnCenter.Y - (FormationHeight / 2)
+    );
+
+    Origin.X = FMath::Clamp(Origin.X, 0, FMath::Max(0, NavigationGridWidth - 1));
+    Origin.Y = FMath::Clamp(Origin.Y, 0, FMath::Max(0, NavigationGridHeight - 1));
+
+    return Origin;
+}
+
+void AColonyManager::PositionPlayerCameraOverSettlement() const
+{
+    UWorld* World = GetWorld();
+    if (!World)
+    {
+        return;
+    }
+
+    APlayerController* PC = UGameplayStatics::GetPlayerController(World, 0);
+    if (!PC)
+    {
+        UE_LOG(LogTemp, Error, TEXT("[ColonyManager] No PlayerController found."));
+        return;
+    }
+
+    AWorldForgeCamera* CameraPawn = Cast<AWorldForgeCamera>(PC->GetPawn());
+
+    if (!CameraPawn)
+    {
+        for (TActorIterator<AWorldForgeCamera> It(World); It; ++It)
+        {
+            CameraPawn = *It;
+            break;
+        }
+    }
+
+    if (!CameraPawn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("[ColonyManager] No WorldForgeCamera found."));
+        return;
+    }
+
+    if (PC->GetPawn() != CameraPawn)
+    {
+        PC->Possess(CameraPawn);
+        UE_LOG(LogTemp, Log, TEXT("[ColonyManager] Possessed camera pawn: %s"), *CameraPawn->GetName());
+    }
+
+    FVector WorldLocation = FVector::ZeroVector;
+
+    if (bUseManualCameraStart)
+    {
+        WorldLocation = ManualCameraLocation;
+    }
+    else if (VoxelWorldMgr)
+    {
+        if (!VoxelWorldMgr->TryGetSurfaceWorldLocation(SettlementWorldOrigin, WorldLocation, 50.0f))
+        {
+            WorldLocation = VoxelWorldMgr->TerrainCellToWorld(SettlementWorldOrigin, 0.0f, true);
+
+            UE_LOG(LogTemp, Warning,
+                TEXT("[ColonyManager] TryGetSurfaceWorldLocation failed. Fallback=(%.1f, %.1f, %.1f)"),
+                WorldLocation.X, WorldLocation.Y, WorldLocation.Z);
+        }
+    }
+    else
+    {
+        UE_LOG(LogTemp, Error, TEXT("[ColonyManager] VoxelWorldMgr null. Cannot resolve camera position."));
+        return;
+    }
+
+    CameraPawn->SnapToRTSView(
+        WorldLocation,
+        RTSCameraYaw,
+        RTSCameraPitch,
+        RTSCameraHeight,
+        true
+    );
+
+    PC->SetViewTarget(CameraPawn);
+    PC->SetControlRotation(FRotator(RTSCameraPitch, RTSCameraYaw, 0.0f));
+
+    UE_LOG(
+        LogTemp,
+        Log,
+        TEXT("[ColonyManager] Camera positioned at (%.1f, %.1f, %.1f). Manual=%s Camera=%s ViewTarget=%s"),
+        WorldLocation.X,
+        WorldLocation.Y,
+        WorldLocation.Z,
+        bUseManualCameraStart ? TEXT("true") : TEXT("false"),
+        *CameraPawn->GetName(),
+        PC->GetViewTarget() ? *PC->GetViewTarget()->GetName() : TEXT("None")
+    );
+}
+
+
+
 FIntPoint AColonyManager::ComputeInitialSpawnCell(int32 AgentIndex) const
 {
-    const int32 SafeColumns = FMath::Max(1, SpawnGridColumns);
-    const int32 SafeSpacing = FMath::Max(1, SpawnSpacingCells);
+    const int32 GridSize = FMath::CeilToInt(FMath::Sqrt(static_cast<float>(InitialAgentCount)));
+    const int32 Spacing = FMath::Max(1, SpawnSpacingCells);
 
-    const int32 LocalOffsetX = (AgentIndex % SafeColumns) * SafeSpacing;
-    const int32 LocalOffsetY = (AgentIndex / SafeColumns) * SafeSpacing;
+    const int32 X = (AgentIndex % GridSize) * Spacing;
+    const int32 Y = (AgentIndex / GridSize) * Spacing;
 
-    const FIntPoint LocalCenter = SpawnGridCenter - SettlementWorldOrigin;
-
-    return FIntPoint(
-        LocalCenter.X + LocalOffsetX,
-        LocalCenter.Y + LocalOffsetY
-    );
+    return FIntPoint(X, Y);
 }
 
 FIntPoint AColonyManager::ResolveValidSpawnCell(const FIntPoint& DesiredCell) const
@@ -506,6 +690,79 @@ FIntPoint AColonyManager::ResolveValidSpawnCell(const FIntPoint& DesiredCell) co
     );
 
     return DesiredCell;
+}
+
+FIntPoint AColonyManager::ResolveUniqueValidSpawnCell(const FIntPoint& DesiredCell, const TSet<FIntPoint>& ClaimedWorldCells) const
+{
+    if (IsWorldCellAvailableForSpawn(DesiredCell, ClaimedWorldCells))
+    {
+        return DesiredCell;
+    }
+
+    const int32 EffectiveSearchRadius = FMath::Max(SpawnSearchRadius, CameraAnchorSearchRadius);
+
+    for (int32 Radius = 1; Radius <= EffectiveSearchRadius; ++Radius)
+    {
+        for (int32 Y = DesiredCell.Y - Radius; Y <= DesiredCell.Y + Radius; ++Y)
+        {
+            for (int32 X = DesiredCell.X - Radius; X <= DesiredCell.X + Radius; ++X)
+            {
+                const bool bOnRing =
+                    (X == DesiredCell.X - Radius) ||
+                    (X == DesiredCell.X + Radius) ||
+                    (Y == DesiredCell.Y - Radius) ||
+                    (Y == DesiredCell.Y + Radius);
+
+                if (!bOnRing)
+                {
+                    continue;
+                }
+
+                const FIntPoint Candidate(X, Y);
+                if (IsWorldCellAvailableForSpawn(Candidate, ClaimedWorldCells))
+                {
+                    return Candidate;
+                }
+            }
+        }
+    }
+
+    const FIntPoint FallbackCell = ResolveValidSpawnCell(DesiredCell);
+
+    if (!ClaimedWorldCells.Contains(FallbackCell))
+    {
+        return FallbackCell;
+    }
+
+    UE_LOG(
+        LogTemp,
+        Warning,
+        TEXT("[ColonyManager] Unique spawn fallback collided near Desired=(%d,%d). Returning desired cell as last resort."),
+        DesiredCell.X,
+        DesiredCell.Y
+    );
+
+    return DesiredCell;
+}
+
+bool AColonyManager::IsWorldCellAvailableForSpawn(const FIntPoint& WorldCell, const TSet<FIntPoint>& ClaimedWorldCells) const
+{
+    if (ClaimedWorldCells.Contains(WorldCell))
+    {
+        return false;
+    }
+
+    if (!VoxelWorldMgr)
+    {
+        return true;
+    }
+
+    return VoxelWorldMgr->IsSpawnableTerrainCell(WorldCell);
+}
+
+FIntPoint AColonyManager::WorldCellToSettlementLocalCell(const FIntPoint& WorldCell) const
+{
+    return WorldCell - SettlementWorldOrigin;
 }
 
 int32 AColonyManager::GetNextAgentID() const

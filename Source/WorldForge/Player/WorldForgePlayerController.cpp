@@ -8,6 +8,8 @@
 #include "Blueprint/UserWidget.h"
 #include "InputCoreTypes.h"
 #include "Debug/WorldForgeCheatManager.h"
+#include "WorldForgeCamera.h"
+#include "GameFramework/Pawn.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogWorldForgePC, Log, All);
 
@@ -64,6 +66,9 @@ void AWorldForgePlayerController::BeginPlay()
         }
     }
 
+    // Force the active camera view target in C++ instead of Blueprint.
+    AcquireAndApplyCameraViewTarget(true);
+
     RefreshBuildInputSuppression();
 }
 
@@ -111,6 +116,12 @@ void AWorldForgePlayerController::SetupInputComponent()
 void AWorldForgePlayerController::PlayerTick(float DeltaTime)
 {
     Super::PlayerTick(DeltaTime);
+
+    // Retry camera acquisition until possession is fully settled.
+    if (!bCameraViewTargetApplied)
+    {
+        AcquireAndApplyCameraViewTarget(false);
+    }
 
     RefreshBuildInputSuppression();
 
@@ -166,6 +177,55 @@ void AWorldForgePlayerController::RefreshBuildInputSuppression()
         TEXT("[WorldForgePC] Camera input state refreshed. InBuildMode=%s MoveSuppressed=%s"),
         bInBuildMode ? TEXT("true") : TEXT("false"),
         bBuildInputSuppressed ? TEXT("true") : TEXT("false"));
+}
+
+bool AWorldForgePlayerController::AcquireAndApplyCameraViewTarget(bool bLogResult)
+{
+    APawn* ControlledPawn = GetPawn();
+    if (!ControlledPawn)
+    {
+        if (bLogResult)
+        {
+            UE_LOG(LogWorldForgePC, Warning, TEXT("[WorldForgePC] No possessed pawn yet; camera view target not applied."));
+        }
+        return false;
+    }
+
+    AWorldForgeCamera* CameraPawn = Cast<AWorldForgeCamera>(ControlledPawn);
+    if (!CameraPawn)
+    {
+        if (bLogResult)
+        {
+            UE_LOG(
+                LogWorldForgePC,
+                Warning,
+                TEXT("[WorldForgePC] Possessed pawn '%s' is not AWorldForgeCamera; camera view target not applied."),
+                *GetNameSafe(ControlledPawn)
+            );
+        }
+        return false;
+    }
+
+    WorldForgeCamera = CameraPawn;
+
+    if (GetViewTarget() != CameraPawn)
+    {
+        SetViewTargetWithBlend(CameraPawn, 0.0f);
+    }
+
+    bCameraViewTargetApplied = true;
+
+    if (bLogResult)
+    {
+        UE_LOG(
+            LogWorldForgePC,
+            Log,
+            TEXT("[WorldForgePC] View target set to possessed camera pawn '%s'."),
+            *GetNameSafe(CameraPawn)
+        );
+    }
+
+    return true;
 }
 
 // ===================================================================

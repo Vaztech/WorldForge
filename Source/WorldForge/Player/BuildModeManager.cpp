@@ -116,6 +116,83 @@ int32 UBuildModeManager::GetEffectiveSettlementID() const
     return 0;
 }
 
+float UBuildModeManager::GetMaxGroundBuildSlopeDegrees() const
+{
+    return 35.0f;
+}
+
+bool UBuildModeManager::IsBuildableTerrainType(EWorldForgeTerrainType TerrainType) const
+{
+    switch (TerrainType)
+    {
+    case EWorldForgeTerrainType::Grass:
+    case EWorldForgeTerrainType::Dirt:
+    case EWorldForgeTerrainType::Rock:
+        return true;
+
+    case EWorldForgeTerrainType::Sand:
+    case EWorldForgeTerrainType::Snow:
+    default:
+        return false;
+    }
+}
+
+bool UBuildModeManager::ValidateGroundTerrainPlacement(const FIntVector& Voxel, FString& OutReason) const
+{
+    OutReason.Empty();
+
+    UVoxelWorldManager* VM = GetVoxelManager();
+    if (!VM || !VM->HasCachedTerrainData())
+    {
+        OutReason = TEXT("Terrain data unavailable.");
+        return false;
+    }
+
+    const FIntPoint VoxelXY(Voxel.X, Voxel.Y);
+
+    int32 SurfaceVoxelZ = 0;
+    if (VM->TryGetTerrainSurfaceVoxelZ(VoxelXY, SurfaceVoxelZ))
+    {
+        // Preserve stacking / face-attachment behavior.
+        // Terrain restrictions only apply to the ground surface cell.
+        if (Voxel.Z > SurfaceVoxelZ)
+        {
+            return true;
+        }
+    }
+
+    EWorldForgeTerrainType TerrainType = EWorldForgeTerrainType::Grass;
+    if (!VM->GetTerrainTypeAtVoxel(VoxelXY, TerrainType))
+    {
+        OutReason = TEXT("Invalid terrain cell.");
+        return false;
+    }
+
+    if (!IsBuildableTerrainType(TerrainType))
+    {
+        OutReason = TEXT("Cannot build on this terrain type.");
+        return false;
+    }
+
+    float SlopeDegrees = 0.0f;
+    if (!VM->GetTerrainSlopeAtVoxel(VoxelXY, SlopeDegrees))
+    {
+        OutReason = TEXT("Could not evaluate terrain slope.");
+        return false;
+    }
+
+    if (SlopeDegrees > GetMaxGroundBuildSlopeDegrees())
+    {
+        OutReason = FString::Printf(
+            TEXT("Terrain too steep (%.1f° > %.1f°)."),
+            SlopeDegrees,
+            GetMaxGroundBuildSlopeDegrees());
+        return false;
+    }
+
+    return true;
+}
+
 // ================================
 // Live Cost / Availability Queries
 // ================================
@@ -436,6 +513,22 @@ void UBuildModeManager::HandlePrimaryClick()
                     );
                     return;
                 }
+
+                FString TerrainFailure;
+                if (!ValidateGroundTerrainPlacement(CurrentHoveredVoxel, TerrainFailure))
+                {
+                    UE_LOG(
+                        LogTemp,
+                        Warning,
+                        TEXT("[BuildMode] HandlePrimaryClick -> CustomDraw blocked by terrain validation at (%d,%d,%d): %s"),
+                        CurrentHoveredVoxel.X,
+                        CurrentHoveredVoxel.Y,
+                        CurrentHoveredVoxel.Z,
+                        *TerrainFailure
+                    );
+                    BroadcastFeedback(TerrainFailure);
+                    return;
+                }
             }
         }
 
@@ -681,6 +774,23 @@ void UBuildModeManager::UpdateFromMouse(APlayerController* PC)
         return;
     }
 
+    if (!bHitPlacedBlock)
+    {
+        FString TerrainFailure;
+        if (!ValidateGroundTerrainPlacement(NewVoxel, TerrainFailure))
+        {
+            bHoveredCellValid = false;
+
+            if (GhostActor)
+            {
+                GhostActor->SetGhostState(EBuildGhostState::Invalid);
+                UpdateGhost();
+            }
+
+            return;
+        }
+    }
+
     LastValidVoxel = NewVoxel;
     bHasLastValidVoxel = true;
 
@@ -704,14 +814,14 @@ void UBuildModeManager::UpdateFromMouse(APlayerController* PC)
         return;
     }
 
+    TArray<FIntVector> LineCells3D;
+    TArray<FIntPoint> LineCells2D;
+    const FIntVector EndVoxel = CurrentHoveredVoxel;
+
     if (SelectedCells3D.Num() <= 1)
     {
         bDragStartedFromBlock = (DragStartVoxel != CurrentHoveredVoxel) && bHitPlacedBlock;
     }
-
-    TArray<FIntVector> LineCells3D;
-    TArray<FIntPoint> LineCells2D;
-    const FIntVector EndVoxel = CurrentHoveredVoxel;
 
     if (bDragStartedFromBlock)
     {
@@ -773,6 +883,13 @@ void UBuildModeManager::UpdateFromMouse(APlayerController* PC)
             int32 SurfaceVoxelZ = DragStartVoxel.Z;
             VM->TryGetTerrainSurfaceVoxelZ(FIntPoint(LineX, LineY), SurfaceVoxelZ);
 
+            const FIntVector CurrentTerrainVoxel(LineX, LineY, SurfaceVoxelZ);
+            FString TerrainFailure;
+            if (!ValidateGroundTerrainPlacement(CurrentTerrainVoxel, TerrainFailure))
+            {
+                continue;
+            }
+
             if (!bHasPreviousTerrainPoint)
             {
                 const FIntVector FirstVoxel(LineX, LineY, SurfaceVoxelZ);
@@ -806,6 +923,12 @@ void UBuildModeManager::UpdateFromMouse(APlayerController* PC)
                     }
 
                     if (HasPlacedBlockAtVoxel(World, VM, BridgeVoxel))
+                    {
+                        continue;
+                    }
+
+                    FString BridgeFailure;
+                    if (!ValidateGroundTerrainPlacement(BridgeVoxel, BridgeFailure))
                     {
                         continue;
                     }
@@ -993,6 +1116,22 @@ bool UBuildModeManager::CommitPrefabBuild()
         return false;
     }
 
+    FString TerrainFailure;
+    if (!ValidateGroundTerrainPlacement(CurrentHoveredVoxel, TerrainFailure))
+    {
+        UE_LOG(
+            LogTemp,
+            Warning,
+            TEXT("[BuildMode] CommitPrefab blocked by terrain validation at (%d,%d,%d): %s"),
+            CurrentHoveredVoxel.X,
+            CurrentHoveredVoxel.Y,
+            CurrentHoveredVoxel.Z,
+            *TerrainFailure
+        );
+        BroadcastFeedback(TerrainFailure);
+        return false;
+    }
+
     UPlayerBuildContext* Ctx = GetBuildContext();
     if (!Ctx)
     {
@@ -1068,6 +1207,25 @@ bool UBuildModeManager::CommitCustomBuild()
         UE_LOG(LogTemp, Warning, TEXT("[BuildMode] CommitCustom: no settlement."));
         BroadcastFeedback(TEXT("No active settlement selected."));
         return false;
+    }
+
+    for (const FIntVector& Cell : SelectedCells3D)
+    {
+        FString TerrainFailure;
+        if (!ValidateGroundTerrainPlacement(Cell, TerrainFailure))
+        {
+            UE_LOG(
+                LogTemp,
+                Warning,
+                TEXT("[BuildMode] CommitCustom blocked by terrain validation at (%d,%d,%d): %s"),
+                Cell.X,
+                Cell.Y,
+                Cell.Z,
+                *TerrainFailure
+            );
+            BroadcastFeedback(TerrainFailure);
+            return false;
+        }
     }
 
     UPlayerBuildContext* Ctx = GetBuildContext();

@@ -1,4 +1,4 @@
-#include "WorldForgeColonist.h"
+﻿#include "WorldForgeColonist.h"
 
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
@@ -78,34 +78,35 @@ void AWorldForgeColonist::Tick(float DeltaTime)
 
 FVector AWorldForgeColonist::ResolveWorldLocationFromAgentData(const FAgentData& Data, float CellSize) const
 {
+    // 🔥 FIX: Do NOT offset by settlement origin (it is in mismatched space)
     FIntPoint RequestedWorldCell(Data.CurrentGridPos.X, Data.CurrentGridPos.Y);
 
     if (const UWorld* World = GetWorld())
     {
-        if (const USettlementManager* SettlementManager = World->GetSubsystem<USettlementManager>())
-        {
-            if (const FSettlementState* Settlement = SettlementManager->GetSettlement(Data.SettlementID))
-            {
-                RequestedWorldCell = Settlement->WorldOrigin + Data.CurrentGridPos;
-            }
-        }
-
         if (const UVoxelWorldManager* VoxelWorldManager = World->GetSubsystem<UVoxelWorldManager>())
         {
-            // RequestedWorldCell is in voxel-cell space (settlement origin + agent local cell).
-            // The terrain cache is chunk-indexed, so convert before querying surface data.
-            const FIntPoint ChunkCell = VoxelWorldManager->ClampTerrainCellToBounds(
-                VoxelWorldManager->VoxelCellToChunkCell(RequestedWorldCell)
-            );
+            if (!VoxelWorldManager->IsSurfaceReady())
+            {
+                if (bHasVisualData)
+                {
+                    return GetActorLocation();
+                }
+
+                if (!TargetWorldPos.IsNearlyZero())
+                {
+                    return TargetWorldPos;
+                }
+
+                return VoxelWorldManager->GridToWorld(RequestedWorldCell, 0) + FVector(0.f, 0.f, TerrainZOffset);
+            }
+
+            const FIntPoint ChunkCell =
+                VoxelWorldManager->ClampTerrainCellToBounds(RequestedWorldCell);
 
             FVector SurfaceLocation = FVector::ZeroVector;
             if (VoxelWorldManager->TryGetSurfaceWorldLocation(ChunkCell, SurfaceLocation, TerrainZOffset))
             {
-                // Surface query gives the authoritative Z; use voxel-space X/Y from GridToWorld
-                // so the colonist lands at the correct in-voxel-space position, not at the
-                // chunk center.
-                const FVector VoxelSpaceXY = VoxelWorldManager->GridToWorld(RequestedWorldCell, 0);
-                return FVector(VoxelSpaceXY.X, VoxelSpaceXY.Y, SurfaceLocation.Z);
+                return SurfaceLocation;
             }
 
             FIntPoint FallbackChunkCell = ChunkCell;
@@ -113,10 +114,7 @@ FVector AWorldForgeColonist::ResolveWorldLocationFromAgentData(const FAgentData&
             {
                 if (VoxelWorldManager->TryGetSurfaceWorldLocation(FallbackChunkCell, SurfaceLocation, TerrainZOffset))
                 {
-                    // Fallback still uses voxel-space X/Y so the colonist doesn't
-                    // teleport to the center of a distant chunk.
-                    const FVector VoxelSpaceXY = VoxelWorldManager->GridToWorld(RequestedWorldCell, 0);
-                    return FVector(VoxelSpaceXY.X, VoxelSpaceXY.Y, SurfaceLocation.Z);
+                    return SurfaceLocation;
                 }
             }
 
@@ -250,28 +248,28 @@ void AWorldForgeColonist::UpdateMovement(float DeltaTime)
 
     if (const UWorld* World = GetWorld())
     {
-        FIntPoint CurrentWorldCell = CurrentGridCell;
-
-        if (const USettlementManager* SettlementManager = World->GetSubsystem<USettlementManager>())
-        {
-            if (const FSettlementState* Settlement = SettlementManager->GetSettlement(SettlementID))
-            {
-                CurrentWorldCell = Settlement->WorldOrigin + CurrentGridCell;
-            }
-        }
-
         if (const UVoxelWorldManager* VoxelWorldManager = World->GetSubsystem<UVoxelWorldManager>())
         {
-            // CurrentWorldCell is in voxel-cell space; convert to chunk-cell space
-            // before querying the chunk-indexed terrain cache.
-            const FIntPoint ChunkCell = VoxelWorldManager->ClampTerrainCellToBounds(
-                VoxelWorldManager->VoxelCellToChunkCell(CurrentWorldCell)
-            );
-
-            FVector SurfaceLocation = FVector::ZeroVector;
-            if (VoxelWorldManager->TryGetSurfaceWorldLocation(ChunkCell, SurfaceLocation, TerrainZOffset))
+            if (VoxelWorldManager->IsSurfaceReady())
             {
-                DesiredLocation.Z = SurfaceLocation.Z;
+                FIntPoint CurrentWorldCell = CurrentGridCell;
+
+                if (const USettlementManager* SettlementManager = World->GetSubsystem<USettlementManager>())
+                {
+                    if (const FSettlementState* Settlement = SettlementManager->GetSettlement(SettlementID))
+                    {
+                        CurrentWorldCell = Settlement->WorldOrigin + CurrentGridCell;
+                    }
+                }
+
+                const FIntPoint ChunkCell =
+                    VoxelWorldManager->ClampTerrainCellToBounds(CurrentWorldCell);
+
+                FVector SurfaceLocation = FVector::ZeroVector;
+                if (VoxelWorldManager->TryGetSurfaceWorldLocation(ChunkCell, SurfaceLocation, TerrainZOffset))
+                {
+                    DesiredLocation.Z = SurfaceLocation.Z;
+                }
             }
         }
     }

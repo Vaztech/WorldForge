@@ -52,6 +52,7 @@ void UColonistVisualManager::OnWorldBeginPlay(UWorld& InWorld)
 
     CachedProcessorManager = InWorld.GetSubsystem<UProcessorManager>();
     CachedSimulationTimeManager = InWorld.GetSubsystem<USimulationTimeManager>();
+    CachedVoxelWorldManager = InWorld.GetSubsystem<UVoxelWorldManager>();
 
     if (CachedSimulationTimeManager)
     {
@@ -66,6 +67,19 @@ void UColonistVisualManager::OnWorldBeginPlay(UWorld& InWorld)
     {
         UE_LOG(LogTemp, Warning, TEXT("[ColonistVisualManager] SimulationTimeManager not found."));
     }
+
+    if (CachedVoxelWorldManager)
+    {
+        CachedVoxelWorldManager->OnTerrainReady.AddDynamic(
+            this,
+            &UColonistVisualManager::HandleTerrainReady
+        );
+        bBoundToTerrainReady = true;
+    }
+    else
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[ColonistVisualManager] VoxelWorldManager not found."));
+    }
 }
 
 void UColonistVisualManager::Deinitialize()
@@ -78,6 +92,15 @@ void UColonistVisualManager::Deinitialize()
         );
     }
 
+    if (CachedVoxelWorldManager && bBoundToTerrainReady)
+    {
+        CachedVoxelWorldManager->OnTerrainReady.RemoveDynamic(
+            this,
+            &UColonistVisualManager::HandleTerrainReady
+        );
+        bBoundToTerrainReady = false;
+    }
+
     if (UWorld* World = GetWorld())
     {
         World->GetTimerManager().ClearTimer(DeferredSpawnTimerHandle);
@@ -87,6 +110,7 @@ void UColonistVisualManager::Deinitialize()
 
     CachedProcessorManager = nullptr;
     CachedSimulationTimeManager = nullptr;
+    CachedVoxelWorldManager = nullptr;
     PendingSpawnSettlementID = INDEX_NONE;
     bSpawnDeferredScheduled = false;
 
@@ -104,34 +128,44 @@ void UColonistVisualManager::SpawnColonistActors(int32 InSettlementID)
     ActiveSettlementID = InSettlementID;
     PendingSpawnSettlementID = InSettlementID;
 
-    World->GetTimerManager().ClearTimer(DeferredSpawnTimerHandle);
-    World->GetTimerManager().SetTimer(
-        DeferredSpawnTimerHandle,
-        this,
-        &UColonistVisualManager::HandleDeferredSpawn,
-        InitialSpawnDelaySeconds,
-        false
-    );
+    if (!CachedVoxelWorldManager)
+    {
+        CachedVoxelWorldManager = World->GetSubsystem<UVoxelWorldManager>();
+    }
 
-    bSpawnDeferredScheduled = true;
+    if (!CachedVoxelWorldManager || !CachedVoxelWorldManager->IsSurfaceReady())
+    {
+        bSpawnDeferredScheduled = true;
+
+        UE_LOG(
+            LogTemp,
+            Log,
+            TEXT("[ColonistVisualManager] Waiting for terrain-ready signal before spawning colonists for settlement=%d."),
+            InSettlementID
+        );
+        return;
+    }
+
+    bSpawnDeferredScheduled = false;
+    InternalSpawnColonistActors(InSettlementID);
+    PendingSpawnSettlementID = INDEX_NONE;
+}
+
+void UColonistVisualManager::HandleTerrainReady()
+{
+    if (!bSpawnDeferredScheduled || PendingSpawnSettlementID == INDEX_NONE)
+    {
+        return;
+    }
+
+    bSpawnDeferredScheduled = false;
 
     UE_LOG(
         LogTemp,
         Log,
-        TEXT("[ColonistVisualManager] Deferred colonist spawn for settlement=%d by %.2f seconds."),
-        InSettlementID,
-        InitialSpawnDelaySeconds
+        TEXT("[ColonistVisualManager] Terrain-ready received. Spawning deferred colonists for settlement=%d."),
+        PendingSpawnSettlementID
     );
-}
-
-void UColonistVisualManager::HandleDeferredSpawn()
-{
-    bSpawnDeferredScheduled = false;
-
-    if (PendingSpawnSettlementID == INDEX_NONE)
-    {
-        return;
-    }
 
     InternalSpawnColonistActors(PendingSpawnSettlementID);
     PendingSpawnSettlementID = INDEX_NONE;
@@ -306,11 +340,6 @@ void UColonistVisualManager::HandleSimulationStep(int32 StepNumber)
 
     SyncActorsToAgents(ActiveSettlementID);
 
-    // Log every step at Log level so we can confirm the simulation is actually
-    // ticking and the visual sync is running. If colonists ever appear static in
-    // PIE, the absence of these lines is a strong indicator that sim time
-    // is not advancing (most often caused by a long Interval / slow Speed setting
-    // on USimulationTimeManager, not a visual-layer bug).
     UE_LOG(
         LogTemp,
         Log,
@@ -327,6 +356,11 @@ AWorldForgeColonist* UColonistVisualManager::SpawnActorFromData(const FAgentData
     if (!World)
     {
         return nullptr;
+    }
+
+    if (!CachedVoxelWorldManager)
+    {
+        CachedVoxelWorldManager = World->GetSubsystem<UVoxelWorldManager>();
     }
 
     UClass* ColonistClass = ColonistActorClass
@@ -401,21 +435,5 @@ void UColonistVisualManager::DestroyActorForAgent(int32 AgentID)
 
 float UColonistVisualManager::ResolveCellSize() const
 {
-    if (const UWorld* World = GetWorld())
-    {
-        if (const UVoxelWorldManager* VoxelWorldManager = World->GetSubsystem<UVoxelWorldManager>())
-        {
-            // Colonist CurrentGridPos and the settlement origin it gets added to
-            // are both in voxel-cell space (1 unit = VoxelSize UE). The chunk-indexed
-            // terrain cache is only reached through VoxelCellToChunkCell in
-            // AWorldForgeColonist::ResolveWorldLocationFromAgentData; here we must
-            // hand back the voxel-space cell size so any deep-fallback placement
-            // code that multiplies cell coordinates by CellSize produces the
-            // correct world location.
-            return VoxelWorldManager->VoxelSize;
-        }
-    }
-
-    // Keep fallback aligned with voxel-space cell scale.
-    return 100.0f;
+    return 1.0f;
 }

@@ -13,6 +13,7 @@ class USimulationTimeManager;
 class USaveSubsystem;
 class UVoxelConstructionSystem;
 class UVoxelWorldManager;
+class AWorldGenBootstrapActor;
 
 UCLASS()
 class WORLDFORGE_API AColonyManager : public AActor
@@ -27,6 +28,8 @@ protected:
     virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 private:
+    bool IsPrimaryColonyManagerInstance() const;
+
     void StartBootstrapAttempt();
     void RetryBootstrap();
     bool CacheSubsystems();
@@ -37,6 +40,8 @@ private:
     UFUNCTION()
     void HandleTerrainReady();
 
+    bool HasWorldGenBootstrapActor() const;
+
     void FinishBootstrap();
     void InitializeSettlement();
     void InitializeNavigation();
@@ -46,8 +51,14 @@ private:
 
     void BindDebugInput();
     FIntPoint ResolveInitialSettlementWorldOrigin() const;
+    FIntPoint ComputeSettlementOriginFromSpawnCenter(const FIntPoint& InSpawnCenter) const;
+    void PositionPlayerCameraOverSettlement() const;
+
     FIntPoint ComputeInitialSpawnCell(int32 AgentIndex) const;
     FIntPoint ResolveValidSpawnCell(const FIntPoint& DesiredCell) const;
+    FIntPoint ResolveUniqueValidSpawnCell(const FIntPoint& DesiredCell, const TSet<FIntPoint>& ClaimedWorldCells) const;
+    bool IsWorldCellAvailableForSpawn(const FIntPoint& WorldCell, const TSet<FIntPoint>& ClaimedWorldCells) const;
+    FIntPoint WorldCellToSettlementLocalCell(const FIntPoint& WorldCell) const;
     int32 GetNextAgentID() const;
 
     void HandleSaveInput();
@@ -113,27 +124,41 @@ private:
     UPROPERTY(EditAnywhere, Category = "Colony|Setup")
     int32 SpawnSpacingCells = 1;
 
-    // If enabled, the settlement origin is resolved near the player's initial
-    // camera/viewpoint so the colony starts close to what the player sees.
     UPROPERTY(EditAnywhere, Category = "Colony|Setup")
-    bool bAnchorSettlementToPlayerViewOnStart = true;
+    bool bAnchorSettlementToPlayerViewOnStart = false;
 
-    // Additional search radius used when snapping the camera-derived start cell
-    // to the nearest valid spawnable terrain cell.
+    UPROPERTY(EditAnywhere, Category = "Colony|Setup")
+    bool bPreferMapCenterOnStart = true;
+
     UPROPERTY(EditAnywhere, Category = "Colony|Setup", meta = (ClampMin = "1", UIMin = "1"))
     int32 CameraAnchorSearchRadius = 24;
 
-    // This is the WORLD terrain-cell anchor where the settlement lives.
     UPROPERTY(EditAnywhere, Category = "Colony|Setup")
     FIntPoint SettlementWorldOrigin = FIntPoint(128, 128);
 
-    // Spawn pattern around the settlement origin, expressed in WORLD cells before
-    // conversion into local settlement/nav cells.
     UPROPERTY(EditAnywhere, Category = "Colony|Setup")
     FIntPoint SpawnGridCenter = FIntPoint(128, 128);
 
     UPROPERTY(EditAnywhere, Category = "Colony|Setup")
     int32 SpawnSearchRadius = 16;
+
+    UPROPERTY(EditAnywhere, Category = "Colony|Camera")
+    bool bPositionRTSCameraOnBootstrap = true;
+
+    UPROPERTY(EditAnywhere, Category = "Colony|Camera")
+    float RTSCameraHeight = 12000.0f;
+
+    UPROPERTY(EditAnywhere, Category = "Colony|Camera")
+    float RTSCameraPitch = -60.0f;
+
+    UPROPERTY(EditAnywhere, Category = "Colony|Camera")
+    float RTSCameraYaw = 45.0f;
+
+    UPROPERTY(EditAnywhere, Category = "Colony|Camera")
+    bool bUseManualCameraStart = false;
+
+    UPROPERTY(EditAnywhere, Category = "Colony|Camera", meta = (EditCondition = "bUseManualCameraStart"))
+    FVector ManualCameraLocation = FVector(126.0f, 126.0f, 0.0f);
 
     UPROPERTY(EditAnywhere, Category = "Colony|Debug")
     bool bEnableDebugKeyInput = true;
@@ -143,6 +168,7 @@ private:
 
     bool bBootstrapComplete = false;
     bool bBoundToTerrainReadyEvent = false;
+    bool bIsDuplicateManagerInstance = false;
     int32 BootstrapRetryCount = 0;
 
     FTimerHandle BootstrapTimerHandle;

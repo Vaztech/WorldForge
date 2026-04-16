@@ -4,8 +4,10 @@
 #include "Subsystems/WorldSubsystem.h"
 #include "GameplayTagContainer.h"
 #include "BuildModeTypes.h"
+#include "VoxelWorldManager.h"
 #include "WorldForgeDataTypes.h"
 #include "BuildModeManager.generated.h"
+
 
 class ABuildGhostActor;
 class APlayerController;
@@ -212,4 +214,9 @@ private:
 		bool& bOutHitPlacedBlock,
 		FIntVector& OutSupportBlockVoxel,
 		FVector& OutHitNormal) const;
+
+	// Terrain validation helpers
+	float GetMaxGroundBuildSlopeDegrees() const;
+	bool IsBuildableTerrainType(EWorldForgeTerrainType TerrainType) const;
+	bool ValidateGroundTerrainPlacement(const FIntVector& Voxel, FString& OutReason) const;
 };

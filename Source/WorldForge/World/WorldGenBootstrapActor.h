@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
@@ -18,8 +18,12 @@ public:
 
 protected:
     virtual void BeginPlay() override;
+    virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 private:
+    UFUNCTION()
+    void HandleTerrainReady();
+
     UPROPERTY(EditAnywhere, Category = "WorldForge|WorldGen")
     int64 WorldSeed = 12345;
 
@@ -32,11 +36,17 @@ private:
     UPROPERTY(EditAnywhere, Category = "WorldForge|WorldGen")
     bool bDestroyAfterBootstrap = false;
 
+    UPROPERTY(EditAnywhere, Category = "WorldForge|WorldGen")
+    TSubclassOf<UWorldGenPipeline> PipelineClass;
+
     UPROPERTY(Transient)
     TObjectPtr<UWorldForgeRNG> RNG = nullptr;
 
     UPROPERTY(Transient)
     TObjectPtr<UWorldGenPipeline> Pipeline = nullptr;
+
+    bool bDecorationPassDispatched = false;
+    bool bBoundToTerrainReady = false;
 
     void RunBootstrap();
 };

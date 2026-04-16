@@ -180,6 +180,7 @@ struct FWorldTileData
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float WaterDepth = 0.f;
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) float Temperature = 0.5f;
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) float Rainfall = 0.5f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TArray<FGameplayTag> ResourceNodes;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TArray<FGameplayTag> ResourceTags;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 ControllingCivID = -1;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FWorldKnowledgeState KnowledgeState;
@@ -193,6 +194,7 @@ struct FWorldTileData
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float VoidProximity = 0.f;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TArray<int32> HistoryEventIDs;
+
 };
 
 // ═══════════════════════════════════════════════════════════════════

@@ -8,6 +8,7 @@
 class AWorldForgeColonist;
 class UProcessorManager;
 class USimulationTimeManager;
+class UVoxelWorldManager;
 
 UCLASS(BlueprintType)
 class WORLDFORGE_API UColonistVisualManager : public UWorldSubsystem
@@ -42,15 +43,14 @@ private:
     UFUNCTION()
     void HandleSimulationStep(int32 StepNumber);
 
-    void HandleDeferredSpawn();
+    UFUNCTION()
+    void HandleTerrainReady();
+
     void InternalSpawnColonistActors(int32 InSettlementID);
 
     AWorldForgeColonist* SpawnActorFromData(const struct FAgentData& AgentData, float CellSize);
     void DestroyActorForAgent(int32 AgentID);
 
-    // Returns the voxel-space cell size (UVoxelWorldManager::VoxelSize) used by
-    // agent grid coordinates. Chunk-indexed terrain cache queries happen downstream
-    // via UVoxelWorldManager::VoxelCellToChunkCell, not through this value.
     float ResolveCellSize() const;
 
 private:
@@ -69,7 +69,11 @@ private:
     UPROPERTY(Transient)
     TObjectPtr<USimulationTimeManager> CachedSimulationTimeManager = nullptr;
 
+    UPROPERTY(Transient)
+    TObjectPtr<UVoxelWorldManager> CachedVoxelWorldManager = nullptr;
+
     FTimerHandle DeferredSpawnTimerHandle;
     bool bSpawnDeferredScheduled = false;
     bool bIsSyncInProgress = false;
+    bool bBoundToTerrainReady = false;
 };

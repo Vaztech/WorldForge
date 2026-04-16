@@ -1,7 +1,7 @@
 // WorldForgePlayerController.h
 // Replaces BP_WorldForgePlayerController entirely.
 // Owns IMC_BuildMode at priority 1. Routes all build input to BuildModeManager.
-// Camera (BP_WorldForgeCamera) stays untouched — it owns IMC_WorldForgeCamera at priority 0.
+// Camera ownership/view target is also enforced here in C++.
 
 #pragma once
 
@@ -14,6 +14,7 @@ class UInputMappingContext;
 class UInputAction;
 class UBuildModeManager;
 class UBuildModeWidget;
+class AWorldForgeCamera;
 
 UCLASS()
 class WORLDFORGE_API AWorldForgePlayerController : public APlayerController
@@ -28,6 +29,12 @@ public:
 
     UFUNCTION(BlueprintPure, Category = "WorldForge|Build")
     bool ShouldLockBuildCamera() const;
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Camera")
+    AWorldForgeCamera* GetWorldForgeCamera() const
+    {
+        return WorldForgeCamera;
+    }
 
 protected:
     virtual void BeginPlay() override;
@@ -87,8 +94,15 @@ private:
     bool IsCustomDrawActive() const;
     void RefreshBuildInputSuppression();
 
+    bool AcquireAndApplyCameraViewTarget(bool bLogResult);
+
+private:
+    UPROPERTY(Transient)
+    TObjectPtr<AWorldForgeCamera> WorldForgeCamera = nullptr;
+
     bool bBuildWidgetVisible = false;
     bool bBuildInputSuppressed = false;
+    bool bCameraViewTargetApplied = false;
 
     double LastBuildClickTime = 0.0;
 };
