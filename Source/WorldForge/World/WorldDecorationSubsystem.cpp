@@ -6,6 +6,7 @@
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
+#include "Utility/WorldForgeTerrainSnapUtility.h"
 
 namespace
 {
@@ -351,6 +352,12 @@ bool UWorldDecorationSubsystem::TryEvaluatePlacement(
         return false;
     }
 
+    UWorld* World = GetWorld();
+    if (!World)
+    {
+        return false;
+    }
+
     TArray<FIntPoint> Offsets;
     BuildFootprintOffsets(Entry.Footprint, Offsets);
 
@@ -366,8 +373,14 @@ bool UWorldDecorationSubsystem::TryEvaluatePlacement(
             return false;
         }
 
+        const FVector BaseWorldLocation = VoxelManager->GridToWorld(WorldCell, 0);
+
         FVector CellWorldLocation = FVector::ZeroVector;
-        if (!VoxelManager->TryGetSurfaceWorldLocation(WorldCell, CellWorldLocation, 0.0f))
+        if (!UWorldForgeTerrainSnapUtility::TryGetTerrainSnapLocation(
+            World,
+            BaseWorldLocation,
+            CellWorldLocation,
+            0.0f))
         {
             return false;
         }
@@ -396,7 +409,7 @@ bool UWorldDecorationSubsystem::TryEvaluatePlacement(
         OutOccupiedWorldCells.Add(WorldCell);
     }
 
-    const float VoxelSize = FMath::Max(1.0f, VoxelManager->VoxelSize);
+    const float VoxelSize = FMath::Max(1.0f, VoxelManager->GetRenderVoxelSize());
     const int32 HeightDeltaVoxels = FMath::RoundToInt((MaxZ - MinZ) / VoxelSize);
 
     if (HeightDeltaVoxels > Entry.MaxHeightDeltaVoxels)
@@ -404,8 +417,14 @@ bool UWorldDecorationSubsystem::TryEvaluatePlacement(
         return false;
     }
 
+    const FVector AnchorBaseWorldLocation = VoxelManager->GridToWorld(AnchorCell, 0);
+
     FVector AnchorWorldLocation = FVector::ZeroVector;
-    if (!VoxelManager->TryGetSurfaceWorldLocation(AnchorCell, AnchorWorldLocation, 0.0f))
+    if (!UWorldForgeTerrainSnapUtility::TryGetTerrainSnapLocation(
+        World,
+        AnchorBaseWorldLocation,
+        AnchorWorldLocation,
+        0.0f))
     {
         return false;
     }
@@ -563,6 +582,17 @@ bool UWorldDecorationSubsystem::GenerateDecorations(
             if (!SpawnedActor)
             {
                 continue;
+            }
+
+            FVector FinalSnappedLocation = SpawnWorldLocation;
+            if (UWorldForgeTerrainSnapUtility::TryGetTerrainSnapLocation(
+                World,
+                SpawnWorldLocation,
+                FinalSnappedLocation,
+                0.0f))
+            {
+                SpawnedActor->SetActorLocation(FinalSnappedLocation);
+                SpawnWorldLocation = FinalSnappedLocation;
             }
 
             SpawnedActor->Tags.AddUnique(FName(TEXT("WorldForgeGeneratedDecoration")));

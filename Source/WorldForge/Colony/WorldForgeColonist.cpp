@@ -8,6 +8,7 @@
 #include "SpriteCharacterComponent.h"
 #include "UObject/ConstructorHelpers.h"
 #include "VoxelWorldManager.h"
+#include "Utility/WorldForgeTerrainSnapUtility.h"
 
 AWorldForgeColonist::AWorldForgeColonist()
 {
@@ -31,6 +32,7 @@ AWorldForgeColonist::AWorldForgeColonist()
     SpriteVisual = CreateDefaultSubobject<USpriteCharacterComponent>(TEXT("SpriteVisual"));
     SpriteVisual->SetupAttachment(RootComponent);
     SpriteVisual->SetRelativeLocation(FVector::ZeroVector);
+    SpriteVisual->SetRelativeScale3D(FVector(5.0f, 5.0f, 5.0f));
 }
 
 void AWorldForgeColonist::BeginPlay()
@@ -38,9 +40,9 @@ void AWorldForgeColonist::BeginPlay()
     Super::BeginPlay();
 
     if (DebugMesh)
-    {
-        DebugMesh->SetHiddenInGame(true);
-    }
+{
+    DebugMesh->SetHiddenInGame(true);
+}
 
     if (SpriteVisual)
     {
@@ -78,13 +80,22 @@ void AWorldForgeColonist::Tick(float DeltaTime)
 
 FVector AWorldForgeColonist::ResolveWorldLocationFromAgentData(const FAgentData& Data, float CellSize) const
 {
-    // 🔥 FIX: Do NOT offset by settlement origin (it is in mismatched space)
     FIntPoint RequestedWorldCell(Data.CurrentGridPos.X, Data.CurrentGridPos.Y);
 
     if (const UWorld* World = GetWorld())
     {
+        if (const USettlementManager* SettlementManager = World->GetSubsystem<USettlementManager>())
+        {
+            if (const FSettlementState* Settlement = SettlementManager->GetSettlement(Data.SettlementID))
+            {
+                RequestedWorldCell = Settlement->WorldOrigin + FIntPoint(Data.CurrentGridPos.X, Data.CurrentGridPos.Y);
+            }
+        }
+
         if (const UVoxelWorldManager* VoxelWorldManager = World->GetSubsystem<UVoxelWorldManager>())
         {
+            const FVector BaseWorldLocation = VoxelWorldManager->TerrainCellToWorld(RequestedWorldCell, 0.0f, true);
+
             if (!VoxelWorldManager->IsSurfaceReady())
             {
                 if (bHasVisualData)
@@ -97,38 +108,28 @@ FVector AWorldForgeColonist::ResolveWorldLocationFromAgentData(const FAgentData&
                     return TargetWorldPos;
                 }
 
-                return VoxelWorldManager->GridToWorld(RequestedWorldCell, 0) + FVector(0.f, 0.f, TerrainZOffset);
+                return BaseWorldLocation + FVector(0.f, 0.f, TerrainZOffset);
             }
 
-            const FIntPoint ChunkCell =
-                VoxelWorldManager->ClampTerrainCellToBounds(RequestedWorldCell);
-
-            FVector SurfaceLocation = FVector::ZeroVector;
-            if (VoxelWorldManager->TryGetSurfaceWorldLocation(ChunkCell, SurfaceLocation, TerrainZOffset))
+            FVector SnappedLocation = BaseWorldLocation;
+            if (UWorldForgeTerrainSnapUtility::TryGetTerrainSnapLocation(
+                const_cast<UWorld*>(World),
+                BaseWorldLocation,
+                SnappedLocation,
+                TerrainZOffset))
             {
-                return SurfaceLocation;
-            }
-
-            FIntPoint FallbackChunkCell = ChunkCell;
-            if (VoxelWorldManager->FindNearestSpawnableTerrainCell(ChunkCell, FallbackChunkCell))
-            {
-                if (VoxelWorldManager->TryGetSurfaceWorldLocation(FallbackChunkCell, SurfaceLocation, TerrainZOffset))
-                {
-                    return SurfaceLocation;
-                }
+                return SnappedLocation;
             }
 
             UE_LOG(
                 LogTemp,
                 Warning,
-                TEXT("[WorldForgeColonist] Surface query failed for AgentID=%d LocalCell=(%d,%d) VoxelCell=(%d,%d) ChunkCell=(%d,%d). Holding current position until terrain resolves."),
+                TEXT("[WorldForgeColonist] Terrain snap failed for AgentID=%d LocalCell=(%d,%d) WorldCell=(%d,%d). Holding current position until terrain resolves."),
                 Data.AgentID,
                 Data.CurrentGridPos.X,
                 Data.CurrentGridPos.Y,
                 RequestedWorldCell.X,
-                RequestedWorldCell.Y,
-                ChunkCell.X,
-                ChunkCell.Y
+                RequestedWorldCell.Y
             );
 
             if (bHasVisualData)
@@ -141,7 +142,7 @@ FVector AWorldForgeColonist::ResolveWorldLocationFromAgentData(const FAgentData&
                 return TargetWorldPos;
             }
 
-            return VoxelWorldManager->GridToWorld(RequestedWorldCell, 0) + FVector(0.f, 0.f, TerrainZOffset);
+            return BaseWorldLocation + FVector(0.f, 0.f, TerrainZOffset);
         }
     }
 
@@ -248,29 +249,14 @@ void AWorldForgeColonist::UpdateMovement(float DeltaTime)
 
     if (const UWorld* World = GetWorld())
     {
-        if (const UVoxelWorldManager* VoxelWorldManager = World->GetSubsystem<UVoxelWorldManager>())
+        FVector SnappedLocation = DesiredLocation;
+        if (UWorldForgeTerrainSnapUtility::TryGetTerrainSnapLocation(
+            const_cast<UWorld*>(World),
+            DesiredLocation,
+            SnappedLocation,
+            TerrainZOffset))
         {
-            if (VoxelWorldManager->IsSurfaceReady())
-            {
-                FIntPoint CurrentWorldCell = CurrentGridCell;
-
-                if (const USettlementManager* SettlementManager = World->GetSubsystem<USettlementManager>())
-                {
-                    if (const FSettlementState* Settlement = SettlementManager->GetSettlement(SettlementID))
-                    {
-                        CurrentWorldCell = Settlement->WorldOrigin + CurrentGridCell;
-                    }
-                }
-
-                const FIntPoint ChunkCell =
-                    VoxelWorldManager->ClampTerrainCellToBounds(CurrentWorldCell);
-
-                FVector SurfaceLocation = FVector::ZeroVector;
-                if (VoxelWorldManager->TryGetSurfaceWorldLocation(ChunkCell, SurfaceLocation, TerrainZOffset))
-                {
-                    DesiredLocation.Z = SurfaceLocation.Z;
-                }
-            }
+            DesiredLocation.Z = SnappedLocation.Z;
         }
     }
 

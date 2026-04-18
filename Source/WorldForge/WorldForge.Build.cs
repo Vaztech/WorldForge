@@ -19,6 +19,7 @@ public class WorldForge : ModuleRules
             "Engine",            // Core engine systems
             "InputCore",         // Input handling
             "EnhancedInput",     // UE5 enhanced input system
+            "DeveloperSettings", // Access to project settings
 
             "GameplayTags",      // FGameplayTag system + NativeGameplayTags.h support
 
@@ -30,10 +31,7 @@ public class WorldForge : ModuleRules
             "AIModule",                // AI helpers (pathing, etc.)
             "RenderCore",              // Low-level rendering access
 
-            "Paper2D", // CHANGE MADE:
-                       // Required for UPaperFlipbook and all Paper2D types.
-                       // Needed because SpriteCharacterComponent.h now uses
-                       // UPaperFlipbook in a reflected multicast delegate.
+            "Paper2D", // Required for UPaperFlipbook and all Paper2D types.
         });
 
         // =========================
@@ -67,7 +65,8 @@ public class WorldForge : ModuleRules
             Path.Combine(ModuleDirectory, "Races"),
             Path.Combine(ModuleDirectory, "Civilization"),
             Path.Combine(ModuleDirectory, "Overworld"),
-            Path.Combine(ModuleDirectory, "Cosmic"), // ADDED
+            Path.Combine(ModuleDirectory, "Cosmic"),
+            Path.Combine(ModuleDirectory, "Utility"),
         });
 
         // =========================
@@ -84,7 +83,7 @@ public class WorldForge : ModuleRules
         if (Directory.Exists(PaperZDPath))
         {
             PublicDependencyModuleNames.Add("PaperZD");
-            PublicDefinitions.Add("WITH_PAPERZD=1"); // Used for #if guards in code
+            PublicDefinitions.Add("WITH_PAPERZD=1");
         }
         else
         {
@@ -92,7 +91,7 @@ public class WorldForge : ModuleRules
         }
 
         // ---- Voxel Plugin ----
-        // Required for smooth SDF terrain (Phase 1+)
+        // Required for smooth SDF terrain
         string VoxelPath = Path.Combine(ProjectPluginsDir, "VoxelPlugin");
         if (Directory.Exists(VoxelPath))
         {
