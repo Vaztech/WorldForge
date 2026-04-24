@@ -52,7 +52,7 @@ public:
 	UInputAction* IA_RotateKeys = nullptr;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Movement", meta = (ClampMin = "100.0", ClampMax = "20000.0", UIMin = "500.0", UIMax = "8000.0"))
-	float MoveSpeed = 2500.0f;
+	float MoveSpeed = 3000.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Camera|Movement", meta = (ClampMin = "1.0", ClampMax = "1000.0", UIMin = "10.0", UIMax = "300.0"))
 	float MousePanSpeed = 100.0f;

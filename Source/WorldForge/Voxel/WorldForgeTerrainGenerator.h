@@ -6,13 +6,22 @@
 #include "WorldForgeTerrainSnapshot.h"
 #include "WorldForgeTerrainGenerator.generated.h"
 
+enum : int32
+{
+    TerrainLayer_Sand = 0,
+    TerrainLayer_Grass = 1,
+    TerrainLayer_Dirt = 2,
+    TerrainLayer_Rock = 3,
+    TerrainLayer_Snow = 4,
+    TerrainLayer_Water = 5
+};
+
 UCLASS(Blueprintable)
 class WORLDFORGE_API UWorldForgeTerrainGenerator : public UVoxelGenerator
 {
     GENERATED_BODY()
 
 public:
-    // Plain C++ snapshot data. Intentionally not reflected.
     FWorldForgeTerrainSnapshot TerrainSnapshot;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Terrain")
@@ -68,6 +77,7 @@ private:
     float SampleContinentHeight(float X, float Y) const;
     float SampleBasinDepth(float X, float Y) const;
     float SampleRiverCarve(float X, float Y) const;
+    float SampleMountainHeight(float X, float Y) const;
 
     float SampleTileElevationBilinear(float VoxelX, float VoxelY) const;
     const FVoxelBiomeProfile* SamplePrimaryBiomeProfile(float VoxelX, float VoxelY) const;
@@ -76,6 +86,11 @@ private:
     float ComputeDetailHeight(float VoxelX, float VoxelY, const FVoxelBiomeProfile& Profile) const;
     float ComputeSurfaceHeight(float VoxelX, float VoxelY) const;
     float ComputeCaveDensity(float X, float Y, float Z, const FVoxelBiomeProfile& Profile) const;
+
+    float ComputeApproximateSlopeDegrees(float VoxelX, float VoxelY) const;
+    float ComputeNormalizedSurfaceElevation(float SurfaceHeight) const;
+    int32 ClassifyTerrainMaterialLayer(float VoxelX, float VoxelY, float SurfaceHeight) const;
+    FVoxelMaterial MakeVoxelMaterialFromLayer(int32 MaterialLayer) const;
 
     bool IsSnapshotValid() const;
     FIntPoint ClampChunkCell(const FIntPoint& Cell) const;

@@ -1,14 +1,28 @@
+// ════════════════════════════════════════════════════════════════════
+// WorldForgeTerrainGenerator.cpp — REWRITE v2
+//
+// The voxel generator is now a PURE RENDERER.  It converts tile
+// elevation data into voxel density and material, nothing more.
+//
+// All terrain shape comes from Tile.Elevation (0–1) via
+// FWorldForgeTerrainMath::ComputeSurfaceHeight().
+//
+// Responsibilities:
+//   ✓ Convert tile elevation to voxel surface height (bilinear)
+//   ✓ Add small biome-dependent detail noise
+//   ✓ Classify terrain material (grass/dirt/rock/snow/sand/water)
+//   ✓ Generate cave density (optional)
+//   ✗ Does NOT create mountains, rivers, basins, or any macro shape
+// ════════════════════════════════════════════════════════════════════
+
 #include "WorldForgeTerrainGenerator.h"
+
+#include "VoxelMaterialBuilder.h"
+#include "Utility/WorldForgeTerrainSettings.h"
+#include "Utility/WorldForgeTerrainMath.h"
 
 namespace
 {
-    static float WF_Bilerp(float V00, float V10, float V01, float V11, float FX, float FY)
-    {
-        const float X0 = FMath::Lerp(V00, V10, FX);
-        const float X1 = FMath::Lerp(V01, V11, FX);
-        return FMath::Lerp(X0, X1, FY);
-    }
-
     static float WF_FractalPerlin2D(float X, float Y, float Frequency, int32 Octaves)
     {
         float Total = 0.0f;
@@ -58,6 +72,8 @@ void FWorldForgeTerrainGeneratorInstance::Init(const FVoxelGeneratorInit& InitSt
     CaveNoise.SetSeed(Seed + 1337);
 }
 
+// ─── Density field ──────────────────────────────────────────────
+
 v_flt FWorldForgeTerrainGeneratorInstance::GetValueImpl(
     v_flt X,
     v_flt Y,
@@ -74,23 +90,26 @@ v_flt FWorldForgeTerrainGeneratorInstance::GetValueImpl(
 
     float Density = Z - SurfaceHeight;
 
+    // Optional cave carving
+    if (const FVoxelBiomeProfile* Profile = SamplePrimaryBiomeProfile(X, Y))
+    {
+        Density += ComputeCaveDensity(X, Y, Z, *Profile);
+    }
+
+    // Global foundation (solid floor below all terrain)
     if (TerrainSnapshot.bAddGlobalFoundation)
     {
         const float FoundationDepth = static_cast<float>(TerrainSnapshot.GetFoundationDepthVoxels());
-
         const float DistanceToFoundationTop = Z;
         const float DistanceToFoundationBottom = -(Z + FoundationDepth);
         const float FoundationDensity = FMath::Max(DistanceToFoundationTop, DistanceToFoundationBottom);
-
         Density = FMath::Min(Density, FoundationDensity);
     }
 
-    // Caves are intentionally disabled for the stabilization pass.
-    // Once the broad terrain shape is validated, cave carving can be
-    // reintroduced in a much more conservative form.
-
     return Density;
 }
+
+// ─── Material assignment ────────────────────────────────────────
 
 FVoxelMaterial FWorldForgeTerrainGeneratorInstance::GetMaterialImpl(
     v_flt X,
@@ -99,8 +118,37 @@ FVoxelMaterial FWorldForgeTerrainGeneratorInstance::GetMaterialImpl(
     int32 LOD,
     const FVoxelItemStack& Items) const
 {
-    return FVoxelMaterial();
+    if (!IsSnapshotValid())
+    {
+        return FVoxelMaterial::Default();
+    }
+
+    const float SurfaceHeight = ComputeSurfaceHeight(X, Y);
+    const float DepthBelowSurface = SurfaceHeight - Z;
+
+    const int32 SurfaceLayer = ClassifyTerrainMaterialLayer(X, Y, SurfaceHeight);
+
+    if (DepthBelowSurface <= 1.5f)
+    {
+        return MakeVoxelMaterialFromLayer(SurfaceLayer);
+    }
+
+    if (DepthBelowSurface <= 4.5f)
+    {
+        switch (SurfaceLayer)
+        {
+        case TerrainLayer_Water: return MakeVoxelMaterialFromLayer(TerrainLayer_Water);
+        case TerrainLayer_Sand:  return MakeVoxelMaterialFromLayer(TerrainLayer_Sand);
+        case TerrainLayer_Snow:  return MakeVoxelMaterialFromLayer(TerrainLayer_Dirt);
+        case TerrainLayer_Rock:  return MakeVoxelMaterialFromLayer(TerrainLayer_Rock);
+        default:                 return MakeVoxelMaterialFromLayer(TerrainLayer_Dirt);
+        }
+    }
+
+    return MakeVoxelMaterialFromLayer(TerrainLayer_Rock);
 }
+
+// ─── Value range (LOD culling) ──────────────────────────────────
 
 TVoxelRange<v_flt> FWorldForgeTerrainGeneratorInstance::GetValueRangeImpl(
     const FVoxelIntBox& Bounds,
@@ -112,13 +160,13 @@ TVoxelRange<v_flt> FWorldForgeTerrainGeneratorInstance::GetValueRangeImpl(
         return TVoxelRange<v_flt>(1.0f, 1.0f);
     }
 
-    const float Surface00 = ComputeSurfaceHeight(Bounds.Min.X, Bounds.Min.Y);
-    const float Surface01 = ComputeSurfaceHeight(Bounds.Min.X, Bounds.Max.Y);
-    const float Surface10 = ComputeSurfaceHeight(Bounds.Max.X, Bounds.Min.Y);
-    const float Surface11 = ComputeSurfaceHeight(Bounds.Max.X, Bounds.Max.Y);
+    const float S00 = ComputeSurfaceHeight(Bounds.Min.X, Bounds.Min.Y);
+    const float S01 = ComputeSurfaceHeight(Bounds.Min.X, Bounds.Max.Y);
+    const float S10 = ComputeSurfaceHeight(Bounds.Max.X, Bounds.Min.Y);
+    const float S11 = ComputeSurfaceHeight(Bounds.Max.X, Bounds.Max.Y);
 
-    const float MinSurface = FMath::Min(FMath::Min(Surface00, Surface01), FMath::Min(Surface10, Surface11));
-    const float MaxSurface = FMath::Max(FMath::Max(Surface00, Surface01), FMath::Max(Surface10, Surface11));
+    const float MinSurface = FMath::Min(FMath::Min(S00, S01), FMath::Min(S10, S11));
+    const float MaxSurface = FMath::Max(FMath::Max(S00, S01), FMath::Max(S10, S11));
 
     const float MinValue = static_cast<float>(Bounds.Min.Z) - MaxSurface;
     const float MaxValue = static_cast<float>(Bounds.Max.Z) - MinSurface;
@@ -126,11 +174,13 @@ TVoxelRange<v_flt> FWorldForgeTerrainGeneratorInstance::GetValueRangeImpl(
     if (TerrainSnapshot.bAddGlobalFoundation)
     {
         const float FoundationDepth = static_cast<float>(TerrainSnapshot.GetFoundationDepthVoxels());
-
-        const float FoundationAtMinZ = FMath::Max(static_cast<float>(Bounds.Min.Z), -(static_cast<float>(Bounds.Min.Z) + FoundationDepth));
-        const float FoundationAtMaxZ = FMath::Max(static_cast<float>(Bounds.Max.Z), -(static_cast<float>(Bounds.Max.Z) + FoundationDepth));
+        const float FoundationAtMinZ = FMath::Max(
+            static_cast<float>(Bounds.Min.Z),
+            -(static_cast<float>(Bounds.Min.Z) + FoundationDepth));
+        const float FoundationAtMaxZ = FMath::Max(
+            static_cast<float>(Bounds.Max.Z),
+            -(static_cast<float>(Bounds.Max.Z) + FoundationDepth));
         const float FoundationMin = FMath::Min(FoundationAtMinZ, FoundationAtMaxZ);
-
         return TVoxelRange<v_flt>(FMath::Min(MinValue, FoundationMin), MaxValue);
     }
 
@@ -142,101 +192,33 @@ FVector FWorldForgeTerrainGeneratorInstance::GetUpVector(v_flt X, v_flt Y, v_flt
     return FVector::UpVector;
 }
 
-float FWorldForgeTerrainGeneratorInstance::SampleContinentHeight(float X, float Y) const
+// ─── Height computation (single path) ───────────────────────────
+
+float FWorldForgeTerrainGeneratorInstance::ComputeSurfaceHeight(float VoxelX, float VoxelY) const
 {
-    const float ContinentNoise = FMath::PerlinNoise2D(FVector2D(
-        X * TerrainSnapshot.ContinentFrequency,
-        Y * TerrainSnapshot.ContinentFrequency
-    ));
+    // Step 1: Get bilinearly interpolated macro height from tile elevation
+    const float MacroHeight = FWorldForgeTerrainMath::ComputeSurfaceHeight(
+        VoxelX, VoxelY, TerrainSnapshot);
 
-    const float Continent01 = FMath::Clamp((ContinentNoise + 1.0f) * 0.5f, 0.0f, 1.0f);
-    const float ShapedContinent = FMath::Pow(
-        Continent01,
-        FMath::Max(0.1f, TerrainSnapshot.ContinentExponent)
-    );
-
-    return ((ShapedContinent * 2.0f) - 1.0f) * static_cast<float>(TerrainSnapshot.ContinentHeightRangeVoxels);
-}
-
-float FWorldForgeTerrainGeneratorInstance::SampleBasinDepth(float X, float Y) const
-{
-    const float BasinNoise = FMath::PerlinNoise2D(FVector2D(
-        (X + 913.0f) * TerrainSnapshot.BasinFrequency,
-        (Y + 271.0f) * TerrainSnapshot.BasinFrequency
-    ));
-
-    const float Basin01 = FMath::Clamp((BasinNoise + 1.0f) * 0.5f, 0.0f, 1.0f);
-
-    if (Basin01 < TerrainSnapshot.BasinThreshold)
+    // Step 2: Add small biome-dependent detail noise
+    float DetailHeight = 0.0f;
+    if (const FVoxelBiomeProfile* Profile = SamplePrimaryBiomeProfile(VoxelX, VoxelY))
     {
-        return 0.0f;
+        DetailHeight = ComputeDetailHeight(VoxelX, VoxelY, *Profile);
     }
+    DetailHeight = FMath::Clamp(DetailHeight, -24.0f, 24.0f);
 
-    const float BasinAlpha =
-        (Basin01 - TerrainSnapshot.BasinThreshold) /
-        FMath::Max(0.001f, 1.0f - TerrainSnapshot.BasinThreshold);
-
-    return BasinAlpha * static_cast<float>(TerrainSnapshot.LakeBasinDepthVoxels);
+    return MacroHeight + DetailHeight;
 }
 
-float FWorldForgeTerrainGeneratorInstance::SampleRiverCarve(float X, float Y) const
-{
-    const float RiverNoise = FMath::PerlinNoise2D(FVector2D(
-        (X + 1703.0f) * TerrainSnapshot.RiverFrequency,
-        (Y + 811.0f) * TerrainSnapshot.RiverFrequency
-    ));
-
-    const float RiverMask = 1.0f - FMath::Abs(RiverNoise);
-
-    if (RiverMask < TerrainSnapshot.RiverThreshold)
-    {
-        return 0.0f;
-    }
-
-    const float RiverAlpha =
-        (RiverMask - TerrainSnapshot.RiverThreshold) /
-        FMath::Max(0.001f, 1.0f - TerrainSnapshot.RiverThreshold);
-
-    const float ShapedRiver = FMath::Pow(
-        FMath::Clamp(RiverAlpha, 0.0f, 1.0f),
-        FMath::Max(0.1f, TerrainSnapshot.RiverSharpness)
-    );
-
-    return ShapedRiver * static_cast<float>(TerrainSnapshot.RiverCarveDepthVoxels);
-}
+// ─── Tile elevation sampler (delegates to TerrainMath) ──────────
 
 float FWorldForgeTerrainGeneratorInstance::SampleTileElevationBilinear(float VoxelX, float VoxelY) const
 {
-    if (!IsSnapshotValid())
-    {
-        return 0.0f;
-    }
-
-    const float ChunkSize = static_cast<float>(FMath::Max(1, TerrainSnapshot.ChunkSizeVoxels));
-
-    const float CellX = VoxelX / ChunkSize;
-    const float CellY = VoxelY / ChunkSize;
-
-    const int32 X0 = FMath::FloorToInt(CellX);
-    const int32 Y0 = FMath::FloorToInt(CellY);
-    const int32 X1 = X0 + 1;
-    const int32 Y1 = Y0 + 1;
-
-    const float FX = CellX - static_cast<float>(X0);
-    const float FY = CellY - static_cast<float>(Y0);
-
-    const FIntPoint C00 = TerrainSnapshot.ClampCell(FIntPoint(X0, Y0));
-    const FIntPoint C10 = TerrainSnapshot.ClampCell(FIntPoint(X1, Y0));
-    const FIntPoint C01 = TerrainSnapshot.ClampCell(FIntPoint(X0, Y1));
-    const FIntPoint C11 = TerrainSnapshot.ClampCell(FIntPoint(X1, Y1));
-
-    const float E00 = TerrainSnapshot.GetTileElevation(C00, 0.0f);
-    const float E10 = TerrainSnapshot.GetTileElevation(C10, 0.0f);
-    const float E01 = TerrainSnapshot.GetTileElevation(C01, 0.0f);
-    const float E11 = TerrainSnapshot.GetTileElevation(C11, 0.0f);
-
-    return WF_Bilerp(E00, E10, E01, E11, FX, FY);
+    return FWorldForgeTerrainMath::SampleTileElevationBilinear(VoxelX, VoxelY, TerrainSnapshot);
 }
+
+// ─── Biome profile lookup ───────────────────────────────────────
 
 const FVoxelBiomeProfile* FWorldForgeTerrainGeneratorInstance::SamplePrimaryBiomeProfile(float VoxelX, float VoxelY) const
 {
@@ -245,85 +227,182 @@ const FVoxelBiomeProfile* FWorldForgeTerrainGeneratorInstance::SamplePrimaryBiom
         return nullptr;
     }
 
-    const int32 ChunkSizeVoxels = FMath::Max(1, TerrainSnapshot.ChunkSizeVoxels);
-    const int32 ChunkX = FMath::FloorToInt(VoxelX / static_cast<float>(ChunkSizeVoxels));
-    const int32 ChunkY = FMath::FloorToInt(VoxelY / static_cast<float>(ChunkSizeVoxels));
+    const float ChunkSizeF = static_cast<float>(FMath::Max(1, TerrainSnapshot.ChunkSizeVoxels));
+    const float HalfGridX = static_cast<float>(TerrainSnapshot.GridWidth) * 0.5f;
+    const float HalfGridY = static_cast<float>(TerrainSnapshot.GridHeight) * 0.5f;
+
+    const int32 ChunkX = FMath::FloorToInt((VoxelX / ChunkSizeF) + HalfGridX);
+    const int32 ChunkY = FMath::FloorToInt((VoxelY / ChunkSizeF) + HalfGridY);
 
     const FIntPoint ChunkCell = TerrainSnapshot.ClampCell(FIntPoint(ChunkX, ChunkY));
     return TerrainSnapshot.GetVoxelProfile(ChunkCell);
 }
 
-float FWorldForgeTerrainGeneratorInstance::ComputeMacroBaseHeight(float VoxelX, float VoxelY) const
-{
-    const float TileElevation = SampleTileElevationBilinear(VoxelX, VoxelY);
-
-    const float BlendedContinent = SampleContinentHeight(VoxelX, VoxelY);
-    const float BlendedBasin = SampleBasinDepth(VoxelX, VoxelY);
-
-    const float ElevationContribution =
-        FMath::Pow(FMath::Clamp(TileElevation, 0.0f, 1.0f), 1.25f) * 28.0f;
-
-    return
-        static_cast<float>(TerrainSnapshot.SeaLevelVoxels) +
-        BlendedContinent +
-        ElevationContribution -
-        BlendedBasin;
-}
+// ─── Detail noise (small-scale surface variation only) ──────────
 
 float FWorldForgeTerrainGeneratorInstance::ComputeDetailHeight(float VoxelX, float VoxelY, const FVoxelBiomeProfile& Profile) const
 {
     const float SafeVoxelSize = FMath::Max(KINDA_SMALL_NUMBER, TerrainSnapshot.VoxelSize);
 
-    // Stabilization pass:
-    // Reduce the biome detail amplitude sharply so the broad macro terrain
-    // shape dominates and we stop producing shredded vertical spikes.
     const float RawAmplitudeVoxels = Profile.NoiseAmplitude / SafeVoxelSize;
-    const float StabilizedAmplitudeVoxels = FMath::Clamp(RawAmplitudeVoxels * 0.18f, 0.0f, 6.0f);
+    const float DetailAmplitudeVoxels = FMath::Clamp(
+        RawAmplitudeVoxels * TerrainSnapshot.DetailAmplitude * 0.01f,
+        0.0f,
+        48.0f
+    );
 
-    // Also damp frequency slightly to reduce contour-heavy aliasing.
-    const float StabilizedFrequency = FMath::Max(0.0001f, Profile.NoiseFrequency * 0.35f);
+    const float DetailFrequency = FMath::Max(0.0001f, TerrainSnapshot.DetailScale);
+    const int32 DetailOctaves = FMath::Clamp(TerrainSnapshot.DetailOctaves, 1, 8);
 
     const float NoiseValue = WF_FractalPerlin2D(
         VoxelX + static_cast<float>(Seed),
         VoxelY + static_cast<float>(Seed * 2),
-        StabilizedFrequency,
-        FMath::Clamp(Profile.OctaveCount, 1, 4)
+        DetailFrequency,
+        DetailOctaves
     );
 
-    return NoiseValue * StabilizedAmplitudeVoxels;
+    return NoiseValue * DetailAmplitudeVoxels;
 }
 
-float FWorldForgeTerrainGeneratorInstance::ComputeSurfaceHeight(float VoxelX, float VoxelY) const
-{
-    const FVoxelBiomeProfile* Profile = SamplePrimaryBiomeProfile(VoxelX, VoxelY);
-
-    const float MacroBaseHeight = ComputeMacroBaseHeight(VoxelX, VoxelY);
-    const float RiverCarve = SampleRiverCarve(VoxelX, VoxelY);
-
-    float DetailHeight = 0.0f;
-    if (Profile)
-    {
-        DetailHeight = ComputeDetailHeight(VoxelX, VoxelY, *Profile);
-    }
-
-    // Clamp local variation so the macro terrain remains dominant.
-    DetailHeight = FMath::Clamp(DetailHeight, -6.0f, 6.0f);
-
-    float SurfaceHeight = MacroBaseHeight + DetailHeight - RiverCarve;
-
-    SurfaceHeight = FMath::Max(
-        static_cast<float>(TerrainSnapshot.SeaLevelVoxels - TerrainSnapshot.LakeBasinDepthVoxels),
-        SurfaceHeight
-    );
-
-    return SurfaceHeight;
-}
+// ─── Cave density ───────────────────────────────────────────────
 
 float FWorldForgeTerrainGeneratorInstance::ComputeCaveDensity(float X, float Y, float Z, const FVoxelBiomeProfile& Profile) const
 {
-    // Intentionally disabled during stabilization pass.
-    return 0.0f;
+    if (!IsSnapshotValid() || !TerrainSnapshot.bEnableCaves)
+    {
+        return 0.0f;
+    }
+
+    const float SurfaceHeight = ComputeSurfaceHeight(X, Y);
+    const float DepthBelowSurface = SurfaceHeight - Z;
+
+    if (DepthBelowSurface < 12.0f || DepthBelowSurface > 96.0f)
+    {
+        return 0.0f;
+    }
+
+    const float CaveFreq = FMath::Max(0.00001f, TerrainSnapshot.CaveFrequency);
+    const float SecondOctaveMultiplier = FMath::Max(0.00001f, TerrainSnapshot.CaveSecondOctaveMultiplier);
+    const float PrimaryWeight = FMath::Clamp(TerrainSnapshot.CavePrimaryWeight, 0.0f, 1.0f);
+    const float SecondaryWeight = FMath::Clamp(TerrainSnapshot.CaveSecondaryWeight, 0.0f, 1.0f);
+    const float WeightSum = FMath::Max(KINDA_SMALL_NUMBER, PrimaryWeight + SecondaryWeight);
+
+    const float N1 = WF_Perlin3D(
+        (X + static_cast<float>(Seed) * 1.17f) * CaveFreq,
+        (Y + static_cast<float>(Seed) * 1.73f) * CaveFreq,
+        (Z + static_cast<float>(Seed) * 2.11f) * CaveFreq
+    );
+
+    const float N2 = WF_Perlin3D(
+        (X + 913.0f + static_cast<float>(Seed) * 0.37f) * (CaveFreq * SecondOctaveMultiplier),
+        (Y + 271.0f + static_cast<float>(Seed) * 0.53f) * (CaveFreq * SecondOctaveMultiplier),
+        (Z + 611.0f + static_cast<float>(Seed) * 0.89f) * (CaveFreq * SecondOctaveMultiplier)
+    );
+
+    const float CaveNoiseValue =
+        (N1 * (PrimaryWeight / WeightSum)) +
+        (N2 * (SecondaryWeight / WeightSum));
+
+    const float DepthAlpha = FMath::Clamp((DepthBelowSurface - 12.0f) / 48.0f, 0.0f, 1.0f);
+    const float CaveThreshold = FMath::Clamp(TerrainSnapshot.CaveThreshold, 0.0f, 1.0f);
+
+    return (CaveNoiseValue - CaveThreshold) * DepthAlpha * 18.0f;
 }
+
+// ─── Slope computation ──────────────────────────────────────────
+
+float FWorldForgeTerrainGeneratorInstance::ComputeApproximateSlopeDegrees(float VoxelX, float VoxelY) const
+{
+    const float SampleOffset = static_cast<float>(FMath::Max(1, TerrainSnapshot.ChunkSizeVoxels));
+
+    const float Hx0 = ComputeSurfaceHeight(VoxelX - SampleOffset, VoxelY);
+    const float Hx1 = ComputeSurfaceHeight(VoxelX + SampleOffset, VoxelY);
+    const float Hy0 = ComputeSurfaceHeight(VoxelX, VoxelY - SampleOffset);
+    const float Hy1 = ComputeSurfaceHeight(VoxelX, VoxelY + SampleOffset);
+
+    const float Dx = (Hx1 - Hx0) / (2.0f * SampleOffset);
+    const float Dy = (Hy1 - Hy0) / (2.0f * SampleOffset);
+    const float GradientMagnitude = FMath::Sqrt((Dx * Dx) + (Dy * Dy));
+
+    return FMath::RadiansToDegrees(FMath::Atan(GradientMagnitude));
+}
+
+// ─── Normalized elevation (delegates to TerrainMath) ────────────
+
+float FWorldForgeTerrainGeneratorInstance::ComputeNormalizedSurfaceElevation(float SurfaceHeight) const
+{
+    return FWorldForgeTerrainMath::ComputeNormalizedLandElevation(SurfaceHeight, TerrainSnapshot);
+}
+
+// ─── Material classification ────────────────────────────────────
+
+int32 FWorldForgeTerrainGeneratorInstance::ClassifyTerrainMaterialLayer(float VoxelX, float VoxelY, float SurfaceHeight) const
+{
+    const float NormElev = ComputeNormalizedSurfaceElevation(SurfaceHeight);
+    const float SlopeDeg = ComputeApproximateSlopeDegrees(VoxelX, VoxelY);
+    const float SeaLevel = static_cast<float>(TerrainSnapshot.SeaLevelVoxels);
+
+    // ── Water
+    if (SurfaceHeight <= SeaLevel)
+    {
+        return TerrainLayer_Water;
+    }
+
+    // ── Sand (beach strip)
+    const float CoastBand = FMath::Max(0.0f, TerrainSnapshot.CoastBandVoxels);
+    if (SurfaceHeight <= (SeaLevel + CoastBand) ||
+        NormElev <= FMath::Clamp(TerrainSnapshot.SandMaxElevationNormalized, 0.0f, 1.0f))
+    {
+        return TerrainLayer_Sand;
+    }
+
+    // ── Snow (high peaks)
+    if (NormElev >= FMath::Clamp(TerrainSnapshot.SnowMinElevationNormalized, 0.0f, 1.0f))
+    {
+        return TerrainLayer_Snow;
+    }
+
+    // ── Rock (cliffs by slope)
+    if (SlopeDeg >= FMath::Max(0.0f, TerrainSnapshot.CliffSlopeThresholdDegrees))
+    {
+        return TerrainLayer_Rock;
+    }
+
+    // ── Rock (high altitude)
+    if (NormElev >= FMath::Clamp(TerrainSnapshot.HighRockMinElevationNormalized, 0.0f, 1.0f))
+    {
+        return TerrainLayer_Rock;
+    }
+
+    // ── Rock (mid altitude + steep)
+    if (NormElev >= FMath::Clamp(TerrainSnapshot.RockMinElevationNormalized, 0.0f, 1.0f) &&
+        SlopeDeg >= FMath::Max(0.0f, TerrainSnapshot.RockSlopeThresholdDegrees))
+    {
+        return TerrainLayer_Rock;
+    }
+
+    // ── Dirt (mid elevation or moderate slope)
+    if (NormElev >= FMath::Clamp(TerrainSnapshot.DirtMinElevationNormalized, 0.0f, 1.0f) ||
+        SlopeDeg >= FMath::Max(0.0f, TerrainSnapshot.DirtSlopeThresholdDegrees))
+    {
+        return TerrainLayer_Dirt;
+    }
+
+    // ── Grass (everything else — the broad lowland band)
+    return TerrainLayer_Grass;
+}
+
+// ─── Material builder ───────────────────────────────────────────
+
+FVoxelMaterial FWorldForgeTerrainGeneratorInstance::MakeVoxelMaterialFromLayer(int32 MaterialLayer) const
+{
+    FVoxelMaterialBuilder Builder;
+    Builder.SetMaterialConfig(EVoxelMaterialConfig::SingleIndex);
+    Builder.SetSingleIndex(static_cast<uint8>(FMath::Clamp(MaterialLayer, 0, 255)));
+    return Builder.Build();
+}
+
+// ─── Helpers ────────────────────────────────────────────────────
 
 bool FWorldForgeTerrainGeneratorInstance::IsSnapshotValid() const
 {
@@ -340,7 +419,19 @@ int32 FWorldForgeTerrainGeneratorInstance::ComputeChunkBaseDepthVoxels(const FVo
     const float SafeVoxelSize = (TerrainSnapshot.VoxelSize > KINDA_SMALL_NUMBER)
         ? TerrainSnapshot.VoxelSize
         : 100.0f;
-
     const int32 DerivedDepth = FMath::RoundToInt(Profile.NoiseAmplitude / SafeVoxelSize);
     return FMath::Max(12, DerivedDepth);
+}
+
+// ─── Legacy stubs (kept for header compatibility) ───────────────
+
+float FWorldForgeTerrainGeneratorInstance::SampleContinentHeight(float X, float Y) const { return 0.0f; }
+float FWorldForgeTerrainGeneratorInstance::SampleBasinDepth(float X, float Y) const { return 0.0f; }
+float FWorldForgeTerrainGeneratorInstance::SampleRiverCarve(float X, float Y) const { return 0.0f; }
+float FWorldForgeTerrainGeneratorInstance::SampleMountainHeight(float X, float Y) const { return 0.0f; }
+
+float FWorldForgeTerrainGeneratorInstance::ComputeMacroBaseHeight(float VoxelX, float VoxelY) const
+{
+    // v2: delegates to the single-path formula
+    return FWorldForgeTerrainMath::ComputeSurfaceHeight(VoxelX, VoxelY, TerrainSnapshot);
 }

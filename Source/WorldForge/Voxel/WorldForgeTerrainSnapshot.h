@@ -1,61 +1,212 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "GameplayTagContainer.h"
 #include "Data/WorldForgeDataTypes.h"
+#include "WorldForgeTerrainSnapshot.generated.h"
 
-/**
- * Immutable terrain-domain snapshot used as the handoff between
- * UVoxelWorldManager orchestration and future density-based voxel generation.
- *
- * This file is intentionally plugin-agnostic:
- * - no AVoxelWorld include
- * - no voxel generator include
- * - no edit tool include
- *
- * It is safe to introduce before replacing AddBox terrain writes.
- */
+USTRUCT(BlueprintType)
 struct FWorldForgeTerrainSnapshot
 {
+    GENERATED_BODY()
+
+public:
+    UPROPERTY()
     int32 GridWidth = 0;
+
+    UPROPERTY()
     int32 GridHeight = 0;
 
+    UPROPERTY()
     int32 ChunkSizeVoxels = 0;
+
+    UPROPERTY()
     float VoxelSize = 100.0f;
 
-    int32 SeaLevelVoxels = 0;
+    UPROPERTY()
+    float TerrainSurfaceZOffset = 50.0f;
+
+    UPROPERTY()
+    int32 SeaLevelVoxels = 10;
+
+    // ── v2 terrain height fields (single-source-of-truth rewrite) ──
+    // These replace the old multi-system mountain/basin/river noise.
+    // Tile.Elevation (0–1) is the ONLY input for terrain shape.
+
+    // Tile elevation at or below this value → underwater.
+    // Must match Step04_AssignBiomes water threshold (~0.48).
+    UPROPERTY()
+    float WaterThreshold = 0.48f;
+
+    // How deep the ocean floor goes below sea level (in voxels).
+    UPROPERTY()
+    int32 OceanDepthVoxels = 30;
+
+    // Maximum land height above sea level (in voxels).
+    // Mountain peaks at tile elevation 1.0 reach SeaLevel + this.
+    UPROPERTY()
+    int32 MaxLandHeightVoxels = 150;
+
+    // Power curve for land elevation.  < 1.0 expands lowlands and
+    // compresses peaks, giving most land gentle terrain with rare
+    // dramatic mountains.  0.65 is a good starting point.
+    UPROPERTY()
+    float LandElevationExponent = 0.65f;
+
+    UPROPERTY()
     bool bAddGlobalFoundation = true;
+
+    UPROPERTY()
     float GlobalFoundationDepthWorld = 5000.0f;
 
-    float ContinentFrequency = 0.00018f;
-    int32 ContinentHeightRangeVoxels = 90;
-    float ContinentExponent = 2.2f;
+    UPROPERTY()
+    float ContinentFrequency = 0.002f;
 
+    UPROPERTY()
+    int32 ContinentHeightRangeVoxels = 150;
+
+    UPROPERTY()
+    float ContinentExponent = 1.0f;
+
+    UPROPERTY()
     float BasinFrequency = 0.00055f;
+
+    UPROPERTY()
     float BasinThreshold = 0.82f;
+
+    UPROPERTY()
     int32 LakeBasinDepthVoxels = 14;
 
-    float RiverFrequency = 0.0015f;
-    float RiverThreshold = 0.92f;
-    int32 RiverCarveDepthVoxels = 5;
-    float RiverSharpness = 2.2f;
+    UPROPERTY()
+    int32 MountainRangeCount = 8;
 
-    bool bUseFastTerrainSampling = true;
+    UPROPERTY()
+    int32 MountainMinLengthTiles = 24;
 
+    UPROPERTY()
+    int32 MountainMaxLengthTiles = 80;
+
+    UPROPERTY()
+    float MountainMinWidthVoxels = 6.0f;
+
+    UPROPERTY()
+    float MountainMaxWidthVoxels = 18.0f;
+
+    UPROPERTY()
+    float MountainMinHeightVoxels = 12.0f;
+
+    UPROPERTY()
+    float MountainMaxHeightVoxels = 42.0f;
+
+    UPROPERTY()
+    float MountainFalloffPower = 2.2f;
+
+    // Step03 tectonic ranges — kept for future sub-tile crag detail.
+    // NOT consumed by the v2 height formula (tile elevation already
+    // encodes mountain contribution from Step03).
+    UPROPERTY()
+    TArray<FMountainRange> PipelineMountainRanges;
+
+    UPROPERTY()
+    float RiverFrequency = 0.001f;
+
+    UPROPERTY()
+    float RiverThreshold = 0.95f;
+
+    UPROPERTY()
+    int32 RiverCarveDepthVoxels = 6;
+
+    UPROPERTY()
+    float RiverSharpness = 1.5f;
+
+    UPROPERTY()
+    float SandMaxElevationNormalized = 0.35f;
+
+    UPROPERTY()
+    float DirtMinElevationNormalized = 0.20f;
+
+    UPROPERTY()
+    float RockMinElevationNormalized = 0.75f;
+
+    UPROPERTY()
+    float HighRockMinElevationNormalized = 0.42f;
+
+    UPROPERTY()
+    float SnowMinElevationNormalized = 0.90f;
+
+    UPROPERTY()
+    float CoastBandVoxels = 2.0f;
+
+    UPROPERTY()
+    float DirtSlopeThresholdDegrees = 8.0f;
+
+    UPROPERTY()
+    float RockSlopeThresholdDegrees = 12.0f;
+
+    UPROPERTY()
+    float CliffSlopeThresholdDegrees = 18.0f;
+
+    UPROPERTY()
+    float NormalizedElevationMaxExtraVoxels = 24.0f;
+
+    UPROPERTY()
+    float BaseHeight = 4000.0f;
+
+    UPROPERTY()
+    float HeightMultiplier = 6000.0f;
+
+    UPROPERTY()
+    float ContinentScale = 0.00005f;
+
+    UPROPERTY()
+    float DetailScale = 0.002f;
+
+    UPROPERTY()
+    float DetailAmplitude = 120.0f;
+
+    UPROPERTY()
+    int32 DetailOctaves = 3;
+
+    UPROPERTY()
+    bool bEnableCaves = true;
+
+    UPROPERTY()
+    float CaveFrequency = 0.01f;
+
+    UPROPERTY()
+    float CaveThreshold = 0.45f;
+
+    UPROPERTY()
+    float CaveSecondOctaveMultiplier = 2.0f;
+
+    UPROPERTY()
+    float CavePrimaryWeight = 0.7f;
+
+    UPROPERTY()
+    float CaveSecondaryWeight = 0.3f;
+
+    UPROPERTY()
+    bool bUseFastTerrainSampling = false;
+
+    UPROPERTY()
     TArray<FWorldTileData> WorldTiles;
+
+    UPROPERTY()
     TArray<float> CachedTileElevations;
+
+    UPROPERTY()
     TArray<FVoxelBiomeProfile> CachedVoxelProfiles;
+
+    UPROPERTY()
     TArray<FGameplayTag> CachedBiomeTags;
+
+    UPROPERTY()
     TArray<float> CachedSurfaceHeightsVoxels;
 
+public:
     bool IsValid() const
     {
         if (GridWidth <= 0 || GridHeight <= 0)
-        {
-            return false;
-        }
-
-        const int32 ExpectedTileCount = GridWidth * GridHeight;
-        if (WorldTiles.Num() != ExpectedTileCount)
         {
             return false;
         }
@@ -70,7 +221,8 @@ struct FWorldForgeTerrainSnapshot
             return false;
         }
 
-        return true;
+        const int32 ExpectedTileCount = GridWidth * GridHeight;
+        return WorldTiles.Num() == ExpectedTileCount;
     }
 
     int32 NumTiles() const

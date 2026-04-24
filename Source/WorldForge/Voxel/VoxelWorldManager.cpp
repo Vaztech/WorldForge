@@ -1,4 +1,25 @@
-﻿#include "VoxelWorldManager.h"
+﻿// VoxelWorldManager.cpp
+// ============================================================
+// All terrain subsystem implementation in one place.
+// Navigate with Ctrl+F on the section banners below.
+//
+// SECTIONS:
+//   [INCLUDES]
+//   [CORE LIFECYCLE]
+//   [COORDINATE UTILITIES]
+//   [NOISE MATH]
+//   [TERRAIN CACHE]
+//   [TERRAIN HEIGHTS]
+//   [TERRAIN ANALYSIS]
+//   [TERRAIN QUERIES]
+//   [GENERATION ORCHESTRATOR]
+//   [TERRAIN APPLICATION]
+//   [PLACED BLOCK VISUALS]
+// ============================================================
+
+// ─── [INCLUDES] ─────────────────────────────────────────────
+
+#include "VoxelWorldManager.h"
 
 #include "Engine/World.h"
 #include "EngineUtils.h"
@@ -8,10 +29,57 @@
 #include "Engine/StaticMesh.h"
 #include "GameplayTagContainer.h"
 #include "VoxelWorld.h"
+#include "VoxelWorldCreateInfo.h"
 #include "Kismet/GameplayStatics.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/Pawn.h"
 #include "Utility/WorldForgeTerrainSettings.h"
+#include "WorldForgeTerrainGenerator.h"
+#include "Utility/WorldForgeTerrainMath.h"
+
+// ─── [BIOME TAG HELPERS] ─────────────────────────────────────
+// Cached-by-call tag accessors. Kept in an anonymous namespace
+// so they stay translation-unit-local without leaking linkage.
+
+namespace
+{
+    static FGameplayTag GetBiomeCoastalTag()
+    {
+        return FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Coastal")), false);
+    }
+
+    static FGameplayTag GetBiomeLavaTag()
+    {
+        return FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Lava")), false);
+    }
+
+    static FGameplayTag GetBiomeOceanTag()
+    {
+        return FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Ocean")), false);
+    }
+
+    static FGameplayTag GetBiomeSeaTag()
+    {
+        return FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Sea")), false);
+    }
+
+    static FGameplayTag GetBiomeLakeTag()
+    {
+        return FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Lake")), false);
+    }
+
+    static FGameplayTag GetBiomeWaterTag()
+    {
+        return FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Water")), false);
+    }
+
+    static FGameplayTag GetBiomeDeepOceanTag()
+    {
+        return FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.DeepOcean")), false);
+    }
+}
+
+// ─── [CORE LIFECYCLE] ────────────────────────────────────────
 
 void UVoxelWorldManager::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -29,10 +97,24 @@ void UVoxelWorldManager::Initialize(FSubsystemCollectionBase& Collection)
         DefaultPerlinSettings = Settings->DefaultPerlinSettings;
 
         SandMaxElevationNormalized = Settings->SandMaxElevationNormalized;
+        DirtMinElevationNormalized = Settings->DirtMinElevationNormalized;
         RockMinElevationNormalized = Settings->RockMinElevationNormalized;
+        HighRockMinElevationNormalized = Settings->HighRockMinElevationNormalized;
         SnowMinElevationNormalized = Settings->SnowMinElevationNormalized;
 
+        CoastBandVoxels = Settings->CoastBandVoxels;
+        DirtSlopeThresholdDegrees = Settings->DirtSlopeThresholdDegrees;
+        RockSlopeThresholdDegrees = Settings->RockSlopeThresholdDegrees;
+        CliffSlopeThresholdDegrees = Settings->CliffSlopeThresholdDegrees;
+        NormalizedElevationMaxExtraVoxels = Settings->NormalizedElevationMaxExtraVoxels;
+
         SeaLevelVoxels = Settings->SeaLevelVoxels;
+
+        // v2 terrain height fields
+        WaterThreshold = Settings->WaterThreshold;
+        OceanDepthVoxels = Settings->OceanDepthVoxels;
+        MaxLandHeightVoxels = Settings->MaxLandHeightVoxels;
+        LandElevationExponent = Settings->LandElevationExponent;
 
         ContinentFrequency = Settings->ContinentFrequency;
         ContinentHeightRangeVoxels = Settings->ContinentHeightRangeVoxels;
@@ -47,6 +129,15 @@ void UVoxelWorldManager::Initialize(FSubsystemCollectionBase& Collection)
         RiverCarveDepthVoxels = Settings->RiverCarveDepthVoxels;
         RiverSharpness = Settings->RiverSharpness;
 
+        MountainRangeCount = Settings->MountainRangeCount;
+        MountainMinLengthTiles = Settings->MountainMinLengthTiles;
+        MountainMaxLengthTiles = Settings->MountainMaxLengthTiles;
+        MountainMinWidthVoxels = Settings->MountainMinWidthVoxels;
+        MountainMaxWidthVoxels = Settings->MountainMaxWidthVoxels;
+        MountainMinHeightVoxels = Settings->MountainMinHeightVoxels;
+        MountainMaxHeightVoxels = Settings->MountainMaxHeightVoxels;
+        MountainFalloffPower = Settings->MountainFalloffPower;
+
         bUseFastTerrainSampling = Settings->bUseFastTerrainSampling;
 
         bLogGridConversions = Settings->bLogGridConversions;
@@ -59,7 +150,30 @@ void UVoxelWorldManager::Initialize(FSubsystemCollectionBase& Collection)
 
         TerrainRetryIntervalSeconds = Settings->TerrainRetryIntervalSeconds;
         MaxTerrainRetryCount = Settings->MaxTerrainRetryCount;
+
+        BaseHeight = Settings->BaseHeight;
+        HeightMultiplier = Settings->HeightMultiplier;
+        ContinentScale = Settings->ContinentScale;
+
+        DetailScale = Settings->DetailScale;
+        DetailAmplitude = Settings->DetailAmplitude;
+        DetailOctaves = Settings->DetailOctaves;
+
+        bEnableCaves = Settings->bEnableCaves;
+        CaveFrequency = Settings->CaveFrequency;
+        CaveThreshold = Settings->CaveThreshold;
+        CaveSecondOctaveMultiplier = Settings->CaveSecondOctaveMultiplier;
+        CavePrimaryWeight = Settings->CavePrimaryWeight;
+        CaveSecondaryWeight = Settings->CaveSecondaryWeight;
     }
+
+    UE_LOG(LogTemp, Warning,
+        TEXT("[VoxelWorldManager] DIAGNOSTIC: DirtMin=%.3f DirtSlope=%.1f SandMax=%.3f HighRock=%.3f CoastBand=%.1f"),
+        DirtMinElevationNormalized,
+        DirtSlopeThresholdDegrees,
+        SandMaxElevationNormalized,
+        HighRockMinElevationNormalized,
+        CoastBandVoxels);
 
     ClearTerrainSnapshot();
 
@@ -83,11 +197,12 @@ void UVoxelWorldManager::Deinitialize()
 
 bool UVoxelWorldManager::IsReady()
 {
-    if (VoxelWorldActor)
+    if (IsValid(VoxelWorldActor))
     {
         return true;
     }
 
+    VoxelWorldActor = nullptr;
     return FindAndCacheVoxelWorld();
 }
 
@@ -103,13 +218,12 @@ bool UVoxelWorldManager::IsTerrainReadyForGameplay() const
         return false;
     }
 
-    if (!VoxelWorldActor)
+    if (!IsValid(VoxelWorldActor))
     {
         return false;
     }
 
-    const AVoxelWorld* VoxelWorld = Cast<AVoxelWorld>(VoxelWorldActor);
-    return VoxelWorld && VoxelWorld->IsCreated();
+    return VoxelWorldActor->IsCreated();
 }
 
 bool UVoxelWorldManager::IsTerrainRuntimeStable() const
@@ -128,15 +242,14 @@ bool UVoxelWorldManager::FindAndCacheVoxelWorld()
 
     UE_LOG(LogTemp, Log, TEXT("[VoxelWorldManager] Searching for VoxelWorld..."));
 
-    for (TActorIterator<AActor> It(World); It; ++It)
+    for (TActorIterator<AVoxelWorld> It(World); It; ++It)
     {
-        if (It->GetClass()->GetName().Contains(TEXT("VoxelWorld")))
-        {
-            VoxelWorldActor = *It;
-            UE_LOG(LogTemp, Log, TEXT("[VoxelWorldManager] Found: %s"), *It->GetName());
-            return true;
-        }
+        VoxelWorldActor = *It;
+        UE_LOG(LogTemp, Log, TEXT("[VoxelWorldManager] Found: %s"), *It->GetName());
+        return true;
     }
+
+    VoxelWorldActor = nullptr;
 
     UE_LOG(
         LogTemp,
@@ -146,27 +259,19 @@ bool UVoxelWorldManager::FindAndCacheVoxelWorld()
     return false;
 }
 
-FVector UVoxelWorldManager::GetVoxelWorldOrigin() const
+bool UVoxelWorldManager::IsVoxelRuntimeReady() const
 {
-    if (!VoxelWorldActor)
+    if (!IsValid(VoxelWorldActor))
     {
-        const_cast<UVoxelWorldManager*>(this)->FindAndCacheVoxelWorld();
+        return false;
     }
 
-    return VoxelWorldActor ? VoxelWorldActor->GetActorLocation() : FVector::ZeroVector;
+    return VoxelWorldActor->IsCreated();
 }
 
-float UVoxelWorldManager::GetRenderVoxelSize() const
+bool UVoxelWorldManager::HasPendingTerrainRequest() const
 {
-    if (VoxelWorldActor)
-    {
-        if (const AVoxelWorld* VW = Cast<AVoxelWorld>(VoxelWorldActor))
-        {
-            return FMath::Max(KINDA_SMALL_NUMBER, VW->VoxelSize);
-        }
-    }
-
-    return 1.0f;
+    return PendingWorldTiles.Num() > 0 && PendingGridWidth > 0 && PendingGridHeight > 0;
 }
 
 int32 UVoxelWorldManager::GetChunkSizeInVoxels() const
@@ -178,8 +283,8 @@ int32 UVoxelWorldManager::GetChunkSizeInVoxels() const
 int32 UVoxelWorldManager::ComputeChunkBaseDepthVoxels(const FVoxelBiomeProfile& Profile) const
 {
     const float SafeVoxelSize = (VoxelSize > KINDA_SMALL_NUMBER) ? VoxelSize : 100.0f;
-    const int32 DerivedDepth = FMath::RoundToInt((Profile.NoiseAmplitude * 1.00f) / SafeVoxelSize);
-    return FMath::Max(12, DerivedDepth);
+    const int32 DerivedDepth = FMath::RoundToInt((Profile.NoiseAmplitude * 2.50f) / SafeVoxelSize);
+    return FMath::Max(24, DerivedDepth);
 }
 
 int32 UVoxelWorldManager::GetEffectiveBlockHeightStep() const
@@ -189,12 +294,26 @@ int32 UVoxelWorldManager::GetEffectiveBlockHeightStep() const
 
 float UVoxelWorldManager::GetTerrainCellWorldSize() const
 {
-    return FMath::Max(1.0f, static_cast<float>(GetChunkSizeInVoxels()) * GetRenderVoxelSize());
+    return ChunkWorldSize;
 }
 
-bool UVoxelWorldManager::HasPendingTerrainRequest() const
+// ─── FIX 2: Read actual VoxelWorld.VoxelSize when available; fall back to the
+// configured VoxelSize setting (not the hard-coded 1.0 that was here before).
+// A 1.0 fallback caused every world-space height to be wildly mis-scaled when
+// the actor hadn't been found yet.
+float UVoxelWorldManager::GetRenderVoxelSize() const
 {
-    return PendingWorldTiles.Num() > 0 && PendingGridWidth > 0 && PendingGridHeight > 0;
+    if (const AVoxelWorld* VW = Cast<AVoxelWorld>(VoxelWorldActor))
+    {
+        return FMath::Max(KINDA_SMALL_NUMBER, VW->VoxelSize);
+    }
+
+    return FMath::Max(KINDA_SMALL_NUMBER, VoxelSize);
+}
+
+bool UVoxelWorldManager::ValidateSmoothSDF(const FVoxelBiomeProfile& Profile) const
+{
+    return Profile.bSmoothSDF;
 }
 
 void UVoxelWorldManager::BuildTerrainSnapshot(
@@ -209,7 +328,31 @@ void UVoxelWorldManager::BuildTerrainSnapshot(
     TerrainSnapshot.ChunkSizeVoxels = GetChunkSizeInVoxels();
     TerrainSnapshot.VoxelSize = (VoxelSize > KINDA_SMALL_NUMBER) ? VoxelSize : 100.0f;
 
+    TerrainSnapshot.TerrainSurfaceZOffset = TerrainSurfaceZOffset;
+
+    TerrainSnapshot.BaseHeight = BaseHeight;
+    TerrainSnapshot.HeightMultiplier = HeightMultiplier;
+    TerrainSnapshot.ContinentScale = ContinentScale;
+
+    TerrainSnapshot.DetailScale = DetailScale;
+    TerrainSnapshot.DetailAmplitude = DetailAmplitude;
+    TerrainSnapshot.DetailOctaves = DetailOctaves;
+
+    TerrainSnapshot.bEnableCaves = bEnableCaves;
+    TerrainSnapshot.CaveFrequency = CaveFrequency;
+    TerrainSnapshot.CaveThreshold = CaveThreshold;
+    TerrainSnapshot.CaveSecondOctaveMultiplier = CaveSecondOctaveMultiplier;
+    TerrainSnapshot.CavePrimaryWeight = CavePrimaryWeight;
+    TerrainSnapshot.CaveSecondaryWeight = CaveSecondaryWeight;
+
     TerrainSnapshot.SeaLevelVoxels = SeaLevelVoxels;
+
+    // v2 terrain height fields
+    TerrainSnapshot.WaterThreshold = WaterThreshold;
+    TerrainSnapshot.OceanDepthVoxels = OceanDepthVoxels;
+    TerrainSnapshot.MaxLandHeightVoxels = MaxLandHeightVoxels;
+    TerrainSnapshot.LandElevationExponent = LandElevationExponent;
+
     TerrainSnapshot.bAddGlobalFoundation = bAddGlobalFoundation;
     TerrainSnapshot.GlobalFoundationDepthWorld = GlobalFoundationDepthWorld;
 
@@ -226,7 +369,32 @@ void UVoxelWorldManager::BuildTerrainSnapshot(
     TerrainSnapshot.RiverCarveDepthVoxels = RiverCarveDepthVoxels;
     TerrainSnapshot.RiverSharpness = RiverSharpness;
 
+    TerrainSnapshot.MountainRangeCount = MountainRangeCount;
+    TerrainSnapshot.MountainMinLengthTiles = MountainMinLengthTiles;
+    TerrainSnapshot.MountainMaxLengthTiles = MountainMaxLengthTiles;
+    TerrainSnapshot.MountainMinWidthVoxels = MountainMinWidthVoxels;
+    TerrainSnapshot.MountainMaxWidthVoxels = MountainMaxWidthVoxels;
+    TerrainSnapshot.MountainMinHeightVoxels = MountainMinHeightVoxels;
+    TerrainSnapshot.MountainMaxHeightVoxels = MountainMaxHeightVoxels;
+    TerrainSnapshot.MountainFalloffPower = MountainFalloffPower;
+
+    TerrainSnapshot.SandMaxElevationNormalized = SandMaxElevationNormalized;
+    TerrainSnapshot.DirtMinElevationNormalized = DirtMinElevationNormalized;
+    TerrainSnapshot.RockMinElevationNormalized = RockMinElevationNormalized;
+    TerrainSnapshot.HighRockMinElevationNormalized = HighRockMinElevationNormalized;
+    TerrainSnapshot.SnowMinElevationNormalized = SnowMinElevationNormalized;
+
+    TerrainSnapshot.CoastBandVoxels = CoastBandVoxels;
+    TerrainSnapshot.DirtSlopeThresholdDegrees = DirtSlopeThresholdDegrees;
+    TerrainSnapshot.RockSlopeThresholdDegrees = RockSlopeThresholdDegrees;
+    TerrainSnapshot.CliffSlopeThresholdDegrees = CliffSlopeThresholdDegrees;
+    TerrainSnapshot.NormalizedElevationMaxExtraVoxels = NormalizedElevationMaxExtraVoxels;
+
     TerrainSnapshot.bUseFastTerrainSampling = bUseFastTerrainSampling;
+
+    // ── FIX (Issue 1): Pipe Step03 mountain ranges into the snapshot
+    // so the voxel generator uses real tectonic data.
+    TerrainSnapshot.PipelineMountainRanges = CachedMountainRanges;
 
     TerrainSnapshot.WorldTiles = WorldTiles;
     TerrainSnapshot.CachedTileElevations = CachedTileElevations;
@@ -254,178 +422,102 @@ void UVoxelWorldManager::ClearTerrainSnapshot()
     TerrainSnapshot = FWorldForgeTerrainSnapshot();
 }
 
+// ── FIX: Single helper that builds a complete local snapshot from member
+// variables.  Every function that previously constructed its own partial
+// FWorldForgeTerrainSnapshot should call this instead, eliminating the
+// class of bugs where GridWidth, GridHeight, MountainMaxHeightVoxels, or
+// other fields were accidentally left at zero-default.
+FWorldForgeTerrainSnapshot UVoxelWorldManager::MakeLocalTerrainSnapshot() const
+{
+    FWorldForgeTerrainSnapshot S;
+
+    // Grid dimensions — CRITICAL: these were missing from all local snapshots,
+    // causing SampleMountainHeight to squeeze all ranges into a 1×1 tile area.
+    S.GridWidth = CachedTerrainGridWidth;
+    S.GridHeight = CachedTerrainGridHeight;
+    S.ChunkSizeVoxels = GetChunkSizeInVoxels();
+    S.VoxelSize = (VoxelSize > KINDA_SMALL_NUMBER) ? VoxelSize : 100.0f;
+
+    // Sea / continent
+    S.SeaLevelVoxels = SeaLevelVoxels;
+
+    // v2 terrain height fields
+    S.WaterThreshold = WaterThreshold;
+    S.OceanDepthVoxels = OceanDepthVoxels;
+    S.MaxLandHeightVoxels = MaxLandHeightVoxels;
+    S.LandElevationExponent = LandElevationExponent;
+
+    S.ContinentHeightRangeVoxels = ContinentHeightRangeVoxels;
+    S.ContinentExponent = ContinentExponent;
+    S.ContinentFrequency = ContinentFrequency;
+
+    // Basins
+    S.BasinFrequency = BasinFrequency;
+    S.BasinThreshold = BasinThreshold;
+    S.LakeBasinDepthVoxels = LakeBasinDepthVoxels;
+
+    // Rivers
+    S.RiverFrequency = RiverFrequency;
+    S.RiverThreshold = RiverThreshold;
+    S.RiverCarveDepthVoxels = RiverCarveDepthVoxels;
+    S.RiverSharpness = RiverSharpness;
+
+    // Mountains — CRITICAL: MountainMaxHeightVoxels was missing from the
+    // normalization snapshot, shrinking the denominator and causing the cache
+    // to disagree with the generator's classification.
+    S.MountainRangeCount = MountainRangeCount;
+    S.MountainMinLengthTiles = MountainMinLengthTiles;
+    S.MountainMaxLengthTiles = MountainMaxLengthTiles;
+    S.MountainMinWidthVoxels = MountainMinWidthVoxels;
+    S.MountainMaxWidthVoxels = MountainMaxWidthVoxels;
+    S.MountainMinHeightVoxels = MountainMinHeightVoxels;
+    S.MountainMaxHeightVoxels = MountainMaxHeightVoxels;
+    S.MountainFalloffPower = MountainFalloffPower;
+
+    // Classification thresholds
+    S.SandMaxElevationNormalized = SandMaxElevationNormalized;
+    S.DirtMinElevationNormalized = DirtMinElevationNormalized;
+    S.RockMinElevationNormalized = RockMinElevationNormalized;
+    S.HighRockMinElevationNormalized = HighRockMinElevationNormalized;
+    S.SnowMinElevationNormalized = SnowMinElevationNormalized;
+
+    S.CoastBandVoxels = CoastBandVoxels;
+    S.DirtSlopeThresholdDegrees = DirtSlopeThresholdDegrees;
+    S.RockSlopeThresholdDegrees = RockSlopeThresholdDegrees;
+    S.CliffSlopeThresholdDegrees = CliffSlopeThresholdDegrees;
+    S.NormalizedElevationMaxExtraVoxels = NormalizedElevationMaxExtraVoxels;
+
+    // Detail / caves (needed if snapshot is passed to the generator)
+    S.DetailScale = DetailScale;
+    S.DetailAmplitude = DetailAmplitude;
+    S.DetailOctaves = DetailOctaves;
+
+    S.bEnableCaves = bEnableCaves;
+    S.CaveFrequency = CaveFrequency;
+    S.CaveThreshold = CaveThreshold;
+    S.CaveSecondOctaveMultiplier = CaveSecondOctaveMultiplier;
+    S.CavePrimaryWeight = CavePrimaryWeight;
+    S.CaveSecondaryWeight = CaveSecondaryWeight;
+
+    // Misc
+    S.BaseHeight = BaseHeight;
+    S.HeightMultiplier = HeightMultiplier;
+    S.ContinentScale = ContinentScale;
+    S.bAddGlobalFoundation = bAddGlobalFoundation;
+    S.GlobalFoundationDepthWorld = GlobalFoundationDepthWorld;
+    S.TerrainSurfaceZOffset = TerrainSurfaceZOffset;
+    S.bUseFastTerrainSampling = bUseFastTerrainSampling;
+
+    // ── FIX (Issue 1): Include pipeline mountain ranges in local snapshots
+    // so cache/classification functions agree with the generator.
+    S.PipelineMountainRanges = CachedMountainRanges;
+
+    return S;
+}
+
 bool UVoxelWorldManager::HasTerrainSnapshot() const
 {
     return TerrainSnapshot.IsValid();
-}
-
-FVector UVoxelWorldManager::GridToWorld(FIntPoint GridCell, int32 ZLevel) const
-{
-    const FVector Origin = GetVoxelWorldOrigin();
-    const float RVS = GetRenderVoxelSize();
-
-    const FVector Result(
-        Origin.X + (GridCell.X * RVS),
-        Origin.Y + (GridCell.Y * RVS),
-        Origin.Z + (ZLevel * RVS)
-    );
-
-    if (bLogGridConversions)
-    {
-        UE_LOG(
-            LogTemp,
-            Log,
-            TEXT("[VoxelWorldManager] GridToWorld Grid=(%d,%d,%d) Origin=(%.0f, %.0f, %.0f) -> World=(%.0f, %.0f, %.0f)"),
-            GridCell.X,
-            GridCell.Y,
-            ZLevel,
-            Origin.X,
-            Origin.Y,
-            Origin.Z,
-            Result.X,
-            Result.Y,
-            Result.Z
-        );
-    }
-
-    return Result;
-}
-
-FVector UVoxelWorldManager::TerrainCellToWorld(FIntPoint GridCell, float WorldZ, bool bCenterInCell) const
-{
-    const FVector Origin = GetVoxelWorldOrigin();
-    const float CellSize = GetTerrainCellWorldSize();
-    const float CellOffset = bCenterInCell ? 0.5f : 0.0f;
-
-    const FVector Result(
-        Origin.X + ((static_cast<float>(GridCell.X) + CellOffset) * CellSize),
-        Origin.Y + ((static_cast<float>(GridCell.Y) + CellOffset) * CellSize),
-        Origin.Z + WorldZ
-    );
-
-    if (bLogGridConversions)
-    {
-        UE_LOG(
-            LogTemp,
-            Log,
-            TEXT("[VoxelWorldManager] TerrainCellToWorld Cell=(%d,%d) CellSize=%.1f Center=%d -> World=(%.1f, %.1f, %.1f)"),
-            GridCell.X,
-            GridCell.Y,
-            CellSize,
-            bCenterInCell ? 1 : 0,
-            Result.X,
-            Result.Y,
-            Result.Z
-        );
-    }
-
-    return Result;
-}
-
-FIntVector UVoxelWorldManager::WorldToGrid3D(FVector WorldPosition) const
-{
-    const float RVS = FMath::Max(KINDA_SMALL_NUMBER, GetRenderVoxelSize());
-    const FVector Origin = GetVoxelWorldOrigin();
-    const FVector LocalPosition = WorldPosition - Origin;
-
-    const int32 GridX = FMath::FloorToInt((LocalPosition.X + (RVS * 0.5f)) / RVS);
-    const int32 GridY = FMath::FloorToInt((LocalPosition.Y + (RVS * 0.5f)) / RVS);
-    const int32 GridZ = FMath::FloorToInt((LocalPosition.Z + (RVS * 0.5f)) / RVS);
-
-    const FIntVector Result(GridX, GridY, GridZ);
-
-    if (bLogGridConversions)
-    {
-        UE_LOG(
-            LogTemp,
-            Log,
-            TEXT("[VoxelWorldManager] WorldToGrid3D World=(%.1f, %.1f, %.1f) Origin=(%.1f, %.1f, %.1f) Local=(%.1f, %.1f, %.1f) -> Grid=(%d,%d,%d)"),
-            WorldPosition.X,
-            WorldPosition.Y,
-            WorldPosition.Z,
-            Origin.X,
-            Origin.Y,
-            Origin.Z,
-            LocalPosition.X,
-            LocalPosition.Y,
-            LocalPosition.Z,
-            Result.X,
-            Result.Y,
-            Result.Z
-        );
-    }
-
-    return Result;
-}
-
-FIntPoint UVoxelWorldManager::WorldToGrid(FVector WorldPosition) const
-{
-    const FIntVector Grid3D = WorldToGrid3D(WorldPosition);
-    return FIntPoint(Grid3D.X, Grid3D.Y);
-}
-
-FIntPoint UVoxelWorldManager::WorldToTerrainCell(FVector WorldPosition) const
-{
-    const FVector Origin = GetVoxelWorldOrigin();
-    const float CellSize = GetTerrainCellWorldSize();
-    const FVector LocalPosition = WorldPosition - Origin;
-
-    const int32 CellX = FMath::FloorToInt(LocalPosition.X / CellSize);
-    const int32 CellY = FMath::FloorToInt(LocalPosition.Y / CellSize);
-
-    const FIntPoint Result(CellX, CellY);
-
-    if (bLogGridConversions)
-    {
-        UE_LOG(
-            LogTemp,
-            Log,
-            TEXT("[VoxelWorldManager] WorldToTerrainCell World=(%.1f, %.1f, %.1f) Origin=(%.1f, %.1f, %.1f) Local=(%.1f, %.1f, %.1f) CellSize=%.1f -> Cell=(%d,%d)"),
-            WorldPosition.X,
-            WorldPosition.Y,
-            WorldPosition.Z,
-            Origin.X,
-            Origin.Y,
-            Origin.Z,
-            LocalPosition.X,
-            LocalPosition.Y,
-            LocalPosition.Z,
-            CellSize,
-            Result.X,
-            Result.Y
-        );
-    }
-
-    return Result;
-}
-
-FIntPoint UVoxelWorldManager::VoxelCellToChunkCell(FIntPoint VoxelCell) const
-{
-    const int32 ChunkSizeVoxels = GetChunkSizeInVoxels();
-    if (ChunkSizeVoxels <= 0)
-    {
-        return VoxelCell;
-    }
-
-    const int32 ChunkX = FMath::FloorToInt(static_cast<float>(VoxelCell.X) / static_cast<float>(ChunkSizeVoxels));
-    const int32 ChunkY = FMath::FloorToInt(static_cast<float>(VoxelCell.Y) / static_cast<float>(ChunkSizeVoxels));
-    return FIntPoint(ChunkX, ChunkY);
-}
-
-bool UVoxelWorldManager::IsVoxelRuntimeReady() const
-{
-    if (!VoxelWorldActor)
-    {
-        return false;
-    }
-
-    const AVoxelWorld* VoxelWorld = Cast<AVoxelWorld>(VoxelWorldActor);
-    if (!VoxelWorld)
-    {
-        return false;
-    }
-
-    return VoxelWorld->IsCreated();
 }
 
 void UVoxelWorldManager::ApplyBiomeProfileToChunk(FIntPoint ChunkCoord, const FVoxelBiomeProfile& Profile)
@@ -488,6 +580,1694 @@ void UVoxelWorldManager::ApplyBiomeProfileToChunk(FIntPoint ChunkCoord, const FV
     OnBiomeChunkRequested(ChunkCoord, Profile);
 }
 
+void UVoxelWorldManager::NotifyVoxelDig(FVector WorldPosition, int32 AgentID)
+{
+    UE_LOG(
+        LogTemp,
+        Verbose,
+        TEXT("[VoxelWorldManager] NotifyVoxelDig WorldPosition=(%.1f, %.1f, %.1f) AgentID=%d"),
+        WorldPosition.X,
+        WorldPosition.Y,
+        WorldPosition.Z,
+        AgentID
+    );
+
+    OnVoxelDigged(WorldPosition);
+}
+
+void UVoxelWorldManager::SetPipelineMountainRanges(const TArray<FMountainRange>& InRanges)
+{
+    CachedMountainRanges = InRanges;
+
+    if (bLogTerrainGeneration)
+    {
+        UE_LOG(LogTemp, Log,
+            TEXT("[VoxelWorldManager] Cached %d pipeline mountain ranges for terrain generation."),
+            CachedMountainRanges.Num());
+    }
+}
+
+// ─── FIX 1: Read the VoxelWorld actor's actual world location so all
+// coordinate conversions (GridToWorld, TerrainCellToWorld, WorldToGrid3D, etc.)
+// are correct when the actor is not placed at the scene origin.
+FVector UVoxelWorldManager::GetVoxelWorldOrigin() const
+{
+    if (IsValid(VoxelWorldActor))
+    {
+        return VoxelWorldActor->GetActorLocation();
+    }
+
+    return FVector::ZeroVector;
+}
+
+// ─── [COORDINATE UTILITIES] ──────────────────────────────────
+
+FVector UVoxelWorldManager::GridToWorld(FIntPoint GridCell, int32 ZLevel) const
+{
+    const FVector Origin = GetVoxelWorldOrigin();
+    const float RVS = GetRenderVoxelSize();
+
+    const FVector Result(
+        Origin.X + (GridCell.X * RVS),
+        Origin.Y + (GridCell.Y * RVS),
+        Origin.Z + (ZLevel * RVS)
+    );
+
+    if (bLogGridConversions)
+    {
+        UE_LOG(
+            LogTemp,
+            Log,
+            TEXT("[VoxelWorldManager] GridToWorld Grid=(%d,%d,%d) Origin=(%.0f, %.0f, %.0f) -> World=(%.0f, %.0f, %.0f)"),
+            GridCell.X,
+            GridCell.Y,
+            ZLevel,
+            Origin.X,
+            Origin.Y,
+            Origin.Z,
+            Result.X,
+            Result.Y,
+            Result.Z
+        );
+    }
+
+    return Result;
+}
+
+FVector UVoxelWorldManager::TerrainCellToWorld(
+    FIntPoint GridCell,
+    float WorldZ,
+    bool bCenterInCell) const
+{
+    const float CellSize = GetTerrainCellWorldSize();
+    const FVector Origin = GetVoxelWorldOrigin();
+
+    const float HalfGridWidth = static_cast<float>(CachedTerrainGridWidth) * 0.5f;
+    const float HalfGridHeight = static_cast<float>(CachedTerrainGridHeight) * 0.5f;
+
+    float X = (static_cast<float>(GridCell.X) - HalfGridWidth) * CellSize;
+    float Y = (static_cast<float>(GridCell.Y) - HalfGridHeight) * CellSize;
+
+    if (bCenterInCell)
+    {
+        X += CellSize * 0.5f;
+        Y += CellSize * 0.5f;
+    }
+
+    return FVector(
+        Origin.X + X,
+        Origin.Y + Y,
+        WorldZ
+    );
+}
+
+FIntVector UVoxelWorldManager::WorldToGrid3D(FVector WorldPosition) const
+{
+    const float RVS = FMath::Max(KINDA_SMALL_NUMBER, GetRenderVoxelSize());
+    const FVector Origin = GetVoxelWorldOrigin();
+    const FVector LocalPosition = WorldPosition - Origin;
+
+    const int32 GridX = FMath::FloorToInt((LocalPosition.X + (RVS * 0.5f)) / RVS);
+    const int32 GridY = FMath::FloorToInt((LocalPosition.Y + (RVS * 0.5f)) / RVS);
+    const int32 GridZ = FMath::FloorToInt((LocalPosition.Z + (RVS * 0.5f)) / RVS);
+
+    const FIntVector Result(GridX, GridY, GridZ);
+
+    if (bLogGridConversions)
+    {
+        UE_LOG(
+            LogTemp,
+            Log,
+            TEXT("[VoxelWorldManager] WorldToGrid3D World=(%.1f, %.1f, %.1f) -> Grid=(%d,%d,%d)"),
+            WorldPosition.X,
+            WorldPosition.Y,
+            WorldPosition.Z,
+            Result.X,
+            Result.Y,
+            Result.Z
+        );
+    }
+
+    return Result;
+}
+
+FIntPoint UVoxelWorldManager::WorldToGrid(FVector WorldPosition) const
+{
+    const FIntVector Grid3D = WorldToGrid3D(WorldPosition);
+    return FIntPoint(Grid3D.X, Grid3D.Y);
+}
+
+FIntPoint UVoxelWorldManager::WorldToTerrainCell(FVector WorldPosition) const
+{
+    const FVector Origin = GetVoxelWorldOrigin();
+    const float CellSize = GetTerrainCellWorldSize();
+    const FVector LocalPosition = WorldPosition - Origin;
+
+    const float HalfGridWidth = static_cast<float>(CachedTerrainGridWidth) * 0.5f;
+    const float HalfGridHeight = static_cast<float>(CachedTerrainGridHeight) * 0.5f;
+
+    const int32 CellX = FMath::FloorToInt(LocalPosition.X / CellSize + HalfGridWidth);
+    const int32 CellY = FMath::FloorToInt(LocalPosition.Y / CellSize + HalfGridHeight);
+
+    const FIntPoint Result(CellX, CellY);
+
+    if (bLogGridConversions)
+    {
+        UE_LOG(
+            LogTemp,
+            Log,
+            TEXT("[VoxelWorldManager] WorldToTerrainCell World=(%.1f, %.1f, %.1f) CellSize=%.1f HalfGrid=(%.1f, %.1f) -> Cell=(%d,%d)"),
+            WorldPosition.X,
+            WorldPosition.Y,
+            WorldPosition.Z,
+            CellSize,
+            HalfGridWidth,
+            HalfGridHeight,
+            Result.X,
+            Result.Y
+        );
+    }
+
+    return Result;
+}
+
+FIntPoint UVoxelWorldManager::VoxelCellToChunkCell(FIntPoint VoxelCell) const
+{
+    const int32 ChunkSizeVoxels = GetChunkSizeInVoxels();
+    if (ChunkSizeVoxels <= 0)
+    {
+        return VoxelCell;
+    }
+
+    const float HalfGridX = static_cast<float>(CachedTerrainGridWidth) * 0.5f;
+    const float HalfGridY = static_cast<float>(CachedTerrainGridHeight) * 0.5f;
+
+    const int32 ChunkX = FMath::FloorToInt(
+        (static_cast<float>(VoxelCell.X) / static_cast<float>(ChunkSizeVoxels)) + HalfGridX
+    );
+
+    const int32 ChunkY = FMath::FloorToInt(
+        (static_cast<float>(VoxelCell.Y) / static_cast<float>(ChunkSizeVoxels)) + HalfGridY
+    );
+
+    return FIntPoint(ChunkX, ChunkY);
+}
+
+// ─── [NOISE MATH] ────────────────────────────────────────────
+
+const int32 UVoxelWorldManager::PermutationTable[512] = {
+    151,160,137,91,90,15,131,13,201,95,96,53,194,233,7,225,
+    140,36,103,30,69,142,8,99,37,240,21,10,23,190,6,148,
+    247,120,234,75,0,26,197,62,94,252,219,203,117,35,11,32,
+    57,177,33,88,237,149,56,87,174,20,125,136,171,168,68,175,
+    74,165,71,134,139,48,27,166,77,146,158,231,83,111,229,122,
+    60,211,133,230,220,105,92,41,55,46,245,40,244,102,143,54,
+    65,25,63,161,1,216,80,73,209,76,132,187,208,89,18,169,
+    200,196,135,130,116,188,159,86,164,100,109,198,173,186,3,64,
+    52,217,226,250,124,123,5,202,38,147,118,126,255,82,85,212,
+    207,206,59,227,47,16,58,17,182,189,28,42,223,183,170,213,
+    119,248,152,2,44,154,163,70,221,153,101,155,167,43,172,9,
+    129,22,39,253,19,98,108,110,79,113,224,232,178,185,112,104,
+    218,246,97,228,251,34,242,193,238,210,144,12,191,179,162,241,
+    81,51,145,235,249,14,239,107,49,192,214,31,181,199,106,157,
+    184,84,204,176,115,121,50,45,127,4,150,254,138,236,205,93,
+    222,114,67,29,24,72,243,141,128,195,78,66,215,61,156,180,
+    151,160,137,91,90,15,131,13,201,95,96,53,194,233,7,225,
+    140,36,103,30,69,142,8,99,37,240,21,10,23,190,6,148,
+    247,120,234,75,0,26,197,62,94,252,219,203,117,35,11,32,
+    57,177,33,88,237,149,56,87,174,20,125,136,171,168,68,175,
+    74,165,71,134,139,48,27,166,77,146,158,231,83,111,229,122,
+    60,211,133,230,220,105,92,41,55,46,245,40,244,102,143,54,
+    65,25,63,161,1,216,80,73,209,76,132,187,208,89,18,169,
+    200,196,135,130,116,188,159,86,164,100,109,198,173,186,3,64,
+    52,217,226,250,124,123,5,202,38,147,118,126,255,82,85,212,
+    207,206,59,227,47,16,58,17,182,189,28,42,223,183,170,213,
+    119,248,152,2,44,154,163,70,221,153,101,155,167,43,172,9,
+    129,22,39,253,19,98,108,110,79,113,224,232,178,185,112,104,
+    218,246,97,228,251,34,242,193,238,210,144,12,191,179,162,241,
+    81,51,145,235,249,14,239,107,49,192,214,31,181,199,106,157,
+    184,84,204,176,115,121,50,45,127,4,150,254,138,236,205,93,
+    222,114,67,29,24,72,243,141,128,195,78,66,215,61,156,180
+};
+
+float UVoxelWorldManager::Fade(float T)
+{
+    return T * T * T * (T * (T * 6.0f - 15.0f) + 10.0f);
+}
+
+float UVoxelWorldManager::Lerp(float T, float A, float B)
+{
+    return A + T * (B - A);
+}
+
+float UVoxelWorldManager::Grad(int32 Hash, float X, float Y)
+{
+    const int32 H = Hash & 3;
+    const float U = (H < 2) ? X : -X;
+    const float V = (H == 0 || H == 3) ? Y : -Y;
+    return U + V;
+}
+
+float UVoxelWorldManager::PerlinNoise2D(float X, float Y)
+{
+    const int32 Xi = static_cast<int32>(FMath::FloorToFloat(X)) & 255;
+    const int32 Yi = static_cast<int32>(FMath::FloorToFloat(Y)) & 255;
+
+    const float Xf = X - FMath::FloorToFloat(X);
+    const float Yf = Y - FMath::FloorToFloat(Y);
+
+    const float U = Fade(Xf);
+    const float V = Fade(Yf);
+
+    const int32 AA = PermutationTable[PermutationTable[Xi] + Yi];
+    const int32 AB = PermutationTable[PermutationTable[Xi] + Yi + 1];
+    const int32 BA = PermutationTable[PermutationTable[Xi + 1] + Yi];
+    const int32 BB = PermutationTable[PermutationTable[Xi + 1] + Yi + 1];
+
+    const float X1 = Lerp(U, Grad(AA, Xf, Yf), Grad(BA, Xf - 1.0f, Yf));
+    const float X2 = Lerp(U, Grad(AB, Xf, Yf - 1.0f), Grad(BB, Xf - 1.0f, Yf - 1.0f));
+
+    return Lerp(V, X1, X2);
+}
+
+float UVoxelWorldManager::FractalNoise2D(float X, float Y, const FPerlinOctaveSettings& Settings)
+{
+    const int32 ClampedOctaves = FMath::Clamp(Settings.OctaveCount, 1, 8);
+    const float SafeFreq = FMath::Max(0.0001f, Settings.BaseFrequency);
+    const float SafeAmp = FMath::Max(0.1f, Settings.BaseAmplitude);
+
+    float Total = 0.0f;
+    float Frequency = SafeFreq;
+    float Amplitude = 1.0f;
+    float MaxAmplitude = 0.0f;
+
+    for (int32 i = 0; i < ClampedOctaves; ++i)
+    {
+        const float OffsetX = static_cast<float>(Settings.SeedOffset * 17 + i * 31);
+        const float OffsetY = static_cast<float>(Settings.SeedOffset * 13 + i * 47);
+
+        Total += PerlinNoise2D(
+            (X + OffsetX) * Frequency,
+            (Y + OffsetY) * Frequency
+        ) * Amplitude;
+
+        MaxAmplitude += Amplitude;
+        Frequency *= Settings.Lacunarity;
+        Amplitude *= Settings.Persistence;
+    }
+
+    const float Normalized = Total / FMath::Max(0.001f, MaxAmplitude);
+    return Normalized * SafeAmp;
+}
+
+FPerlinOctaveSettings UVoxelWorldManager::GetOctaveSettingsForProfile(const FVoxelBiomeProfile& Profile) const
+{
+    FPerlinOctaveSettings Settings = DefaultPerlinSettings;
+
+    if (Profile.NoiseFrequency > KINDA_SMALL_NUMBER)
+    {
+        Settings.BaseFrequency = Profile.NoiseFrequency;
+    }
+
+    if (Profile.NoiseAmplitude > KINDA_SMALL_NUMBER)
+    {
+        const float SafeVoxelSize = (VoxelSize > KINDA_SMALL_NUMBER) ? VoxelSize : 100.0f;
+        Settings.BaseAmplitude = FMath::Max(0.5f, Profile.NoiseAmplitude / SafeVoxelSize);
+    }
+
+    if (Profile.OctaveCount > 0)
+    {
+        Settings.OctaveCount = FMath::Clamp(Profile.OctaveCount, 1, 8);
+    }
+
+    return Settings;
+}
+
+int32 UVoxelWorldManager::ComputeSmoothSurfaceHeightAtVoxel(
+    int32 VoxelX,
+    int32 VoxelY,
+    const FVoxelBiomeProfile& Profile
+) const
+{
+    const FPerlinOctaveSettings Settings = GetOctaveSettingsForProfile(Profile);
+
+    const float Height = FractalNoise2D(
+        static_cast<float>(VoxelX),
+        static_cast<float>(VoxelY),
+        Settings
+    );
+
+    const float FinalHeight = FMath::Clamp(Height, -96.0f, 96.0f);
+    return FMath::RoundToInt(FinalHeight);
+}
+
+float UVoxelWorldManager::ComputeDetailNoiseHeightBilinear(
+    int32 MinX,
+    int32 MinY,
+    int32 MaxX,
+    int32 MaxY,
+    int32 X,
+    int32 Y,
+    const FVoxelBiomeProfile& Profile
+) const
+{
+    const float FX = static_cast<float>(X - MinX) / static_cast<float>(FMath::Max(1, MaxX - MinX));
+    const float FY = static_cast<float>(Y - MinY) / static_cast<float>(FMath::Max(1, MaxY - MinY));
+
+    const float H00 = static_cast<float>(ComputeSmoothSurfaceHeightAtVoxel(MinX, MinY, Profile));
+    const float H10 = static_cast<float>(ComputeSmoothSurfaceHeightAtVoxel(MaxX, MinY, Profile));
+    const float H01 = static_cast<float>(ComputeSmoothSurfaceHeightAtVoxel(MinX, MaxY, Profile));
+    const float H11 = static_cast<float>(ComputeSmoothSurfaceHeightAtVoxel(MaxX, MaxY, Profile));
+
+    const float X0 = FMath::Lerp(H00, H10, FX);
+    const float X1 = FMath::Lerp(H01, H11, FX);
+    return FMath::Lerp(X0, X1, FY);
+}
+
+// ─── [TERRAIN CACHE] ─────────────────────────────────────────
+
+void UVoxelWorldManager::CacheTerrainMetadata(
+    const TArray<FWorldTileData>& WorldTiles,
+    int32 GridWidth,
+    int32 GridHeight)
+{
+    CachedTerrainGridWidth = GridWidth;
+    CachedTerrainGridHeight = GridHeight;
+
+    CachedSurfaceHeightsVoxels.SetNumZeroed(GridWidth * GridHeight);
+    CachedVoxelProfiles.SetNum(GridWidth * GridHeight);
+    CachedBiomeTags.SetNum(GridWidth * GridHeight);
+    CachedTileElevations.SetNumZeroed(GridWidth * GridHeight);
+
+    // Pass 1: cache source data
+    for (int32 Y = 0; Y < GridHeight; ++Y)
+    {
+        for (int32 X = 0; X < GridWidth; ++X)
+        {
+            const int32 Index = (Y * GridWidth) + X;
+            const FWorldTileData& Tile = WorldTiles[Index];
+
+            CachedTileElevations[Index] = FMath::Clamp(Tile.Elevation, 0.0f, 1.0f);
+            CachedVoxelProfiles[Index] = Tile.VoxelProfile;
+            CachedBiomeTags[Index] = Tile.BiomeType;
+        }
+    }
+
+    // Pass 2: compute heights using the v2 single-path formula.
+    // Tile.Elevation (0–1) → voxel height via ElevationToVoxelHeight.
+    // No separate mountain/basin/river height layers.
+    const FWorldForgeTerrainSnapshot CacheSnapshot = MakeLocalTerrainSnapshot();
+
+    for (int32 Y = 0; Y < GridHeight; ++Y)
+    {
+        for (int32 X = 0; X < GridWidth; ++X)
+        {
+            const int32 Index = (Y * GridWidth) + X;
+
+            CachedSurfaceHeightsVoxels[Index] =
+                FWorldForgeTerrainMath::ComputeSurfaceHeightFromTileElevation(
+                    CachedTileElevations[Index],
+                    CacheSnapshot
+                );
+        }
+    }
+
+    if (bLogTerrainGeneration)
+    {
+        UE_LOG(
+            LogTemp,
+            Log,
+            TEXT("[VoxelWorldManager] Cached terrain metadata. Cells=%d Grid=%dx%d"),
+            CachedSurfaceHeightsVoxels.Num(),
+            CachedTerrainGridWidth,
+            CachedTerrainGridHeight
+        );
+    }
+}
+
+void UVoxelWorldManager::ClearTerrainCache()
+{
+    CachedSurfaceHeightsVoxels.Reset();
+    CachedVoxelProfiles.Reset();
+    CachedBiomeTags.Reset();
+    CachedTileElevations.Reset();
+    CachedMountainRanges.Reset();
+
+    CachedTerrainGridWidth = 0;
+    CachedTerrainGridHeight = 0;
+
+    bTerrainReadyBroadcasted = false;
+}
+
+bool UVoxelWorldManager::IsValidTerrainCell(FIntPoint GridCell) const
+{
+    return
+        GridCell.X >= 0 &&
+        GridCell.Y >= 0 &&
+        GridCell.X < CachedTerrainGridWidth &&
+        GridCell.Y < CachedTerrainGridHeight;
+}
+
+FIntPoint UVoxelWorldManager::ClampTerrainCellToBounds(FIntPoint GridCell) const
+{
+    if (CachedTerrainGridWidth <= 0 || CachedTerrainGridHeight <= 0)
+    {
+        return GridCell;
+    }
+
+    return FIntPoint(
+        FMath::Clamp(GridCell.X, 0, CachedTerrainGridWidth - 1),
+        FMath::Clamp(GridCell.Y, 0, CachedTerrainGridHeight - 1)
+    );
+}
+
+int32 UVoxelWorldManager::TerrainIndex(FIntPoint GridCell) const
+{
+    return (GridCell.Y * CachedTerrainGridWidth) + GridCell.X;
+}
+
+bool UVoxelWorldManager::HasCachedTerrainData() const
+{
+    return
+        CachedTerrainGridWidth > 0 &&
+        CachedTerrainGridHeight > 0 &&
+        CachedSurfaceHeightsVoxels.Num() == (CachedTerrainGridWidth * CachedTerrainGridHeight) &&
+        CachedVoxelProfiles.Num() == (CachedTerrainGridWidth * CachedTerrainGridHeight) &&
+        CachedBiomeTags.Num() == (CachedTerrainGridWidth * CachedTerrainGridHeight) &&
+        CachedTileElevations.Num() == (CachedTerrainGridWidth * CachedTerrainGridHeight);
+}
+
+bool UVoxelWorldManager::IsSpawnableTerrainCell(FIntPoint GridCell) const
+{
+    if (!HasCachedTerrainData() || !IsValidTerrainCell(GridCell))
+    {
+        return false;
+    }
+
+    const FIntPoint ClampedCell = ClampTerrainCellToBounds(GridCell);
+    const int32 Index = TerrainIndex(ClampedCell);
+
+    if (!CachedSurfaceHeightsVoxels.IsValidIndex(Index) ||
+        !CachedBiomeTags.IsValidIndex(Index))
+    {
+        return false;
+    }
+
+    const FGameplayTag& Biome = CachedBiomeTags[Index];
+
+    const FGameplayTag OceanTag = GetBiomeOceanTag();
+    const FGameplayTag SeaTag = GetBiomeSeaTag();
+    const FGameplayTag LakeTag = GetBiomeLakeTag();
+    const FGameplayTag WaterTag = GetBiomeWaterTag();
+    const FGameplayTag DeepOceanTag = GetBiomeDeepOceanTag();
+    const FGameplayTag LavaTag = GetBiomeLavaTag();
+
+    // Hard reject only true water / lava biomes.
+    if (Biome.MatchesTag(OceanTag) ||
+        Biome.MatchesTag(SeaTag) ||
+        Biome.MatchesTag(LakeTag) ||
+        Biome.MatchesTag(WaterTag) ||
+        Biome.MatchesTag(DeepOceanTag) ||
+        Biome.MatchesTag(LavaTag))
+    {
+        return false;
+    }
+
+    EWorldForgeTerrainType TerrainType = EWorldForgeTerrainType::Grass;
+    if (!GetTerrainTypeAtCell(ClampedCell, TerrainType))
+    {
+        return false;
+    }
+
+    // Reject only actual water terrain.
+    if (TerrainType == EWorldForgeTerrainType::Water)
+    {
+        return false;
+    }
+
+    const float SurfaceHeightVoxels = CachedSurfaceHeightsVoxels[Index];
+
+    // Must be above sea level, but dry sand/coast is allowed.
+    if (SurfaceHeightVoxels <= static_cast<float>(SeaLevelVoxels))
+    {
+        return false;
+    }
+
+    return true;
+}
+
+bool UVoxelWorldManager::FindNearestSpawnableTerrainCell(
+    FIntPoint StartCell,
+    FIntPoint& OutCell,
+    int32 MaxSearchRadius) const
+{
+    if (!HasCachedTerrainData())
+    {
+        return false;
+    }
+
+    StartCell = ClampTerrainCellToBounds(StartCell);
+
+    if (IsSpawnableTerrainCell(StartCell))
+    {
+        OutCell = StartCell;
+        return true;
+    }
+
+    const int32 RadiusMax = FMath::Max(1, MaxSearchRadius);
+
+    for (int32 Radius = 1; Radius <= RadiusMax; ++Radius)
+    {
+        const int32 MinY = FMath::Max(0, StartCell.Y - Radius);
+        const int32 MaxY = FMath::Min(CachedTerrainGridHeight - 1, StartCell.Y + Radius);
+        const int32 MinX = FMath::Max(0, StartCell.X - Radius);
+        const int32 MaxX = FMath::Min(CachedTerrainGridWidth - 1, StartCell.X + Radius);
+
+        for (int32 Y = MinY; Y <= MaxY; ++Y)
+        {
+            for (int32 X = MinX; X <= MaxX; ++X)
+            {
+                const bool bOnRing =
+                    (X == MinX) ||
+                    (X == MaxX) ||
+                    (Y == MinY) ||
+                    (Y == MaxY);
+
+                if (!bOnRing)
+                {
+                    continue;
+                }
+
+                const FIntPoint Candidate(X, Y);
+                if (IsSpawnableTerrainCell(Candidate))
+                {
+                    OutCell = Candidate;
+                    return true;
+                }
+            }
+        }
+    }
+
+    return false;
+}
+
+// ─── [TERRAIN HEIGHTS] ───────────────────────────────────────
+
+int32 UVoxelWorldManager::ComputeRiverCarveDepthVoxels(FIntPoint ChunkCoord) const
+{
+    const float SampleX = static_cast<float>(ChunkCoord.X);
+    const float SampleY = static_cast<float>(ChunkCoord.Y);
+
+    const float RiverNoise = PerlinNoise2D(
+        SampleX * RiverFrequency + 1703.0f,
+        SampleY * RiverFrequency + 811.0f
+    );
+
+    const float RiverMask = 1.0f - FMath::Abs(RiverNoise);
+
+    if (RiverMask < RiverThreshold)
+    {
+        return 0;
+    }
+
+    const float RiverAlpha = (RiverMask - RiverThreshold) / FMath::Max(0.001f, 1.0f - RiverThreshold);
+    const float ShapedRiver = FMath::Pow(
+        FMath::Clamp(RiverAlpha, 0.0f, 1.0f),
+        FMath::Max(0.1f, RiverSharpness)
+    );
+
+    return FMath::RoundToInt(ShapedRiver * static_cast<float>(RiverCarveDepthVoxels));
+}
+
+// ── v2: Single-path height from tile elevation.
+// No position-dependent mountain/basin/river noise — just elevation → height.
+
+int32 UVoxelWorldManager::ComputeChunkSurfaceHeightVoxels(
+    FIntPoint ChunkCoord,
+    const FVoxelBiomeProfile& Profile,
+    float TileElevation
+) const
+{
+    const FWorldForgeTerrainSnapshot Snapshot = MakeLocalTerrainSnapshot();
+
+    const float SurfaceHeightF =
+        FWorldForgeTerrainMath::ComputeSurfaceHeightFromTileElevation(
+            TileElevation,
+            Snapshot
+        );
+
+    return FMath::RoundToInt(SurfaceHeightF);
+}
+
+// ─── FIX 6: Rewritten to use the same tile-elevation formula as ComputeChunkSurfaceHeightVoxels
+// (and by extension the voxel generator). The old version duplicated the independent continent
+// noise logic from the pre-fix generator, creating a third inconsistent terrain brain.
+// This version bilinearly interpolates tile elevation at the precise voxel XY coordinate,
+// producing sub-chunk resolution that is still consistent with the generator output.
+
+bool UVoxelWorldManager::TryGetTerrainSurfaceVoxelZ(FIntPoint VoxelXY, int32& OutVoxelZ) const
+{
+    OutVoxelZ = 0;
+
+    if (!HasCachedTerrainData())
+    {
+        return false;
+    }
+
+    const int32 ChunkSize = GetChunkSizeInVoxels();
+
+    const float HalfGridX = static_cast<float>(CachedTerrainGridWidth) * 0.5f;
+    const float HalfGridY = static_cast<float>(CachedTerrainGridHeight) * 0.5f;
+
+    const float CellX = (static_cast<float>(VoxelXY.X) / static_cast<float>(ChunkSize)) + HalfGridX;
+    const float CellY = (static_cast<float>(VoxelXY.Y) / static_cast<float>(ChunkSize)) + HalfGridY;
+
+    const int32 X0 = FMath::FloorToInt(CellX);
+    const int32 Y0 = FMath::FloorToInt(CellY);
+    const int32 X1 = X0 + 1;
+    const int32 Y1 = Y0 + 1;
+
+    const float FX = CellX - static_cast<float>(X0);
+    const float FY = CellY - static_cast<float>(Y0);
+
+    const FIntPoint C00 = ClampTerrainCellToBounds(FIntPoint(X0, Y0));
+    const FIntPoint C10 = ClampTerrainCellToBounds(FIntPoint(X1, Y0));
+    const FIntPoint C01 = ClampTerrainCellToBounds(FIntPoint(X0, Y1));
+    const FIntPoint C11 = ClampTerrainCellToBounds(FIntPoint(X1, Y1));
+
+    const int32 I00 = TerrainIndex(C00);
+    const int32 I10 = TerrainIndex(C10);
+    const int32 I01 = TerrainIndex(C01);
+    const int32 I11 = TerrainIndex(C11);
+
+    const float E00 = CachedTileElevations.IsValidIndex(I00) ? CachedTileElevations[I00] : 0.0f;
+    const float E10 = CachedTileElevations.IsValidIndex(I10) ? CachedTileElevations[I10] : E00;
+    const float E01 = CachedTileElevations.IsValidIndex(I01) ? CachedTileElevations[I01] : E00;
+    const float E11 = CachedTileElevations.IsValidIndex(I11) ? CachedTileElevations[I11] : E00;
+
+    const float TileElevation01 = FMath::Lerp(
+        FMath::Lerp(E00, E10, FX),
+        FMath::Lerp(E01, E11, FX),
+        FY
+    );
+
+    // ── v2: Use the unified single-path formula.
+    const FWorldForgeTerrainSnapshot Snapshot = MakeLocalTerrainSnapshot();
+
+    const float SurfaceHeightF =
+        FWorldForgeTerrainMath::ComputeSurfaceHeightFromTileElevation(
+            TileElevation01,
+            Snapshot
+        );
+
+    OutVoxelZ = FMath::RoundToInt(SurfaceHeightF);
+    return true;
+}
+
+// ─── [TERRAIN ANALYSIS] ──────────────────────────────────────
+
+// ─── FIX 7: MaxElevation now correctly reflects the actual range that
+// ComputeChunkSurfaceHeightVoxels can produce after Fix 5. The old formula
+// added 54 extra voxels (24+18+12) that were artefacts of the old local noise
+// height contributions — those no longer exist in the cache. Using a ceiling
+// that is too high compresses all the terrain type thresholds downward, causing
+// rock and snow to never appear on the map even for high-elevation tiles.
+float UVoxelWorldManager::GetNormalizedElevationForTerrainCell(FIntPoint GridCell) const
+{
+    if (!IsValidTerrainCell(GridCell))
+    {
+        return 0.0f;
+    }
+
+    const int32 Index = TerrainIndex(GridCell);
+    if (!CachedSurfaceHeightsVoxels.IsValidIndex(Index))
+    {
+        return 0.0f;
+    }
+
+    // ── v2: Use the single-path normalization.
+    // NormLandElev = (height - SeaLevel) / MaxLandHeightVoxels, clamped 0–1.
+    const FWorldForgeTerrainSnapshot Snapshot = MakeLocalTerrainSnapshot();
+
+    return FWorldForgeTerrainMath::ComputeNormalizedLandElevation(
+        CachedSurfaceHeightsVoxels[Index],
+        Snapshot
+    );
+}
+
+float UVoxelWorldManager::ComputeTerrainSlopeDegreesInternal(FIntPoint GridCell) const
+{
+    if (!HasCachedTerrainData() || !IsValidTerrainCell(GridCell))
+    {
+        return 0.0f;
+    }
+
+    const FIntPoint Center = ClampTerrainCellToBounds(GridCell);
+    const FIntPoint North = ClampTerrainCellToBounds(FIntPoint(Center.X, Center.Y - 1));
+    const FIntPoint South = ClampTerrainCellToBounds(FIntPoint(Center.X, Center.Y + 1));
+    const FIntPoint West = ClampTerrainCellToBounds(FIntPoint(Center.X - 1, Center.Y));
+    const FIntPoint East = ClampTerrainCellToBounds(FIntPoint(Center.X + 1, Center.Y));
+
+    const int32 NorthIndex = TerrainIndex(North);
+    const int32 SouthIndex = TerrainIndex(South);
+    const int32 WestIndex = TerrainIndex(West);
+    const int32 EastIndex = TerrainIndex(East);
+
+    if (!CachedSurfaceHeightsVoxels.IsValidIndex(NorthIndex) ||
+        !CachedSurfaceHeightsVoxels.IsValidIndex(SouthIndex) ||
+        !CachedSurfaceHeightsVoxels.IsValidIndex(WestIndex) ||
+        !CachedSurfaceHeightsVoxels.IsValidIndex(EastIndex))
+    {
+        return 0.0f;
+    }
+
+    const float RVS = GetRenderVoxelSize();
+    const float NorthHeightWorld = CachedSurfaceHeightsVoxels[NorthIndex] * RVS;
+    const float SouthHeightWorld = CachedSurfaceHeightsVoxels[SouthIndex] * RVS;
+    const float WestHeightWorld = CachedSurfaceHeightsVoxels[WestIndex] * RVS;
+    const float EastHeightWorld = CachedSurfaceHeightsVoxels[EastIndex] * RVS;
+
+    const float CellRunWorld = GetTerrainCellWorldSize();
+    if (CellRunWorld <= KINDA_SMALL_NUMBER)
+    {
+        return 0.0f;
+    }
+
+    const float GradientX = (EastHeightWorld - WestHeightWorld) / (2.0f * CellRunWorld);
+    const float GradientY = (SouthHeightWorld - NorthHeightWorld) / (2.0f * CellRunWorld);
+
+    const float GradientMagnitude = FMath::Sqrt((GradientX * GradientX) + (GradientY * GradientY));
+    return FMath::RadiansToDegrees(FMath::Atan(GradientMagnitude));
+}
+
+EWorldForgeTerrainType UVoxelWorldManager::ClassifyTerrainCellInternal(FIntPoint GridCell) const
+{
+    if (!HasCachedTerrainData() || !IsValidTerrainCell(GridCell))
+    {
+        return EWorldForgeTerrainType::Grass;
+    }
+
+    const FIntPoint ClampedCell = ClampTerrainCellToBounds(GridCell);
+    const int32 Index = TerrainIndex(ClampedCell);
+
+    if (!CachedSurfaceHeightsVoxels.IsValidIndex(Index))
+    {
+        return EWorldForgeTerrainType::Grass;
+    }
+
+    const float SurfaceHeightVoxels = CachedSurfaceHeightsVoxels[Index];
+    const float NormalizedElevation = GetNormalizedElevationForTerrainCell(ClampedCell);
+    const float SlopeDegrees = ComputeTerrainSlopeDegreesInternal(ClampedCell);
+
+    const float CoastBandLocal = FMath::Max(0.0f, CoastBandVoxels);
+    const float SandMaxElevNormLocal = FMath::Clamp(SandMaxElevationNormalized, 0.0f, 1.0f);
+    const float DirtMinElevNormLocal = FMath::Clamp(DirtMinElevationNormalized, 0.0f, 1.0f);
+    const float RockMinElevNormLocal = FMath::Clamp(RockMinElevationNormalized, 0.0f, 1.0f);
+    const float HighRockMinElevNormLocal = FMath::Clamp(HighRockMinElevationNormalized, 0.0f, 1.0f);
+    const float SnowMinElevNormLocal = FMath::Clamp(SnowMinElevationNormalized, 0.0f, 1.0f);
+
+    const float DirtSlopeDegLocal = FMath::Max(0.0f, DirtSlopeThresholdDegrees);
+    const float RockSlopeDegLocal = FMath::Max(0.0f, RockSlopeThresholdDegrees);
+    const float CliffSlopeDegLocal = FMath::Max(0.0f, CliffSlopeThresholdDegrees);
+
+    const FGameplayTag& BiomeTag = CachedBiomeTags.IsValidIndex(Index)
+        ? CachedBiomeTags[Index]
+        : FGameplayTag::EmptyTag;
+
+    const bool bTaggedAsWater =
+        BiomeTag.MatchesTag(GetBiomeOceanTag()) ||
+        BiomeTag.MatchesTag(GetBiomeDeepOceanTag()) ||
+        BiomeTag.MatchesTag(GetBiomeSeaTag()) ||
+        BiomeTag.MatchesTag(GetBiomeLakeTag()) ||
+        BiomeTag.MatchesTag(GetBiomeWaterTag());
+
+    const bool bBelowSeaLevel = SurfaceHeightVoxels <= static_cast<float>(SeaLevelVoxels);
+
+    if (bTaggedAsWater || bBelowSeaLevel)
+    {
+        return EWorldForgeTerrainType::Water;
+    }
+
+    const bool bNearSeaLevel =
+        SurfaceHeightVoxels <= (static_cast<float>(SeaLevelVoxels) + CoastBandLocal);
+
+    if (bNearSeaLevel || NormalizedElevation <= SandMaxElevNormLocal)
+    {
+        return EWorldForgeTerrainType::Sand;
+    }
+
+    if (NormalizedElevation >= SnowMinElevNormLocal)
+    {
+        return EWorldForgeTerrainType::Snow;
+    }
+
+    if (SlopeDegrees >= CliffSlopeDegLocal)
+    {
+        return EWorldForgeTerrainType::Rock;
+    }
+
+    if (NormalizedElevation >= HighRockMinElevNormLocal)
+    {
+        return EWorldForgeTerrainType::Rock;
+    }
+
+    if (NormalizedElevation >= RockMinElevNormLocal && SlopeDegrees >= RockSlopeDegLocal)
+    {
+        return EWorldForgeTerrainType::Rock;
+    }
+
+    if (NormalizedElevation >= DirtMinElevNormLocal || SlopeDegrees >= DirtSlopeDegLocal)
+    {
+        return EWorldForgeTerrainType::Dirt;
+    }
+
+    return EWorldForgeTerrainType::Grass;
+}
+
+bool UVoxelWorldManager::GetTerrainTypeAtCell(FIntPoint GridCell, EWorldForgeTerrainType& OutTerrainType) const
+{
+    if (!HasCachedTerrainData() || !IsValidTerrainCell(GridCell))
+    {
+        return false;
+    }
+
+    OutTerrainType = ClassifyTerrainCellInternal(GridCell);
+    return true;
+}
+
+bool UVoxelWorldManager::GetTerrainTypeAtVoxel(FIntPoint VoxelXY, EWorldForgeTerrainType& OutTerrainType) const
+{
+    const FIntPoint ChunkCell = VoxelCellToChunkCell(VoxelXY);
+    return GetTerrainTypeAtCell(ChunkCell, OutTerrainType);
+}
+
+bool UVoxelWorldManager::GetTerrainSlopeAtCell(FIntPoint GridCell, float& OutSlopeDegrees) const
+{
+    OutSlopeDegrees = 0.0f;
+
+    if (!HasCachedTerrainData() || !IsValidTerrainCell(GridCell))
+    {
+        return false;
+    }
+
+    OutSlopeDegrees = ComputeTerrainSlopeDegreesInternal(GridCell);
+    return true;
+}
+
+bool UVoxelWorldManager::GetTerrainSlopeAtVoxel(FIntPoint VoxelXY, float& OutSlopeDegrees) const
+{
+    const FIntPoint ChunkCell = VoxelCellToChunkCell(VoxelXY);
+    return GetTerrainSlopeAtCell(ChunkCell, OutSlopeDegrees);
+}
+
+// ─── FIX 8: MaxElev now matches the actual cache range from Fix 5/7.
+// The old value added 54 extra voxels (24+18+12) from the removed local
+// noise contributions, compressing all the terrain-type thresholds and
+// preventing rock/snow from appearing correctly on the map.
+bool UVoxelWorldManager::GetTerrainTypeAtVoxelSample(
+    FIntPoint VoxelXY,
+    EWorldForgeTerrainType& OutTerrainType) const
+{
+    if (!HasCachedTerrainData())
+    {
+        return false;
+    }
+
+    const int32 ChunkSize = GetChunkSizeInVoxels();
+    if (ChunkSize <= 0)
+    {
+        return GetTerrainTypeAtVoxel(VoxelXY, OutTerrainType);
+    }
+
+    const float HalfGridX = static_cast<float>(CachedTerrainGridWidth) * 0.5f;
+    const float HalfGridY = static_cast<float>(CachedTerrainGridHeight) * 0.5f;
+
+    const float CellXF =
+        (static_cast<float>(VoxelXY.X) / static_cast<float>(ChunkSize)) + HalfGridX;
+    const float CellYF =
+        (static_cast<float>(VoxelXY.Y) / static_cast<float>(ChunkSize)) + HalfGridY;
+
+    const int32 X0 = FMath::FloorToInt(CellXF);
+    const int32 Y0 = FMath::FloorToInt(CellYF);
+    const float FracX = CellXF - static_cast<float>(X0);
+    const float FracY = CellYF - static_cast<float>(Y0);
+
+    const FIntPoint Cell00(X0, Y0);
+    const FIntPoint Cell10(X0 + 1, Y0);
+    const FIntPoint Cell01(X0, Y0 + 1);
+    const FIntPoint Cell11(X0 + 1, Y0 + 1);
+
+    auto SafeHeight = [&](FIntPoint Cell) -> float
+        {
+            const FIntPoint C = ClampTerrainCellToBounds(Cell);
+            const int32 Idx = TerrainIndex(C);
+            return CachedSurfaceHeightsVoxels.IsValidIndex(Idx)
+                ? CachedSurfaceHeightsVoxels[Idx]
+                : static_cast<float>(SeaLevelVoxels);
+        };
+
+    const float H00 = SafeHeight(Cell00);
+    const float H10 = SafeHeight(Cell10);
+    const float H01 = SafeHeight(Cell01);
+    const float H11 = SafeHeight(Cell11);
+
+    const float InterpH = FMath::Lerp(
+        FMath::Lerp(H00, H10, FracX),
+        FMath::Lerp(H01, H11, FracX),
+        FracY);
+
+    auto SafeSlope = [&](FIntPoint Cell) -> float
+        {
+            return IsValidTerrainCell(Cell) ? ComputeTerrainSlopeDegreesInternal(Cell) : 0.0f;
+        };
+
+    const float InterpSlope = FMath::Lerp(
+        FMath::Lerp(SafeSlope(Cell00), SafeSlope(Cell10), FracX),
+        FMath::Lerp(SafeSlope(Cell01), SafeSlope(Cell11), FracX),
+        FracY);
+
+    {
+        const FIntPoint CenterCell = ClampTerrainCellToBounds(Cell00);
+        const int32 CenterIdx = TerrainIndex(CenterCell);
+
+        const FGameplayTag& BiomeTag = CachedBiomeTags.IsValidIndex(CenterIdx)
+            ? CachedBiomeTags[CenterIdx]
+            : FGameplayTag::EmptyTag;
+
+        const bool bTaggedWater =
+            BiomeTag.MatchesTag(GetBiomeOceanTag()) ||
+            BiomeTag.MatchesTag(GetBiomeDeepOceanTag()) ||
+            BiomeTag.MatchesTag(GetBiomeSeaTag()) ||
+            BiomeTag.MatchesTag(GetBiomeLakeTag()) ||
+            BiomeTag.MatchesTag(GetBiomeWaterTag());
+
+        if (bTaggedWater || InterpH <= static_cast<float>(SeaLevelVoxels))
+        {
+            OutTerrainType = EWorldForgeTerrainType::Water;
+            return true;
+        }
+    }
+
+    // ── v2: Use the single-path normalization.
+    const FWorldForgeTerrainSnapshot NormSnapshot = MakeLocalTerrainSnapshot();
+    const float NormElev = FWorldForgeTerrainMath::ComputeNormalizedLandElevation(
+        InterpH, NormSnapshot);
+
+    const float CoastBandLocal = FMath::Max(0.0f, CoastBandVoxels);
+    const float SandMaxElevNorm = FMath::Clamp(SandMaxElevationNormalized, 0.0f, 1.0f);
+    const float DirtMinElevNorm = FMath::Clamp(DirtMinElevationNormalized, 0.0f, 1.0f);
+    const float RockMinElevNorm = FMath::Clamp(RockMinElevationNormalized, 0.0f, 1.0f);
+    const float HighRockMinElevNorm = FMath::Clamp(HighRockMinElevationNormalized, 0.0f, 1.0f);
+    const float SnowMinElevNorm = FMath::Clamp(SnowMinElevationNormalized, 0.0f, 1.0f);
+
+    const float DirtSlopeDeg = FMath::Max(0.0f, DirtSlopeThresholdDegrees);
+    const float RockSlopeDeg = FMath::Max(0.0f, RockSlopeThresholdDegrees);
+    const float CliffSlopeDeg = FMath::Max(0.0f, CliffSlopeThresholdDegrees);
+
+    const float SeaLevel = static_cast<float>(SeaLevelVoxels);
+
+    if (InterpH <= SeaLevel)
+    {
+        OutTerrainType = EWorldForgeTerrainType::Water;
+        return true;
+    }
+
+    if (InterpH <= (SeaLevel + CoastBandLocal) || NormElev <= SandMaxElevNorm)
+    {
+        OutTerrainType = EWorldForgeTerrainType::Sand;
+        return true;
+    }
+
+    if (NormElev >= SnowMinElevNorm)
+    {
+        OutTerrainType = EWorldForgeTerrainType::Snow;
+        return true;
+    }
+
+    if (InterpSlope >= CliffSlopeDeg)
+    {
+        OutTerrainType = EWorldForgeTerrainType::Rock;
+        return true;
+    }
+
+    if (NormElev >= HighRockMinElevNorm)
+    {
+        OutTerrainType = EWorldForgeTerrainType::Rock;
+        return true;
+    }
+
+    if (NormElev >= RockMinElevNorm && InterpSlope >= RockSlopeDeg)
+    {
+        OutTerrainType = EWorldForgeTerrainType::Rock;
+        return true;
+    }
+
+    if (NormElev >= DirtMinElevNorm || InterpSlope >= DirtSlopeDeg)
+    {
+        OutTerrainType = EWorldForgeTerrainType::Dirt;
+        return true;
+    }
+
+    OutTerrainType = EWorldForgeTerrainType::Grass;
+    return true;
+}
+
+// ─── [TERRAIN QUERIES] ───────────────────────────────────────
+
+// ─── FIX 3: Initialise OutWorldLocation to zero (was uninitialized on early
+// returns), and add the voxel world origin's Z so that the returned world
+// location is correct when the AVoxelWorld actor is not at Z=0.
+bool UVoxelWorldManager::TryGetSurfaceWorldLocation(
+    FIntPoint GridCell,
+    FVector& OutWorldLocation,
+    float ZOffset) const
+{
+    OutWorldLocation = FVector::ZeroVector;
+
+    if (!HasCachedTerrainData() || !IsValidTerrainCell(GridCell))
+    {
+        return false;
+    }
+
+    const int32 Index = TerrainIndex(GridCell);
+    if (!CachedSurfaceHeightsVoxels.IsValidIndex(Index))
+    {
+        return false;
+    }
+
+    const float SurfaceHeightWorld =
+        GetVoxelWorldOrigin().Z +
+        (CachedSurfaceHeightsVoxels[Index] * GetRenderVoxelSize()) +
+        ZOffset;
+
+    OutWorldLocation = TerrainCellToWorld(GridCell, SurfaceHeightWorld, true);
+    return true;
+}
+
+bool UVoxelWorldManager::TryGetNearestSpawnLocationForTerrainCell(
+    FIntPoint DesiredCell,
+    FVector& OutWorldLocation,
+    FIntPoint& OutResolvedCell,
+    int32 MaxSearchRadius,
+    float ZOffset) const
+{
+    OutWorldLocation = FVector::ZeroVector;
+    OutResolvedCell = DesiredCell;
+
+    if (!HasCachedTerrainData())
+    {
+        return false;
+    }
+
+    FIntPoint ResolvedCell = DesiredCell;
+    if (!FindNearestSpawnableTerrainCell(DesiredCell, ResolvedCell, MaxSearchRadius))
+    {
+        return false;
+    }
+
+    FVector SurfaceLocation = FVector::ZeroVector;
+    if (!TryGetSurfaceWorldLocation(ResolvedCell, SurfaceLocation, ZOffset))
+    {
+        return false;
+    }
+
+    OutResolvedCell = ResolvedCell;
+    OutWorldLocation = SurfaceLocation;
+    return true;
+}
+
+// ─── FIX 4: Add the voxel world origin's Z so the returned world-space height
+// is correct when the AVoxelWorld actor is not placed at Z=0 in the level.
+bool UVoxelWorldManager::TryGetCachedSurfaceHeightWorldForVoxelCell(
+    FIntPoint VoxelCell,
+    float& OutSurfaceHeightWorld) const
+{
+    OutSurfaceHeightWorld = 0.0f;
+
+    if (!HasCachedTerrainData())
+    {
+        return false;
+    }
+
+    const FIntPoint ChunkCell = VoxelCellToChunkCell(VoxelCell);
+    if (!IsValidTerrainCell(ChunkCell))
+    {
+        return false;
+    }
+
+    const int32 Index = TerrainIndex(ChunkCell);
+    if (!CachedSurfaceHeightsVoxels.IsValidIndex(Index))
+    {
+        return false;
+    }
+
+    OutSurfaceHeightWorld =
+        GetVoxelWorldOrigin().Z +
+        (CachedSurfaceHeightsVoxels[Index] * GetRenderVoxelSize());
+
+    return true;
+}
+
+// ─── [GENERATION ORCHESTRATOR] ───────────────────────────────
+
+bool UVoxelWorldManager::GenerateTerrainFromTiles(
+    const TArray<FWorldTileData>& WorldTiles,
+    int32 GridWidth,
+    int32 GridHeight,
+    ETerrainMode TerrainMode,
+    int32 BlockHeightStep)
+{
+    ClearTerrainSnapshot();
+
+    if (GridWidth <= 0 || GridHeight <= 0)
+    {
+        UE_LOG(
+            LogTemp,
+            Warning,
+            TEXT("[VoxelWorldManager] GenerateTerrainFromTiles failed: invalid grid size %d x %d."),
+            GridWidth,
+            GridHeight
+        );
+        return false;
+    }
+
+    const int32 ExpectedTileCount = GridWidth * GridHeight;
+    if (WorldTiles.Num() != ExpectedTileCount)
+    {
+        UE_LOG(
+            LogTemp,
+            Warning,
+            TEXT("[VoxelWorldManager] GenerateTerrainFromTiles failed: tile count mismatch. Expected=%d Actual=%d"),
+            ExpectedTileCount,
+            WorldTiles.Num()
+        );
+        return false;
+    }
+
+    CurrentTerrainMode = ETerrainMode::Smooth;
+    CurrentBlockHeightStep = 1;
+
+    if (TerrainMode == ETerrainMode::Blocky)
+    {
+        UE_LOG(
+            LogTemp,
+            Warning,
+            TEXT("[VoxelWorldManager] Blocky terrain mode requested, but WorldForge is forcing Smooth mode to match GDD terrain direction.")
+        );
+    }
+
+    ClearTerrainCache();
+
+    PendingWorldTiles = WorldTiles;
+    PendingGridWidth = GridWidth;
+    PendingGridHeight = GridHeight;
+    TerrainRetryCount = 0;
+
+    if (!IsReady() || !IsVoxelRuntimeReady())
+    {
+        UE_LOG(
+            LogTemp,
+            Warning,
+            TEXT("[VoxelWorldManager] GenerateTerrainFromTiles deferred: VoxelWorld runtime is not ready yet.")
+        );
+
+        ScheduleTerrainRetry();
+        return true;
+    }
+
+    AVoxelWorld* VoxelWorld = Cast<AVoxelWorld>(VoxelWorldActor);
+    if (!VoxelWorld)
+    {
+        UE_LOG(
+            LogTemp,
+            Warning,
+            TEXT("[VoxelWorldManager] GenerateTerrainFromTiles failed: cached actor is not AVoxelWorld.")
+        );
+
+        ClearTerrainSnapshot();
+        return false;
+    }
+
+    const bool bSuccess = ApplyTerrainFromTilesInternal(
+        VoxelWorld,
+        WorldTiles,
+        GridWidth,
+        GridHeight
+    );
+
+    if (bSuccess)
+    {
+        ClearPendingTerrainRequest();
+        BroadcastTerrainReadyIfNeeded();
+    }
+    else
+    {
+        ScheduleTerrainRetry();
+    }
+
+    return true;
+}
+
+bool UVoxelWorldManager::ApplyTerrainFromTilesInternal(
+    AVoxelWorld* VoxelWorld,
+    const TArray<FWorldTileData>& WorldTiles,
+    int32 GridWidth,
+    int32 GridHeight)
+{
+    if (!VoxelWorld)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[VoxelWorldManager] ApplyTerrainFromTilesInternal failed: VoxelWorld is null."));
+        ClearTerrainSnapshot();
+        return false;
+    }
+
+    if (GridWidth <= 0 || GridHeight <= 0)
+    {
+        UE_LOG(
+            LogTemp,
+            Warning,
+            TEXT("[VoxelWorldManager] ApplyTerrainFromTilesInternal failed: invalid grid size %d x %d."),
+            GridWidth,
+            GridHeight
+        );
+        ClearTerrainSnapshot();
+        return false;
+    }
+
+    const int32 ExpectedTileCount = GridWidth * GridHeight;
+    if (WorldTiles.Num() != ExpectedTileCount)
+    {
+        UE_LOG(
+            LogTemp,
+            Warning,
+            TEXT("[VoxelWorldManager] ApplyTerrainFromTilesInternal failed: tile count mismatch. Expected=%d Actual=%d"),
+            ExpectedTileCount,
+            WorldTiles.Num()
+        );
+        ClearTerrainSnapshot();
+        return false;
+    }
+
+    UE_LOG(
+        LogTemp,
+        Log,
+        TEXT("[VoxelWorldManager] Terrain generation start (Density Generator). Tiles=%d Grid=%dx%d ChunkSizeVoxels=%d Mode=%s Step=%d"),
+        WorldTiles.Num(),
+        GridWidth,
+        GridHeight,
+        GetChunkSizeInVoxels(),
+        CurrentTerrainMode == ETerrainMode::Blocky ? TEXT("Blocky") : TEXT("Smooth"),
+        GetEffectiveBlockHeightStep()
+    );
+
+    CacheTerrainMetadata(WorldTiles, GridWidth, GridHeight);
+    BuildTerrainSnapshot(WorldTiles, GridWidth, GridHeight);
+
+    if (!HasTerrainSnapshot())
+    {
+        UE_LOG(
+            LogTemp,
+            Error,
+            TEXT("[VoxelWorldManager] ApplyTerrainFromTilesInternal failed: terrain snapshot build produced invalid state.")
+        );
+        return false;
+    }
+
+#if WITH_VOXEL_PLUGIN
+    UWorldForgeTerrainGenerator* Generator = NewObject<UWorldForgeTerrainGenerator>(VoxelWorld);
+    if (!Generator)
+    {
+        UE_LOG(
+            LogTemp,
+            Error,
+            TEXT("[VoxelWorldManager] ApplyTerrainFromTilesInternal failed: could not allocate WorldForge terrain generator.")
+        );
+        return false;
+    }
+
+    Generator->SetTerrainSnapshot(TerrainSnapshot);
+    Generator->SetSeed(1337);
+
+    VoxelWorld->SetGeneratorObject(Generator);
+
+    if (VoxelWorld->IsCreated())
+    {
+        VoxelWorld->DestroyWorld();
+    }
+
+    VoxelWorld->CreateWorld(FVoxelWorldCreateInfo());
+#else
+    UE_LOG(
+        LogTemp,
+        Error,
+        TEXT("[VoxelWorldManager] ApplyTerrainFromTilesInternal failed: WITH_VOXEL_PLUGIN is disabled.")
+    );
+    return false;
+#endif
+
+    const bool bWorldCreated = VoxelWorld->IsCreated();
+    if (!bWorldCreated)
+    {
+        UE_LOG(
+            LogTemp,
+            Error,
+            TEXT("[VoxelWorldManager] ApplyTerrainFromTilesInternal failed: VoxelWorld did not report created after generator assignment.")
+        );
+        return false;
+    }
+
+    UE_LOG(
+        LogTemp,
+        Log,
+        TEXT("[VoxelWorldManager] Terrain generation complete (Density Generator). Applied=%d / %d SnapshotValid=%s"),
+        ExpectedTileCount,
+        ExpectedTileCount,
+        HasTerrainSnapshot() ? TEXT("true") : TEXT("false")
+    );
+
+    BroadcastTerrainReadyIfNeeded();
+    return true;
+}
+
+void UVoxelWorldManager::ScheduleTerrainRetry()
+{
+    UWorld* World = GetWorld();
+    if (!World)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[VoxelWorldManager] ScheduleTerrainRetry failed: GetWorld() returned null."));
+        return;
+    }
+
+    if (bTerrainRetryScheduled)
+    {
+        return;
+    }
+
+    bTerrainRetryScheduled = true;
+
+    World->GetTimerManager().SetTimer(
+        TerrainRetryTimerHandle,
+        this,
+        &UVoxelWorldManager::RetryPendingTerrainGeneration,
+        TerrainRetryIntervalSeconds,
+        false
+    );
+
+    if (bLogTerrainRetry)
+    {
+        UE_LOG(
+            LogTemp,
+            Log,
+            TEXT("[VoxelWorldManager] Scheduled terrain retry in %.2f seconds."),
+            TerrainRetryIntervalSeconds
+        );
+    }
+}
+
+void UVoxelWorldManager::RetryPendingTerrainGeneration()
+{
+    bTerrainRetryScheduled = false;
+
+    if (PendingWorldTiles.Num() == 0 || PendingGridWidth <= 0 || PendingGridHeight <= 0)
+    {
+        return;
+    }
+
+    if (!IsReady())
+    {
+        ++TerrainRetryCount;
+
+        if (TerrainRetryCount > MaxTerrainRetryCount)
+        {
+            UE_LOG(LogTemp, Error, TEXT("[VoxelWorldManager] Terrain retry failed: VoxelWorld actor never became ready."));
+            ClearPendingTerrainRequest();
+            ClearTerrainSnapshot();
+            return;
+        }
+
+        if (bLogTerrainRetry)
+        {
+            UE_LOG(LogTemp, Warning, TEXT("[VoxelWorldManager] Terrain retry %d: VoxelWorld actor still not ready."), TerrainRetryCount);
+        }
+
+        ScheduleTerrainRetry();
+        return;
+    }
+
+    AVoxelWorld* VoxelWorld = Cast<AVoxelWorld>(VoxelWorldActor);
+    if (!VoxelWorld)
+    {
+        ++TerrainRetryCount;
+
+        if (TerrainRetryCount > MaxTerrainRetryCount)
+        {
+            UE_LOG(LogTemp, Error, TEXT("[VoxelWorldManager] Terrain retry failed: cached actor is not AVoxelWorld."));
+            ClearPendingTerrainRequest();
+            ClearTerrainSnapshot();
+            return;
+        }
+
+        ScheduleTerrainRetry();
+        return;
+    }
+
+    if (ApplyTerrainFromTilesInternal(VoxelWorld, PendingWorldTiles, PendingGridWidth, PendingGridHeight))
+    {
+        UE_LOG(LogTemp, Log, TEXT("[VoxelWorldManager] Pending terrain applied successfully on retry %d."), TerrainRetryCount);
+        ClearPendingTerrainRequest();
+        BroadcastTerrainReadyIfNeeded();
+        return;
+    }
+
+    ++TerrainRetryCount;
+
+    if (TerrainRetryCount > MaxTerrainRetryCount)
+    {
+        UE_LOG(LogTemp, Error, TEXT("[VoxelWorldManager] Terrain retry failed: generator terrain application never succeeded."));
+        ClearPendingTerrainRequest();
+        ClearTerrainSnapshot();
+        return;
+    }
+
+    ScheduleTerrainRetry();
+}
+
+void UVoxelWorldManager::ClearPendingTerrainRequest()
+{
+    PendingWorldTiles.Reset();
+    PendingGridWidth = 0;
+    PendingGridHeight = 0;
+    TerrainRetryCount = 0;
+    bTerrainRetryScheduled = false;
+}
+
+void UVoxelWorldManager::BroadcastTerrainReadyIfNeeded()
+{
+    if (bTerrainReadyBroadcasted)
+    {
+        return;
+    }
+
+    if (!IsTerrainRuntimeStable())
+    {
+        return;
+    }
+
+    bTerrainReadyBroadcasted = true;
+
+    UE_LOG(LogTemp, Log, TEXT("[VoxelWorldManager] Terrain is ready for gameplay."));
+
+    if (HasCachedTerrainData())
+    {
+        const FIntPoint CenterCell(
+            FMath::Max(0, CachedTerrainGridWidth / 2),
+            FMath::Max(0, CachedTerrainGridHeight / 2)
+        );
+
+        const FIntPoint TopLeft(0, 0);
+        const FIntPoint TopRight(FMath::Max(0, CachedTerrainGridWidth - 1), 0);
+        const FIntPoint BottomLeft(0, FMath::Max(0, CachedTerrainGridHeight - 1));
+        const FIntPoint BottomRight(
+            FMath::Max(0, CachedTerrainGridWidth - 1),
+            FMath::Max(0, CachedTerrainGridHeight - 1)
+        );
+
+        FVector CenterWorld = FVector::ZeroVector;
+        FVector TopLeftWorld = FVector::ZeroVector;
+        FVector TopRightWorld = FVector::ZeroVector;
+        FVector BottomLeftWorld = FVector::ZeroVector;
+        FVector BottomRightWorld = FVector::ZeroVector;
+
+        const bool bHasCenter = TryGetSurfaceWorldLocation(CenterCell, CenterWorld, TerrainSurfaceZOffset);
+        const bool bHasTL = TryGetSurfaceWorldLocation(TopLeft, TopLeftWorld, TerrainSurfaceZOffset);
+        const bool bHasTR = TryGetSurfaceWorldLocation(TopRight, TopRightWorld, TerrainSurfaceZOffset);
+        const bool bHasBL = TryGetSurfaceWorldLocation(BottomLeft, BottomLeftWorld, TerrainSurfaceZOffset);
+        const bool bHasBR = TryGetSurfaceWorldLocation(BottomRight, BottomRightWorld, TerrainSurfaceZOffset);
+
+        UE_LOG(
+            LogTemp,
+            Warning,
+            TEXT("[VoxelWorldManager] Terrain samples: CenterCell=(%d,%d) Center=(%.1f,%.1f,%.1f) TL=(%.1f,%.1f,%.1f) TR=(%.1f,%.1f,%.1f) BL=(%.1f,%.1f,%.1f) BR=(%.1f,%.1f,%.1f)"),
+            CenterCell.X, CenterCell.Y,
+            bHasCenter ? CenterWorld.X : -999999.0f, bHasCenter ? CenterWorld.Y : -999999.0f, bHasCenter ? CenterWorld.Z : -999999.0f,
+            bHasTL ? TopLeftWorld.X : -999999.0f, bHasTL ? TopLeftWorld.Y : -999999.0f, bHasTL ? TopLeftWorld.Z : -999999.0f,
+            bHasTR ? TopRightWorld.X : -999999.0f, bHasTR ? TopRightWorld.Y : -999999.0f, bHasTR ? TopRightWorld.Z : -999999.0f,
+            bHasBL ? BottomLeftWorld.X : -999999.0f, bHasBL ? BottomLeftWorld.Y : -999999.0f, bHasBL ? BottomLeftWorld.Z : -999999.0f,
+            bHasBR ? BottomRightWorld.X : -999999.0f, bHasBR ? BottomRightWorld.Y : -999999.0f, bHasBR ? BottomRightWorld.Z : -999999.0f
+        );
+
+        if (APlayerController* PC = UGameplayStatics::GetPlayerController(GetWorld(), 0))
+        {
+            FVector ViewLocation = FVector::ZeroVector;
+            FRotator ViewRotation = FRotator::ZeroRotator;
+            PC->GetPlayerViewPoint(ViewLocation, ViewRotation);
+
+            const double DistanceToCenter = bHasCenter ? FVector::Dist(ViewLocation, CenterWorld) : -1.0;
+
+            UE_LOG(
+                LogTemp,
+                Warning,
+                TEXT("[VoxelWorldManager] Player view at terrain-ready: View=(%.1f,%.1f,%.1f) Rot=(%.1f,%.1f,%.1f) DistToCenter=%.1f"),
+                ViewLocation.X, ViewLocation.Y, ViewLocation.Z,
+                ViewRotation.Pitch, ViewRotation.Yaw, ViewRotation.Roll,
+                DistanceToCenter
+            );
+        }
+    }
+
+    if (HasCachedTerrainData())
+    {
+        int32 WaterCount = 0;
+        int32 SandCount = 0;
+        int32 GrassCount = 0;
+        int32 DirtCount = 0;
+        int32 RockCount = 0;
+        int32 SnowCount = 0;
+
+        for (int32 Y = 0; Y < CachedTerrainGridHeight; ++Y)
+        {
+            for (int32 X = 0; X < CachedTerrainGridWidth; ++X)
+            {
+                EWorldForgeTerrainType TerrainType = EWorldForgeTerrainType::Grass;
+                if (GetTerrainTypeAtCell(FIntPoint(X, Y), TerrainType))
+                {
+                    switch (TerrainType)
+                    {
+                    case EWorldForgeTerrainType::Water: ++WaterCount; break;
+                    case EWorldForgeTerrainType::Sand:  ++SandCount;  break;
+                    case EWorldForgeTerrainType::Grass: ++GrassCount; break;
+                    case EWorldForgeTerrainType::Dirt:  ++DirtCount;  break;
+                    case EWorldForgeTerrainType::Rock:  ++RockCount;  break;
+                    case EWorldForgeTerrainType::Snow:  ++SnowCount;  break;
+                    default: break;
+                    }
+                }
+            }
+        }
+
+        UE_LOG(
+            LogTemp,
+            Warning,
+            TEXT("[VoxelWorldManager] Terrain classification counts | Water=%d Sand=%d Grass=%d Dirt=%d Rock=%d Snow=%d"),
+            WaterCount,
+            SandCount,
+            GrassCount,
+            DirtCount,
+            RockCount,
+            SnowCount
+        );
+    }
+
+    OnTerrainReady.Broadcast();
+}
+
+// ─── [TERRAIN APPLICATION] ───────────────────────────────────
+// These functions are intentionally thin — terrain density is
+// now fully owned by UWorldForgeTerrainGenerator::GetValueImpl().
+
+bool UVoxelWorldManager::ApplyBiomeChunkNative(
+    AVoxelWorld* VoxelWorld,
+    FIntPoint ChunkCoord,
+    const FVoxelBiomeProfile& Profile,
+    float TileElevation)
+{
+    if (!VoxelWorld)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[VoxelWorldManager] ApplyBiomeChunkNative skipped: VoxelWorld is null."));
+        return false;
+    }
+
+    if (!VoxelWorld->IsCreated())
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[VoxelWorldManager] ApplyBiomeChunkNative skipped: VoxelWorld runtime is not created yet."));
+        return false;
+    }
+
+    if (!HasTerrainSnapshot())
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[VoxelWorldManager] ApplyBiomeChunkNative skipped: no valid terrain snapshot is available."));
+        return false;
+    }
+
+    if (!ValidateSmoothSDF(Profile))
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[VoxelWorldManager] ApplyBiomeChunkNative skipped: biome profile is not Smooth SDF."));
+        return false;
+    }
+
+    if (bLogTerrainGeneration && ((ChunkCoord.X + ChunkCoord.Y) % 64 == 0))
+    {
+        UE_LOG(
+            LogTemp,
+            Verbose,
+            TEXT("[VoxelWorldManager] ApplyBiomeChunkNative is now generator-driven. Chunk=(%d,%d) Elev=%.3f"),
+            ChunkCoord.X,
+            ChunkCoord.Y,
+            TileElevation
+        );
+    }
+
+    // Density generation is handled by UWorldForgeTerrainGenerator through the voxel world generator path.
+    return true;
+}
+
+bool UVoxelWorldManager::ApplyGlobalFoundationNative(AVoxelWorld* VoxelWorld, int32 GridWidth, int32 GridHeight)
+{
+    if (!VoxelWorld)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[VoxelWorldManager] ApplyGlobalFoundationNative skipped: VoxelWorld is null."));
+        return false;
+    }
+
+    if (!VoxelWorld->IsCreated())
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[VoxelWorldManager] ApplyGlobalFoundationNative skipped: VoxelWorld runtime is not created yet."));
+        return false;
+    }
+
+    if (!HasTerrainSnapshot())
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[VoxelWorldManager] ApplyGlobalFoundationNative skipped: no valid terrain snapshot is available."));
+        return false;
+    }
+
+    if (bLogTerrainGeneration)
+    {
+        UE_LOG(
+            LogTemp,
+            Verbose,
+            TEXT("[VoxelWorldManager] ApplyGlobalFoundationNative is now generator-driven. Grid=%dx%d"),
+            GridWidth,
+            GridHeight
+        );
+    }
+
+    // Foundation is part of the density field in UWorldForgeTerrainGenerator::GetValueImpl().
+    return true;
+}
+
+// ─── [PLACED BLOCK VISUALS] ──────────────────────────────────
+
 void UVoxelWorldManager::PlaceVoxelBlock(FVector WorldPosition, FGameplayTag MaterialTag)
 {
     const FIntVector GridCell3D = WorldToGrid3D(WorldPosition);
@@ -524,41 +2304,15 @@ void UVoxelWorldManager::PlaceVoxelBlock(FVector WorldPosition, FGameplayTag Mat
         UE_LOG(
             LogTemp,
             Log,
-            TEXT("[VoxelWorldManager] PlaceVoxelBlock Grid=(%d,%d,%d) Requested=(%.1f, %.1f, %.1f) Visual=(%.1f, %.1f, %.1f) Material=%s"),
-            GridCell3D.X,
-            GridCell3D.Y,
-            GridCell3D.Z,
-            WorldPosition.X,
-            WorldPosition.Y,
-            WorldPosition.Z,
-            VisualWorldPosition.X,
-            VisualWorldPosition.Y,
-            VisualWorldPosition.Z,
+            TEXT("[VoxelWorldManager] PlaceVoxelBlock Grid=(%d,%d,%d) Requested=(%.1f,%.1f,%.1f) Visual=(%.1f,%.1f,%.1f) Material=%s"),
+            GridCell3D.X, GridCell3D.Y, GridCell3D.Z,
+            WorldPosition.X, WorldPosition.Y, WorldPosition.Z,
+            VisualWorldPosition.X, VisualWorldPosition.Y, VisualWorldPosition.Z,
             *MaterialTag.ToString()
         );
     }
 
     OnVoxelBlockPlaced(VisualWorldPosition, MaterialTag);
-}
-
-void UVoxelWorldManager::NotifyVoxelDig(FVector WorldPosition, int32 AgentID)
-{
-    UE_LOG(
-        LogTemp,
-        Verbose,
-        TEXT("[VoxelWorldManager] NotifyVoxelDig WorldPosition=(%.1f, %.1f, %.1f) AgentID=%d"),
-        WorldPosition.X,
-        WorldPosition.Y,
-        WorldPosition.Z,
-        AgentID
-    );
-
-    OnVoxelDigged(WorldPosition);
-}
-
-bool UVoxelWorldManager::ValidateSmoothSDF(const FVoxelBiomeProfile& Profile) const
-{
-    return Profile.bSmoothSDF;
 }
 
 FVector UVoxelWorldManager::ResolvePlacedBlockVisualWorldPosition(const FVector& RequestedWorldPosition) const
@@ -621,12 +2375,7 @@ AStaticMeshActor* UVoxelWorldManager::SpawnFallbackPlacedBlockActor(
     MeshComp->SetGenerateOverlapEvents(false);
 
     const float RVS = GetRenderVoxelSize();
-    MeshComp->SetWorldScale3D(FVector(
-        RVS / 100.0f,
-        RVS / 100.0f,
-        RVS / 100.0f
-    ));
-
+    MeshComp->SetWorldScale3D(FVector(RVS / 100.0f, RVS / 100.0f, RVS / 100.0f));
     MeshComp->SetCastShadow(true);
 
     BlockActor->SetActorEnableCollision(true);

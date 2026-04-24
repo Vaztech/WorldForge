@@ -194,7 +194,6 @@ struct FWorldTileData
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float VoidProximity = 0.f;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TArray<int32> HistoryEventIDs;
-
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -634,7 +633,6 @@ struct FEconomySaveState
 // COLONY SIMULATION
 // ═══════════════════════════════════════════════════════════════════
 
-
 USTRUCT(BlueprintType)
 struct FReservationRecord
 {
@@ -774,6 +772,105 @@ struct FSimulationEvent
 // ═══════════════════════════════════════════════════════════════════
 
 USTRUCT(BlueprintType)
+struct FMountainRange
+{
+    GENERATED_BODY()
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    FVector2D Start = FVector2D::ZeroVector;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    FVector2D Direction = FVector2D(1.f, 0.f);
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    float Length = 64.f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    float Width = 12.f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    float HeightMultiplier = 0.15f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    float BasinOffset = 18.f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    float BasinWidth = 10.f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    float BasinStrength = 0.03f;
+};
+
+USTRUCT(BlueprintType)
+struct FMountainProvince
+{
+    GENERATED_BODY()
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    FVector2D Center = FVector2D::ZeroVector;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    FVector2D Direction = FVector2D(1.f, 0.f);
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    float SpreadRadius = 64.f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    float Strength = 1.f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    int32 RangeCount = 3;
+};
+
+USTRUCT(BlueprintType)
+struct FMountainGenerationSettings
+{
+    GENERATED_BODY()
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    int32 MinProvinceCount = 2;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    int32 MaxProvinceCount = 4;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    int32 MinRangesPerProvince = 2;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    int32 MaxRangesPerProvince = 4;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    float MinRangeLength = 55.f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    float MaxRangeLength = 130.f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    float MinRangeWidth = 8.f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    float MaxRangeWidth = 18.f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    float MinHeightMultiplier = 0.04f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    float MaxHeightMultiplier = 0.16f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    float ProvinceDirectionJitterDegrees = 14.f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    float StartOffsetJitterRadius = 22.f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    float BasinStrengthScale = 0.18f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    float FalloffSharpness = 2.4f;
+};
+
+USTRUCT(BlueprintType)
 struct FWorldGenConfig
 {
     GENERATED_BODY()
@@ -791,6 +888,9 @@ struct FWorldGenConfig
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) ETerrainMode TerrainMode = ETerrainMode::Smooth;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, meta = (ClampMin = "1", UIMin = "1"))
     int32 BlockHeightStep = 4;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    FMountainGenerationSettings MountainSettings;
 };
 
 enum ECulturalAxis : int32

@@ -10,6 +10,7 @@
 #include "WorldGenBootstrapActor.h"
 #include "WorldForgeTags.h"
 #include "Player/WorldForgeCamera.h"
+#include "WorldMapSubsystem.h"
 
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
@@ -24,6 +25,31 @@
 AColonyManager::AColonyManager()
 {
     PrimaryActorTick.bCanEverTick = false;
+}
+
+void AColonyManager::BeginBootstrapNow()
+{
+    if (bIsDuplicateManagerInstance)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[ColonyManager] BeginBootstrapNow ignored: duplicate manager."));
+        return;
+    }
+
+    if (bBootstrapComplete)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[ColonyManager] BeginBootstrapNow ignored: bootstrap already complete."));
+        return;
+    }
+
+    if (UWorld* World = GetWorld())
+    {
+        World->GetTimerManager().ClearTimer(BootstrapTimerHandle);
+    }
+
+    BootstrapRetryCount = 0;
+
+    UE_LOG(LogTemp, Log, TEXT("[ColonyManager] Manual bootstrap requested."));
+    StartBootstrapAttempt();
 }
 
 void AColonyManager::BeginPlay()
@@ -496,13 +522,29 @@ FIntPoint AColonyManager::ResolveInitialSettlementWorldOrigin() const
     );
     const TCHAR* SourceLabel = TEXT("MapCenter");
 
-    if (!bPreferMapCenterOnStart)
+    if (const UWorld* World = GetWorld())
+    {
+        if (const UWorldMapSubsystem* WorldMapSubsystem = World->GetSubsystem<UWorldMapSubsystem>())
+        {
+            int32 SelectedTileX = INDEX_NONE;
+            int32 SelectedTileY = INDEX_NONE;
+            int32 SelectedTileIndex = INDEX_NONE;
+
+            if (WorldMapSubsystem->GetSelectedStartTile(SelectedTileX, SelectedTileY, SelectedTileIndex))
+            {
+                DesiredWorldCell = FIntPoint(SelectedTileX, SelectedTileY);
+                SourceLabel = TEXT("PlayerSelectedTile");
+            }
+        }
+    }
+
+    if (!bPreferMapCenterOnStart && FCString::Strcmp(SourceLabel, TEXT("PlayerSelectedTile")) != 0)
     {
         DesiredWorldCell = SettlementWorldOrigin;
         SourceLabel = TEXT("Default");
     }
 
-    if (bAnchorSettlementToPlayerViewOnStart && VoxelWorldMgr)
+    if (bAnchorSettlementToPlayerViewOnStart && FCString::Strcmp(SourceLabel, TEXT("PlayerSelectedTile")) != 0 && VoxelWorldMgr)
     {
         if (APlayerController* PC = UGameplayStatics::GetPlayerController(GetWorld(), 0))
         {
@@ -601,22 +643,57 @@ void AColonyManager::PositionPlayerCameraOverSettlement() const
         UE_LOG(LogTemp, Log, TEXT("[ColonyManager] Possessed camera pawn: %s"), *CameraPawn->GetName());
     }
 
-    FVector WorldLocation = FVector::ZeroVector;
+    FVector CameraAnchorWorld = FVector::ZeroVector;
 
     if (bUseManualCameraStart)
     {
-        WorldLocation = ManualCameraLocation;
+        CameraAnchorWorld = ManualCameraLocation;
     }
     else if (VoxelWorldMgr)
     {
-        if (!VoxelWorldMgr->TryGetSurfaceWorldLocation(SettlementWorldOrigin, WorldLocation, 50.0f))
-        {
-            WorldLocation = VoxelWorldMgr->TerrainCellToWorld(SettlementWorldOrigin, 0.0f, true);
+        // IMPORTANT:
+        // Use the player's resolved spawn-center cell, not SettlementWorldOrigin.
+        // SettlementWorldOrigin is the formation origin/top-left area for agents,
+        // which is why the camera was offset into the wrong place.
+        const FIntPoint DesiredCameraCell = SpawnGridCenter;
+        FIntPoint ResolvedCameraCell = DesiredCameraCell;
 
-            UE_LOG(LogTemp, Warning,
-                TEXT("[ColonyManager] TryGetSurfaceWorldLocation failed. Fallback=(%.1f, %.1f, %.1f)"),
-                WorldLocation.X, WorldLocation.Y, WorldLocation.Z);
+        if (!VoxelWorldMgr->TryGetNearestSpawnLocationForTerrainCell(
+            DesiredCameraCell,
+            CameraAnchorWorld,
+            ResolvedCameraCell,
+            FMath::Max(SpawnSearchRadius, CameraAnchorSearchRadius),
+            VoxelWorldMgr->TerrainSurfaceZOffset))
+        {
+            if (!VoxelWorldMgr->TryGetSurfaceWorldLocation(DesiredCameraCell, CameraAnchorWorld, VoxelWorldMgr->TerrainSurfaceZOffset))
+            {
+                CameraAnchorWorld = VoxelWorldMgr->TerrainCellToWorld(DesiredCameraCell, 0.0f, true);
+
+                UE_LOG(
+                    LogTemp,
+                    Warning,
+                    TEXT("[ColonyManager] Camera anchor fallback used. DesiredCell=(%d,%d) World=(%.1f, %.1f, %.1f)"),
+                    DesiredCameraCell.X,
+                    DesiredCameraCell.Y,
+                    CameraAnchorWorld.X,
+                    CameraAnchorWorld.Y,
+                    CameraAnchorWorld.Z
+                );
+            }
         }
+
+        UE_LOG(
+            LogTemp,
+            Log,
+            TEXT("[ColonyManager] Camera anchor resolved from selected spawn. Desired=(%d,%d) Resolved=(%d,%d) Surface=(%.1f, %.1f, %.1f)"),
+            DesiredCameraCell.X,
+            DesiredCameraCell.Y,
+            ResolvedCameraCell.X,
+            ResolvedCameraCell.Y,
+            CameraAnchorWorld.X,
+            CameraAnchorWorld.Y,
+            CameraAnchorWorld.Z
+        );
     }
     else
     {
@@ -624,8 +701,21 @@ void AColonyManager::PositionPlayerCameraOverSettlement() const
         return;
     }
 
+    // Keep the RTS anchor safely above the surface.
+    const float MinimumCameraAnchorZ = 3000.0f;
+    CameraAnchorWorld.Z = FMath::Max(CameraAnchorWorld.Z, MinimumCameraAnchorZ);
+
+    UE_LOG(
+        LogTemp,
+        Log,
+        TEXT("[ColonyManager] Camera anchor after clamp: (%.1f, %.1f, %.1f)"),
+        CameraAnchorWorld.X,
+        CameraAnchorWorld.Y,
+        CameraAnchorWorld.Z
+    );
+
     CameraPawn->SnapToRTSView(
-        WorldLocation,
+        CameraAnchorWorld,
         RTSCameraYaw,
         RTSCameraPitch,
         RTSCameraHeight,
@@ -639,16 +729,14 @@ void AColonyManager::PositionPlayerCameraOverSettlement() const
         LogTemp,
         Log,
         TEXT("[ColonyManager] Camera positioned at (%.1f, %.1f, %.1f). Manual=%s Camera=%s ViewTarget=%s"),
-        WorldLocation.X,
-        WorldLocation.Y,
-        WorldLocation.Z,
+        CameraAnchorWorld.X,
+        CameraAnchorWorld.Y,
+        CameraAnchorWorld.Z,
         bUseManualCameraStart ? TEXT("true") : TEXT("false"),
         *CameraPawn->GetName(),
         PC->GetViewTarget() ? *PC->GetViewTarget()->GetName() : TEXT("None")
     );
 }
-
-
 
 FIntPoint AColonyManager::ComputeInitialSpawnCell(int32 AgentIndex) const
 {

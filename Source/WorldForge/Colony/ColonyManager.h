@@ -23,6 +23,9 @@ class WORLDFORGE_API AColonyManager : public AActor
 public:
     AColonyManager();
 
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Colony")
+    void BeginBootstrapNow();
+
 protected:
     virtual void BeginPlay() override;
     virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
@@ -92,7 +95,7 @@ private:
     int32 SettlementID = INDEX_NONE;
 
     UPROPERTY(EditAnywhere, Category = "Colony|Bootstrap")
-    bool bBootstrapOnBeginPlay = true;
+    bool bBootstrapOnBeginPlay = false;
 
     UPROPERTY(EditAnywhere, Category = "Colony|Bootstrap")
     float InitialBootstrapDelaySeconds = 0.25f;
@@ -128,7 +131,7 @@ private:
     bool bAnchorSettlementToPlayerViewOnStart = false;
 
     UPROPERTY(EditAnywhere, Category = "Colony|Setup")
-    bool bPreferMapCenterOnStart = true;
+    bool bPreferMapCenterOnStart = false;
 
     UPROPERTY(EditAnywhere, Category = "Colony|Setup", meta = (ClampMin = "1", UIMin = "1"))
     int32 CameraAnchorSearchRadius = 24;
@@ -146,7 +149,7 @@ private:
     bool bPositionRTSCameraOnBootstrap = true;
 
     UPROPERTY(EditAnywhere, Category = "Colony|Camera")
-    float RTSCameraHeight = 12000.0f;
+    float RTSCameraHeight = 20000.0f;
 
     UPROPERTY(EditAnywhere, Category = "Colony|Camera")
     float RTSCameraPitch = -60.0f;
