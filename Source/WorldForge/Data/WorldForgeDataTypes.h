@@ -785,6 +785,20 @@ struct FAgentData
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 SettlementID = -1;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) EAgentState State = EAgentState::Idle;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FGameplayTag RaceTag;
+
+    // ============================================================================
+    // TRAITS
+    // Per-colonist traits such as Lucky, Clumsy, NEET, Hikikomori, Chuiboy,
+    // FastHealer, SlowHealer, etc.
+    //
+    // Future us:
+    // - Do not hardcode trait behavior directly inside processors.
+    // - Resolve trait effects through WorldForgeTraitLibrary / trait DataTable.
+    // - RaceTag stays for ancestry/species; TraitTags is for individual modifiers.
+    // ============================================================================
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    FGameplayTagContainer TraitTags;
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float FoodNeed = 100.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float SleepNeed = 100.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float SocialNeed = 60.f;
@@ -796,6 +810,9 @@ struct FAgentData
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float EthicsPacifism = 50.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float EthicsCompassion = 50.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float EthicsHonour = 50.f;
+
+    
+    
     // ── Health System ──
 // Overall health pool. 100 = healthy, 0 = dead/incapacitated depending on processor rules.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float Health = 100.f;

@@ -21,6 +21,7 @@
 #include "Kismet/GameplayStatics.h"
 #include "Kismet/KismetSystemLibrary.h"
 #include "TimerManager.h"
+#include "Traits/WorldForgeTraitGenerator.h"
 
 AColonyManager::AColonyManager()
 {
@@ -423,6 +424,24 @@ void AColonyManager::SetupAgents()
         NewAgent.SettlementID = SettlementID;
         NewAgent.State = EAgentState::Idle;
         NewAgent.RaceTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Race.Dwarf")));
+
+// Roll starting personality/gameplay traits for this colonist.
+// Future us: this same generator can later be reused for NPCs, animals,
+// children, inherited traits, and world-spawned entities.
+        NewAgent.TraitTags = UWorldForgeTraitGenerator::RollRandomTraitsForNewEntity(
+            NewAgent.RaceTag,
+            NewAgent.AgentID + 12345,
+            1,
+            3
+        );
+
+        UE_LOG(
+            LogTemp,
+            Warning,
+            TEXT("[TraitGen] Agent %d Traits: %s"),
+            NewAgent.AgentID,
+            *NewAgent.TraitTags.ToString()
+        );
         NewAgent.FoodNeed = 100.0f;
         NewAgent.SleepNeed = 100.0f;
         NewAgent.SocialNeed = 70.0f;

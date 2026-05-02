@@ -7,7 +7,134 @@
 #include "ProductionProcessor.h"
 #include "WorldForgeDataTypes.h"
 #include "WorldForgeTags.h"
+#include "Traits/WorldForgeTraitTypes.h"
+#include "Engine/DataTable.h"
 
+// ====================================================================
+// TRAIT SUPPORT
+// JobProcessor uses traits for job-selection scoring only.
+// Production speed itself is still handled by ProductionProcessor.
+// ====================================================================
+namespace
+{
+    UDataTable* GetWorldForgeTraitTable()
+    {
+        static UDataTable* CachedTraitTable = nullptr;
+        static bool bAttemptedLoad = false;
+
+        if (!bAttemptedLoad)
+        {
+            bAttemptedLoad = true;
+
+            // Future us:
+            // Update this path if DT_WorldForgeTraits is moved.
+            CachedTraitTable = LoadObject<UDataTable>(
+                nullptr,
+                TEXT("/Game/Data/DT_WorldForgeTraits.DT_WorldForgeTraits"));
+
+            if (!CachedTraitTable)
+            {
+                UE_LOG(
+                    LogTemp,
+                    Warning,
+                    TEXT("[JobProcessor] Could not load DT_WorldForgeTraits at /Game/Data/DT_WorldForgeTraits. Trait job scoring will be skipped."));
+            }
+        }
+
+        return CachedTraitTable;
+    }
+
+    FName GetLeafRowNameFromTraitTag(const FGameplayTag& TraitTag)
+    {
+        FString TagString = TraitTag.ToString();
+
+        FString Left;
+        FString Right;
+
+        if (TagString.Split(TEXT("."), &Left, &Right, ESearchCase::IgnoreCase, ESearchDir::FromEnd))
+        {
+            return FName(*Right);
+        }
+
+        return TraitTag.GetTagName();
+    }
+
+    const FWorldForgeTraitDefinition* FindTraitDefinition(
+        UDataTable* TraitTable,
+        const FGameplayTag& TraitTag)
+    {
+        if (!TraitTable || !TraitTag.IsValid())
+        {
+            return nullptr;
+        }
+
+        // First try full tag row name:
+        // WorldForge.Trait.Lucky
+        if (const FWorldForgeTraitDefinition* TraitDef =
+            TraitTable->FindRow<FWorldForgeTraitDefinition>(
+                TraitTag.GetTagName(),
+                TEXT("JobProcessor Trait FullTag Lookup"),
+                false))
+        {
+            return TraitDef;
+        }
+
+        // Then try short row name:
+        // Lucky
+        return TraitTable->FindRow<FWorldForgeTraitDefinition>(
+            GetLeafRowNameFromTraitTag(TraitTag),
+            TEXT("JobProcessor Trait Leaf Lookup"),
+            false);
+    }
+
+    FAgentData BuildTraitScoredAgentForJobSelection(const FAgentData& Agent)
+    {
+        FAgentData ScoredAgent = Agent;
+
+        UDataTable* TraitTable = GetWorldForgeTraitTable();
+        if (!TraitTable || Agent.TraitTags.IsEmpty())
+        {
+            return ScoredAgent;
+        }
+
+        float WorkEfficiencyMultiplier = 1.0f;
+
+        for (const FGameplayTag& TraitTag : Agent.TraitTags)
+        {
+            const FWorldForgeTraitDefinition* TraitDef =
+                FindTraitDefinition(TraitTable, TraitTag);
+
+            if (!TraitDef)
+            {
+                continue;
+            }
+
+            // WorkEfficiencyMultiplier affects how attractive this agent is for jobs
+            // if JobQueue scoring considers CurrentEfficiency.
+            WorkEfficiencyMultiplier *= TraitDef->WorkEfficiencyMultiplier;
+
+            // SkillModifiers are additive temporary scoring bonuses.
+            // They do not permanently change the agent's saved skills.
+            for (const TPair<FGameplayTag, float>& SkillMod : TraitDef->SkillModifiers)
+            {
+                if (!SkillMod.Key.IsValid())
+                {
+                    continue;
+                }
+
+                float& SkillValue = ScoredAgent.Skills.FindOrAdd(SkillMod.Key);
+                SkillValue = FMath::Clamp(SkillValue + SkillMod.Value, 0.0f, 100.0f);
+            }
+        }
+
+        ScoredAgent.CurrentEfficiency = FMath::Clamp(
+            ScoredAgent.CurrentEfficiency * WorkEfficiencyMultiplier,
+            0.0f,
+            2.0f);
+
+        return ScoredAgent;
+    }
+}
 
 // ====================================================================
 // MAIN PROCESS STEP
@@ -24,50 +151,37 @@ void UJobProcessor::ProcessStep(
     TArray<FAgentData>& Agents,
     UWorld* World)
 {
-    // Safety: simulation must always have a valid world
     if (!World)
     {
         return;
     }
 
-    // Clean up completed or invalid jobs from queue
     JobQueue.PruneCompletedJobs();
 
-    // If no jobs exist, periodically generate basic harvest jobs
     if (!JobQueue.HasPendingJobs(SettlementID) && (StepNumber - LastIdleGenStep) > 10)
     {
         GenerateIdleHarvestJobs(SettlementID, StepNumber, World);
         LastIdleGenStep = StepNumber;
     }
 
-    // Process each agent in this settlement
     for (FAgentData& Agent : Agents)
     {
-        // Skip agents not in this settlement
         if (Agent.SettlementID != SettlementID)
         {
             continue;
         }
 
-        // Skip invalid agent states
         if (Agent.State == EAgentState::Dead || Agent.State == EAgentState::Incapacitated)
         {
             continue;
         }
 
-        // ============================================================
-        // PHASE 1: Movement
-        // If agent is moving, advance toward target and skip job logic
-        // ============================================================
         if (Agent.State == EAgentState::MovingToTarget)
         {
             TickMovement(Agent, StepNumber, World);
             continue;
         }
 
-        // ============================================================
-        // PHASE 2: Skip agents already busy
-        // ============================================================
         if (Agent.State == EAgentState::Working ||
             Agent.State == EAgentState::Carrying ||
             Agent.State == EAgentState::Eating ||
@@ -77,13 +191,6 @@ void UJobProcessor::ProcessStep(
             continue;
         }
 
-        // ============================================================
-        // PHASE 3: Assign work
-        // Priority:
-        // 1. Critical needs
-        // 2. Existing queued jobs
-        // 3. Otherwise enter a clean Idle fallback state
-        // ============================================================
         if (HandleCriticalNeeds(Agent, SettlementID, StepNumber, World))
         {
             continue;
@@ -94,15 +201,6 @@ void UJobProcessor::ProcessStep(
             continue;
         }
 
-        
-        // ------------------------------------------------------------
-        // FALLBACK: no suitable job found
-        //
-        // This replaces warning spam with stable behavior:
-        // - clear any stale task state
-        // - ensure the agent is safely idle
-        // - allow future steps to re-evaluate new jobs
-        // ------------------------------------------------------------
         Agent.State = EAgentState::Idle;
         Agent.CurrentJobTag = FGameplayTag();
         Agent.CurrentJobBuildingTag = FGameplayTag();
@@ -111,9 +209,8 @@ void UJobProcessor::ProcessStep(
 }
 
 // ====================================================================
-// MOVEMENT SYSTEM (PHASE 2 IMPLEMENTATION)
+// MOVEMENT SYSTEM
 // Moves agent one grid cell per simulation step toward target.
-// Deterministic and grid-based (no interpolation here).
 // ====================================================================
 void UJobProcessor::TickMovement(
     FAgentData& Agent,
@@ -122,7 +219,6 @@ void UJobProcessor::TickMovement(
 {
     const FIntPoint Target = Agent.CurrentNavTarget;
 
-    // If already at target → trigger arrival logic
     if (Agent.CurrentGridPos == Target)
     {
         OnAgentArrived(Agent, StepNumber, World);
@@ -131,7 +227,6 @@ void UJobProcessor::TickMovement(
 
     FIntPoint Pos = Agent.CurrentGridPos;
 
-    // Move step-by-step (can scale with MovementCellsPerStep)
     for (int32 i = 0; i < MovementCellsPerStep; ++i)
     {
         if (Pos == Target)
@@ -139,8 +234,6 @@ void UJobProcessor::TickMovement(
             break;
         }
 
-        // Simple Manhattan movement (Phase 2)
-        // Phase 3: replace with path following
         if (Pos.X != Target.X)
         {
             Pos.X += (Target.X > Pos.X) ? 1 : -1;
@@ -153,7 +246,6 @@ void UJobProcessor::TickMovement(
 
     Agent.CurrentGridPos = Pos;
 
-    // If reached target → trigger arrival
     if (Agent.CurrentGridPos == Target)
     {
         OnAgentArrived(Agent, StepNumber, World);
@@ -162,8 +254,6 @@ void UJobProcessor::TickMovement(
 
 // ====================================================================
 // ARRIVAL HANDLER
-// Called when agent reaches its navigation target.
-// Responsible for transitioning into work or completing instant jobs.
 // ====================================================================
 void UJobProcessor::OnAgentArrived(
     FAgentData& Agent,
@@ -172,24 +262,16 @@ void UJobProcessor::OnAgentArrived(
 {
     const FGameplayTag JobTag = Agent.CurrentJobTag;
 
-   
-    // ------------------------------------------------------------
-    // Eat Job
-    // ------------------------------------------------------------
     if (JobTag == TAG_Job_Eat)
     {
         Agent.State = EAgentState::Eating;
-
-        // Instantly restore food (Phase 2 simplification)
         Agent.FoodNeed = 100.f;
 
-        // Consume resource from stockpile
         if (USettlementManager* SM = World->GetSubsystem<USettlementManager>())
         {
             SM->ConsumeFromStockpile(Agent.SettlementID, TAG_Item_Food, 1);
         }
 
-        // Reset agent state
         Agent.State = EAgentState::Idle;
         Agent.CurrentJobTag = FGameplayTag();
         Agent.CurrentJobBuildingTag = FGameplayTag();
@@ -197,13 +279,9 @@ void UJobProcessor::OnAgentArrived(
         return;
     }
 
-    // ------------------------------------------------------------
-    // Sleep Job
-    // ------------------------------------------------------------
     if (JobTag == TAG_Job_Sleep)
     {
         Agent.State = EAgentState::Sleeping;
-
         Agent.SleepNeed = 100.f;
 
         Agent.State = EAgentState::Idle;
@@ -213,10 +291,6 @@ void UJobProcessor::OnAgentArrived(
         return;
     }
 
-    // ------------------------------------------------------------
-    // Production / Harvest / Build Jobs
-    // These require starting a production task
-    // ------------------------------------------------------------
     if (JobTag == TAG_Job_Cook ||
         JobTag == TAG_Job_Craft ||
         JobTag == TAG_Job_Build ||
@@ -224,7 +298,6 @@ void UJobProcessor::OnAgentArrived(
     {
         Agent.State = EAgentState::Working;
 
-        // Forward task to ProductionProcessor
         if (UProcessorManager* PM = World->GetSubsystem<UProcessorManager>())
         {
             if (UProductionProcessor* PP = PM->GetTypedProcessor<UProductionProcessor>())
@@ -241,7 +314,6 @@ void UJobProcessor::OnAgentArrived(
 
 // ====================================================================
 // CRITICAL NEEDS HANDLER
-// Creates emergency jobs for hunger or sleep.
 // ====================================================================
 bool UJobProcessor::HandleCriticalNeeds(
     FAgentData& Agent,
@@ -257,9 +329,6 @@ bool UJobProcessor::HandleCriticalNeeds(
         return false;
     }
 
-    // ------------------------------------------------------------
-    // FOOD NEED
-    // ------------------------------------------------------------
     if (Agent.FoodNeed < FoodCriticalThreshold)
     {
         if (!SM->HasStockpile(SettlementID, TAG_Item_Food, 1))
@@ -281,7 +350,6 @@ bool UJobProcessor::HandleCriticalNeeds(
             return false;
         }
 
-        // Create eat job
         FJobRequest EatReq;
         EatReq.SettlementID = SettlementID;
         EatReq.JobTag = TAG_Job_Eat;
@@ -298,9 +366,6 @@ bool UJobProcessor::HandleCriticalNeeds(
         return true;
     }
 
-    // ------------------------------------------------------------
-    // SLEEP NEED
-    // ------------------------------------------------------------
     if (Agent.SleepNeed < SleepCriticalThreshold)
     {
         const int32 ReservationID = RS->TryReserve(
@@ -337,7 +402,11 @@ bool UJobProcessor::HandleCriticalNeeds(
 
 // ====================================================================
 // JOB ASSIGNMENT
-// Finds best job from queue and assigns it to agent
+// Finds best job from queue and assigns it to agent.
+//
+// Trait hook:
+// We create a temporary scoring copy of the agent with trait skill bonuses
+// and work-efficiency modifiers. The real Agent is not permanently changed.
 // ====================================================================
 bool UJobProcessor::TryAssignQueuedJob(
     FAgentData& Agent,
@@ -351,16 +420,13 @@ bool UJobProcessor::TryAssignQueuedJob(
         return false;
     }
 
+    const FAgentData ScoredAgent = BuildTraitScoredAgentForJobSelection(Agent);
+
     FJobRequest* Job = JobQueue.FindBestJobForAgent(
         Agent.AgentID,
-        Agent,
+        ScoredAgent,
         SettlementID);
 
-    // ------------------------------------------------------------
-    // No valid job available:
-    // - do not warn every tick
-    // - let caller place the agent into fallback Idle behavior
-    // ------------------------------------------------------------
     if (!Job)
     {
         return false;
@@ -396,10 +462,8 @@ bool UJobProcessor::TryAssignQueuedJob(
     return true;
 }
 
-
 // ====================================================================
 // JOB ASSIGNMENT IMPLEMENTATION
-// Sets agent state and navigation target
 // ====================================================================
 void UJobProcessor::AssignJobToAgent(
     FAgentData& Agent,
@@ -432,7 +496,6 @@ void UJobProcessor::AssignJobToAgent(
         OnAgentArrived(Agent, StepNumber, World);
     }
 
-    // Broadcast event for UI / systems
     if (UEventBus* Bus = World->GetSubsystem<UEventBus>())
     {
         FSimulationEvent Event;
@@ -447,8 +510,6 @@ void UJobProcessor::AssignJobToAgent(
 
 // ====================================================================
 // GENERATE IDLE HARVEST JOBS
-// Creates fallback harvest jobs when the settlement has no pending jobs.
-// Keeps idle colonists productive and stockpiles replenishing.
 // ====================================================================
 void UJobProcessor::GenerateIdleHarvestJobs(
     int32 SettlementID,
@@ -467,7 +528,6 @@ void UJobProcessor::GenerateIdleHarvestJobs(
     const int32 WoodAmt = SM->GetStockpileAmount(SettlementID, TAG_Item_Wood);
     const int32 StoneAmt = SM->GetStockpileAmount(SettlementID, TAG_Item_Stone);
 
-    // Diagnostic log: show current stockpile levels whenever fallback job generation runs.
     UE_LOG(
         LogTemp,
         Log,
@@ -478,17 +538,6 @@ void UJobProcessor::GenerateIdleHarvestJobs(
         WoodAmt,
         StoneAmt);
 
-    // CHANGE MADE:
-    // The old fallback targets used either fixed coordinates or a very small random
-    // offset range around the same anchor cells. That still produced visible vertical
-    // stacks and tight clustering because many agents were effectively being sent into
-    // the same narrow area.
-    //
-    // This helper now:
-    // 1. uses a wider spread radius,
-    // 2. randomizes X and Y independently,
-    // 3. tries multiple times to find a walkable cell,
-    // 4. falls back safely to the original base cell if no candidate succeeds.
     auto GetSpreadTarget = [&](int32 BaseX, int32 BaseY) -> FIntPoint
         {
             const int32 MaxAttempts = 6;
@@ -506,15 +555,11 @@ void UJobProcessor::GenerateIdleHarvestJobs(
                 }
             }
 
-            // Safe fallback if NavigationContext is missing or no candidate succeeded.
             return FIntPoint(BaseX, BaseY);
         };
 
     if (FoodAmt < 50)
     {
-        // CHANGE MADE:
-        // Post multiple fallback food jobs so more colonists can work at once and
-        // the group does not bottleneck around a single posted target.
         for (int32 i = 0; i < 3; ++i)
         {
             FJobRequest Job;
@@ -523,7 +568,6 @@ void UJobProcessor::GenerateIdleHarvestJobs(
             Job.JobTag = TAG_Job_Harvest_Food;
             Job.RequiredSkill = TAG_Skill_Farming;
             Job.Priority = (FoodAmt < 20) ? EJobPriority::High : EJobPriority::Normal;
-
             Job.TargetGridPos = GetSpreadTarget(10, 10);
 
             if (FJobRequest* J = PostJob(Job))
@@ -541,16 +585,11 @@ void UJobProcessor::GenerateIdleHarvestJobs(
     }
     else
     {
-        UE_LOG(
-            LogTemp,
-            Log,
-            TEXT("[JobProcessor] Skipping food harvest job: Food stockpile is sufficient."));
+        UE_LOG(LogTemp, Log, TEXT("[JobProcessor] Skipping food harvest job: Food stockpile is sufficient."));
     }
 
     if (WoodAmt < 20)
     {
-        // CHANGE MADE:
-        // Post multiple fallback wood jobs with wider-spread targets.
         for (int32 i = 0; i < 2; ++i)
         {
             FJobRequest Job;
@@ -559,7 +598,6 @@ void UJobProcessor::GenerateIdleHarvestJobs(
             Job.JobTag = TAG_Job_Harvest_Wood;
             Job.RequiredSkill = TAG_Skill_Hauling;
             Job.Priority = EJobPriority::Normal;
-
             Job.TargetGridPos = GetSpreadTarget(15, 10);
 
             if (FJobRequest* J = PostJob(Job))
@@ -577,16 +615,11 @@ void UJobProcessor::GenerateIdleHarvestJobs(
     }
     else
     {
-        UE_LOG(
-            LogTemp,
-            Log,
-            TEXT("[JobProcessor] Skipping wood harvest job: Wood stockpile is sufficient."));
+        UE_LOG(LogTemp, Log, TEXT("[JobProcessor] Skipping wood harvest job: Wood stockpile is sufficient."));
     }
 
     if (StoneAmt < 20)
     {
-        // CHANGE MADE:
-        // Post multiple fallback stone jobs with wider-spread targets.
         for (int32 i = 0; i < 2; ++i)
         {
             FJobRequest Job;
@@ -595,7 +628,6 @@ void UJobProcessor::GenerateIdleHarvestJobs(
             Job.JobTag = TAG_Job_Harvest_Stone;
             Job.RequiredSkill = TAG_Skill_Mining;
             Job.Priority = EJobPriority::Normal;
-
             Job.TargetGridPos = GetSpreadTarget(20, 10);
 
             if (FJobRequest* J = PostJob(Job))
@@ -613,26 +645,18 @@ void UJobProcessor::GenerateIdleHarvestJobs(
     }
     else
     {
-        UE_LOG(
-            LogTemp,
-            Log,
-            TEXT("[JobProcessor] Skipping stone harvest job: Stone stockpile is sufficient."));
+        UE_LOG(LogTemp, Log, TEXT("[JobProcessor] Skipping stone harvest job: Stone stockpile is sufficient."));
     }
 }
 
 // ====================================================================
 // PUBLIC API
-// Thin wrappers around JobQueue for processor-facing access.
 // ====================================================================
-
-// Posts a new job into the queue and returns a pointer to the inserted entry.
 FJobRequest* UJobProcessor::PostJob(const FJobRequest& Request)
 {
     return JobQueue.PostJob(Request);
 }
 
-// Cancels all jobs owned by an agent and notifies ReservationSystem
-// so reserved targets can be released.
 void UJobProcessor::CancelJobsForAgent(int32 AgentID, UWorld* World)
 {
     JobQueue.CancelAllJobsForAgent(AgentID);
@@ -643,13 +667,11 @@ void UJobProcessor::CancelJobsForAgent(int32 AgentID, UWorld* World)
     }
 }
 
-// Returns number of currently pending (unassigned) jobs for a settlement.
 int32 UJobProcessor::GetPendingJobCount(int32 SettlementID) const
 {
     return JobQueue.GetPendingCount(SettlementID);
 }
 
-// Returns number of currently assigned jobs for a settlement.
 int32 UJobProcessor::GetAssignedJobCount(int32 SettlementID) const
 {
     return JobQueue.GetAssignedCount(SettlementID);
@@ -690,19 +712,16 @@ FGameplayTag UJobProcessor::GetSkillTagForJob(FGameplayTag JobTag) const
     return FGameplayTag();
 }
 
-// Returns all jobs in the internal queue.
 const TArray<FJobRequest>& UJobProcessor::GetAllJobs() const
 {
     return JobQueue.GetAllJobs();
 }
 
-// Restores the internal queue from saved job data.
 void UJobProcessor::RestoreJobQueue(const TArray<FJobRequest>& Saved)
 {
     JobQueue.RestoreFromSave(Saved);
 }
 
-// Returns job queue contents for save serialization.
 const TArray<FJobRequest>& UJobProcessor::GetJobsForSave() const
 {
     return JobQueue.GetJobsForSave();
