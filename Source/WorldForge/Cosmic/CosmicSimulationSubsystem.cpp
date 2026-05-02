@@ -18,6 +18,7 @@ void UCosmicSimulationSubsystem::Deinitialize()
     NarrativePressure = FNarrativePressureState(); // ADDED
     NextEntityID = 0;              // ADDED
     NextAnchorID = 0;              // ADDED
+    CachedFaithFactors.Empty();    // BF-10
 
     Super::Deinitialize();
 }
@@ -25,10 +26,27 @@ void UCosmicSimulationSubsystem::Deinitialize()
 void UCosmicSimulationSubsystem::OnSimStep(int32 StepNumber, int32 SettlementID,
     TArray<FAgentData>& Agents, UWorld* World)
 {
-    (void)SettlementID; // ADDED
-    (void)Agents;       // ADDED
-
     if (!World) return;
+
+    // ── BF-10 FIX: Compute and cache the average PurposeNeed for this
+    // settlement so ProcessAnchorPower can use real colonist faith data
+    // instead of a hardcoded 0.5f.
+    {
+        float SumPurpose = 0.0f;
+        int32 LivingCount = 0;
+        for (const FAgentData& Agent : Agents)
+        {
+            if (Agent.State != EAgentState::Dead)
+            {
+                SumPurpose += Agent.PurposeNeed;
+                ++LivingCount;
+            }
+        }
+        const float AvgPurpose = (LivingCount > 0)
+            ? (SumPurpose / static_cast<float>(LivingCount))
+            : 50.0f;
+        CachedFaithFactors.Add(SettlementID, AvgPurpose / 100.0f);
+    }
 
     USettlementManager* SM = World->GetSubsystem<USettlementManager>();
     UEventBus* Bus = World->GetSubsystem<UEventBus>();
@@ -177,8 +195,8 @@ void UCosmicSimulationSubsystem::ProcessAnchorPower(
     int32 StepNumber,
     USettlementManager* SM)
 {
-    (void)StepNumber; // ADDED
-    (void)SM;         // ADDED
+    (void)StepNumber;
+    (void)SM;
 
     for (const FAnchorRecord& A : AnchorRecords)
     {
@@ -187,11 +205,11 @@ void UCosmicSimulationSubsystem::ProcessAnchorPower(
             continue;
         }
 
-        // Power = PowerPerSimDay * (avgPurposeNeed / 100.0f)
-        // PurposeNeed is the colonist Purpose need (0-100).
-        // Phase 3B: query actual Purpose need average from SettlementManager.
-        // Stub: use 0.5 faith factor (50% purpose) until need query is wired.
-        const float FaithFactor = 0.5f;
+        // ── BF-10 FIX: Use real colonist PurposeNeed average from cached
+        // faith factors.  Falls back to 0.5 (50% purpose) if the settlement
+        // has not yet been processed this tick cycle.
+        const float* CachedFactor = CachedFaithFactors.Find(A.SettlementID);
+        const float FaithFactor = CachedFactor ? *CachedFactor : 0.5f;
         const float PowerAdded = A.PowerPerSimDay * FaithFactor;
 
         AddPowerToSource(A.BoundEntityTag, PowerAdded, &FCosmicEntityState::AnchorPower);

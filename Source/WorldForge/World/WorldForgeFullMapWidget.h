@@ -1,15 +1,18 @@
-﻿#pragma once
+// WorldForgeFullMapWidget.h
+
+#pragma once
 
 #include "CoreMinimal.h"
 #include "Blueprint/UserWidget.h"
 #include "Input/Reply.h"
+#include "WorldMapSubsystem.h"
 #include "WorldForgeFullMapWidget.generated.h"
-
 
 class UImage;
 class UBorder;
 class UTextBlock;
 class UButton;
+class UCheckBox;
 class UWorldMapSubsystem;
 class APlayerController;
 struct FGeometry;
@@ -26,17 +29,9 @@ public:
     virtual void NativeDestruct() override;
     virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
 
-    virtual FReply NativeOnKeyDown(
-        const FGeometry& InGeometry,
-        const FKeyEvent& InKeyEvent) override;
-
-    virtual FReply NativeOnKeyUp(
-        const FGeometry& InGeometry,
-        const FKeyEvent& InKeyEvent) override;
-
-    virtual FReply NativeOnMouseWheel(
-        const FGeometry& InGeometry,
-        const FPointerEvent& InMouseEvent) override;
+    virtual FReply NativeOnKeyDown(const FGeometry& InGeometry, const FKeyEvent& InKeyEvent) override;
+    virtual FReply NativeOnKeyUp(const FGeometry& InGeometry, const FKeyEvent& InKeyEvent) override;
+    virtual FReply NativeOnMouseWheel(const FGeometry& InGeometry, const FPointerEvent& InMouseEvent) override;
 
 protected:
     UPROPERTY(meta = (BindWidget), BlueprintReadOnly)
@@ -54,6 +49,67 @@ protected:
     UPROPERTY(meta = (BindWidget), BlueprintReadOnly)
     UButton* BTN_Close = nullptr;
 
+    // ------------------------------------------------------------------
+    // Overlay toggle checkboxes (DF-style multi-layer system).
+    //
+    // Add matching UCheckBox names in the WBP:
+    //
+    //   CHK_Political
+    //   CHK_Economy
+    //   CHK_Cosmic
+    //   CHK_Trade
+    //   CHK_Underground
+    //   CHK_Fog
+    //
+    // All are BindWidgetOptional so the C++ compiles/runs even if the
+    // WBP hasn't been updated yet.  Terrain is always on (no toggle).
+    // ------------------------------------------------------------------
+    UPROPERTY(meta = (BindWidgetOptional), BlueprintReadOnly)
+    UCheckBox* CHK_Political = nullptr;
+
+    UPROPERTY(meta = (BindWidgetOptional), BlueprintReadOnly)
+    UCheckBox* CHK_Economy = nullptr;
+
+    UPROPERTY(meta = (BindWidgetOptional), BlueprintReadOnly)
+    UCheckBox* CHK_Cosmic = nullptr;
+
+    UPROPERTY(meta = (BindWidgetOptional), BlueprintReadOnly)
+    UCheckBox* CHK_Trade = nullptr;
+
+    UPROPERTY(meta = (BindWidgetOptional), BlueprintReadOnly)
+    UCheckBox* CHK_Underground = nullptr;
+
+    UPROPERTY(meta = (BindWidgetOptional), BlueprintReadOnly)
+    UCheckBox* CHK_Fog = nullptr;
+
+    // ------------------------------------------------------------------
+    // Legacy overlay buttons (backwards compatibility).
+    //
+    // If the WBP still has BTN_Terrain / BTN_Political / etc., clicking
+    // them will act as "solo this overlay" — clearing all other layers
+    // and enabling just the clicked one (same as the old single-mode
+    // behavior).
+    //
+    // Once you switch the WBP to checkboxes you can remove these.
+    // ------------------------------------------------------------------
+    UPROPERTY(meta = (BindWidgetOptional), BlueprintReadOnly)
+    UButton* BTN_Terrain = nullptr;
+
+    UPROPERTY(meta = (BindWidgetOptional), BlueprintReadOnly)
+    UButton* BTN_Political = nullptr;
+
+    UPROPERTY(meta = (BindWidgetOptional), BlueprintReadOnly)
+    UButton* BTN_Economy = nullptr;
+
+    UPROPERTY(meta = (BindWidgetOptional), BlueprintReadOnly)
+    UButton* BTN_Cosmic = nullptr;
+
+    UPROPERTY(meta = (BindWidgetOptional), BlueprintReadOnly)
+    UButton* BTN_Trade = nullptr;
+
+    UPROPERTY(meta = (BindWidgetOptional), BlueprintReadOnly)
+    UButton* BTN_Underground = nullptr;
+
     UPROPERTY(Transient)
     TObjectPtr<UWorldMapSubsystem> MapSubsystem = nullptr;
 
@@ -69,7 +125,6 @@ protected:
     bool  bHasValidSelection = false;
     bool  bInputLockedToUI = false;
 
-    // Step sizes for arrow-key tile selection (unchanged from original)
     UPROPERTY(EditAnywhere, Category = "WorldForge|Map")
     int32 KeyboardMoveStep = 4;
 
@@ -78,16 +133,6 @@ protected:
 
     // ------------------------------------------------------------------
     // Pan / Zoom state
-    //
-    // ViewCenterX/Y: the point on the map texture (0..1 UV) that is
-    //   currently centred on screen.  Default 0.5,0.5 = world centre.
-    //
-    // Zoom: 1 = whole map visible.  2 = 2× magnification, etc.
-    //
-    // WASD holds pan the view.
-    // Shift+WASD pans faster.
-    // Mouse wheel zooms.
-    // Arrow keys still move the tile selection cursor.
     // ------------------------------------------------------------------
     float ViewCenterX = 0.5f;
     float ViewCenterY = 0.5f;
@@ -99,7 +144,6 @@ protected:
     bool bPanRight = false;
     bool bPanFast = false;
 
-    // Units per second at Zoom=1 (fraction of map width/height)
     UPROPERTY(EditAnywhere, Category = "WorldForge|Map")
     float PanSpeed = 0.35f;
 
@@ -112,7 +156,6 @@ protected:
     UPROPERTY(EditAnywhere, Category = "WorldForge|Map")
     float MaxZoom = 8.0f;
 
-    // How much Zoom changes per mouse-wheel click
     UPROPERTY(EditAnywhere, Category = "WorldForge|Map")
     float ZoomStep = 0.5f;
 
@@ -127,24 +170,68 @@ protected:
     UFUNCTION()
     void HandleCloseClicked();
 
+    // ── Checkbox toggle handlers ─────────────────────────────────
+    UFUNCTION()
+    void HandlePoliticalToggled(bool bIsChecked);
+
+    UFUNCTION()
+    void HandleEconomyToggled(bool bIsChecked);
+
+    UFUNCTION()
+    void HandleCosmicToggled(bool bIsChecked);
+
+    UFUNCTION()
+    void HandleTradeToggled(bool bIsChecked);
+
+    UFUNCTION()
+    void HandleUndergroundToggled(bool bIsChecked);
+
+    UFUNCTION()
+    void HandleFogToggled(bool bIsChecked);
+
+    // ── Legacy button handlers (solo-mode backwards compat) ──────
+    UFUNCTION()
+    void HandleTerrainOverlayClicked();
+
+    UFUNCTION()
+    void HandlePoliticalOverlayClicked();
+
+    UFUNCTION()
+    void HandleEconomyOverlayClicked();
+
+    UFUNCTION()
+    void HandleCosmicOverlayClicked();
+
+    UFUNCTION()
+    void HandleTradeOverlayClicked();
+
+    UFUNCTION()
+    void HandleUndergroundOverlayClicked();
+
+    // Sets a single overlay layer and refreshes the map.
+    void SetOverlayLayerAndRefresh(int32 LayerBit, bool bActive);
+
+    // Legacy: clears all non-terrain overlays and enables one mode.
+    void SetMapOverlayMode(EWorldMapOverlayMode NewMode);
+
+    void RefreshMapTexture();
+
+    // Sync checkbox checked states to match subsystem's ActiveOverlayLayers.
+    void SyncCheckboxesToOverlayState();
+
     void UpdateSelectionVisual();
     void UpdateSelectionText();
 
     void EnterMapSelectionInputMode();
     void RestoreGameInputMode();
 
-    // Arrow-key selection movement (unchanged from original)
     void MoveSelectionBy(int32 DeltaX, int32 DeltaY, bool bFastMove);
     void ClampSelectionToMap();
     void EnsureValidInitialSelection();
 
-    // Apply the current Zoom + ViewCenter as a render transform on IMG_Map
     void ApplyMapTransform();
 
-    // Convert a raw widget-local UV (0..1 in widget space) to a
-    // world-map UV (0..1 in texture space) using the current pan/zoom.
     FVector2D WidgetUVToWorldUV(const FVector2D& WidgetUV) const;
 
-    // Clamp ViewCenter so the view never shows outside the map edges
     void ClampViewCenter();
 };

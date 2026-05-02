@@ -6,15 +6,17 @@
 #include "BuildModeTypes.h"
 #include "VoxelWorldManager.h"
 #include "WorldForgeDataTypes.h"
+#include "Player/DigResult.h"
 #include "BuildModeManager.generated.h"
 
-
 class ABuildGhostActor;
+class ADigGhostActor;
 class APlayerController;
 class UPlayerBuildContext;
 class UVoxelWorldManager;
 class UVoxelConstructionSystem;
 class USettlementManager;
+class UDigSubsystem;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnBuildModeChanged, EBuildMode, NewMode);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnCellCountChanged, int32, CellCount);
@@ -41,7 +43,13 @@ public:
 	EBuildMode GetCurrentMode() const { return CurrentMode; }
 
 	UFUNCTION(BlueprintPure, Category = "WorldForge|Build")
-	bool IsInBuildMode() const { return CurrentMode != EBuildMode::None; }
+	EBuildToolMode GetCurrentToolMode() const { return CurrentToolMode; }
+
+	UFUNCTION(BlueprintPure, Category = "WorldForge|Build")
+	bool IsInBuildMode() const
+	{
+		return CurrentMode != EBuildMode::None || CurrentToolMode != EBuildToolMode::None;
+	}
 
 	UFUNCTION(BlueprintPure, Category = "WorldForge|Build")
 	FIntPoint GetHoveredCell() const { return CurrentHoveredCell; }
@@ -60,6 +68,9 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "WorldForge|Build")
 	bool HasValidHoveredCell() const { return bHoveredCellValid; }
+
+	UFUNCTION(BlueprintPure, Category = "WorldForge|Build")
+	bool IsInDigMode() const { return CurrentToolMode == EBuildToolMode::Dig; }
 
 	// ================================
 	// Live Cost / Availability Queries
@@ -90,8 +101,23 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "WorldForge|Build")
 	void ExitBuildMode();
 
+	// ----- Phase 1: Dig Tool Mode -----
+
+	UFUNCTION(BlueprintCallable, Category = "WorldForge|Build")
+	void EnterDigMode();
+
+	UFUNCTION(BlueprintCallable, Category = "WorldForge|Build")
+	void ExitDigMode();
+
+	UFUNCTION(BlueprintCallable, Category = "WorldForge|Build")
+	void ExecuteDig();
+
+	UFUNCTION(BlueprintCallable, Category = "WorldForge|Build")
+	void UndoLastDig();
+
 	// ================================
-	// Input Handlers (called by PlayerController)
+	// Input Handlers
+	// Called by PlayerController
 	// ================================
 
 	UFUNCTION(BlueprintCallable, Category = "WorldForge|Build")
@@ -115,7 +141,7 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "WorldForge|Build")
 	void UpdateFromMouse(APlayerController* PC);
 
-	// Batch 2: external drag state from PlayerController press/release
+	// Batch 2: external drag state from PlayerController press/release.
 	UFUNCTION(BlueprintCallable, Category = "WorldForge|Build")
 	void SetDragBuildActive(bool bActive);
 
@@ -130,7 +156,8 @@ public:
 	void SetBuildAgentID(int32 AgentID);
 
 	// ================================
-	// Delegates (for UI updates)
+	// Delegates
+	// UI listens to these.
 	// ================================
 
 	UPROPERTY(BlueprintAssignable, Category = "WorldForge|Build")
@@ -151,6 +178,8 @@ public:
 private:
 
 	EBuildMode CurrentMode = EBuildMode::None;
+	EBuildToolMode CurrentToolMode = EBuildToolMode::None;
+
 	FGameplayTag SelectedBuildingTag;
 	FGameplayTag SelectedMaterialTag;
 	int32 RotationIndex = 0;
@@ -158,15 +187,13 @@ private:
 
 	// 3D hover target. Tracked alongside CurrentHoveredCell so existing
 	// 2D UI bindings keep working unchanged. Populated by UpdateFromMouse
-	// from either terrain-derived Z or support-block face attachment when the
-	// cursor is directly over an existing placed voxel block or a pending
-	// selected ghost block.
+	// from either terrain-derived Z or support-block face attachment.
 	FIntVector CurrentHoveredVoxel = FIntVector::ZeroValue;
 
 	bool bHoveredCellValid = false;
 	float LastHitZ = 0.0f;
 
-	// Batch 1: suppress repeated confirm input immediately after a successful commit
+	// Batch 1: suppress repeated confirm input immediately after a successful commit.
 	bool bJustCommitted = false;
 
 	// Batch 2: keep last valid hover so the ghost stays stable when the cursor
@@ -190,17 +217,30 @@ private:
 	int32 BuildAgentID = -1;
 
 	UPROPERTY()
-	ABuildGhostActor* GhostActor = nullptr;
+	TObjectPtr<ABuildGhostActor> GhostActor = nullptr;
+
+	// ----- Phase 1: Dig Ghost -----
+
+	UPROPERTY(EditDefaultsOnly, Category = "Build|Dig")
+	TSubclassOf<ADigGhostActor> DigGhostClass;
+
+	UPROPERTY()
+	TObjectPtr<ADigGhostActor> ActiveDigGhost = nullptr;
+
+	UPROPERTY()
+	TObjectPtr<UDigSubsystem> CachedDigSubsystem = nullptr;
 
 	UPlayerBuildContext* GetBuildContext() const;
 	UVoxelWorldManager* GetVoxelManager() const;
 	UVoxelConstructionSystem* GetConstructionSystem() const;
 	USettlementManager* GetSettlementManager() const;
+	UDigSubsystem* GetDigSubsystem();
 
 	int32 GetEffectiveSettlementID() const;
 
 	bool CommitPrefabBuild();
 	bool CommitCustomBuild();
+
 	void SpawnGhost();
 	void DestroyGhost();
 	void UpdateGhost();
@@ -215,7 +255,12 @@ private:
 		FIntVector& OutSupportBlockVoxel,
 		FVector& OutHitNormal) const;
 
-	// Terrain validation helpers
+	// ----- Phase 1: Dig Mode Tick -----
+
+	void TickDigMode(float DeltaTime);
+	bool RaycastDigTarget(FIntVector& OutGridPos, FVector& OutWorldPos) const;
+
+	// Terrain validation helpers.
 	float GetMaxGroundBuildSlopeDegrees() const;
 	bool IsBuildableTerrainType(EWorldForgeTerrainType TerrainType) const;
 	bool ValidateGroundTerrainPlacement(const FIntVector& Voxel, FString& OutReason) const;

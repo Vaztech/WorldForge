@@ -1,5 +1,6 @@
 // Source/WorldForge/Player/BuildGhostActor.cpp
 #include "BuildGhostActor.h"
+#include "BuildingTagHelper.h"
 #include "VoxelWorldManager.h"
 #include "Components/StaticMeshComponent.h"
 #include "Materials/MaterialInstanceDynamic.h"
@@ -161,82 +162,7 @@ FLinearColor ABuildGhostActor::GetColorForState(EBuildGhostState State) const
     }
 }
 
-bool ABuildGhostActor::TryParseExplicitPrefabDimensions(
-    const FString& Source,
-    int32& OutWidth,
-    int32& OutDepth,
-    int32& OutHeight
-) const
-{
-    OutWidth = 0;
-    OutDepth = 0;
-    OutHeight = 0;
-
-    const int32 Length = Source.Len();
-    for (int32 Start = 0; Start < Length; ++Start)
-    {
-        if (!FChar::IsDigit(Source[Start]))
-        {
-            continue;
-        }
-
-        int32 Cursor = Start;
-
-        FString A;
-        while (Cursor < Length && FChar::IsDigit(Source[Cursor]))
-        {
-            A.AppendChar(Source[Cursor]);
-            ++Cursor;
-        }
-
-        if (A.IsEmpty() || Cursor >= Length || (Source[Cursor] != TCHAR('x') && Source[Cursor] != TCHAR('X')))
-        {
-            continue;
-        }
-
-        ++Cursor;
-
-        FString B;
-        while (Cursor < Length && FChar::IsDigit(Source[Cursor]))
-        {
-            B.AppendChar(Source[Cursor]);
-            ++Cursor;
-        }
-
-        if (B.IsEmpty() || Cursor >= Length || (Source[Cursor] != TCHAR('x') && Source[Cursor] != TCHAR('X')))
-        {
-            continue;
-        }
-
-        ++Cursor;
-
-        FString C;
-        while (Cursor < Length && FChar::IsDigit(Source[Cursor]))
-        {
-            C.AppendChar(Source[Cursor]);
-            ++Cursor;
-        }
-
-        if (C.IsEmpty())
-        {
-            continue;
-        }
-
-        const int32 ParsedWidth = FCString::Atoi(*A);
-        const int32 ParsedDepth = FCString::Atoi(*B);
-        const int32 ParsedHeight = FCString::Atoi(*C);
-
-        if (ParsedWidth > 0 && ParsedDepth > 0 && ParsedHeight > 0)
-        {
-            OutWidth = ParsedWidth;
-            OutDepth = ParsedDepth;
-            OutHeight = ParsedHeight;
-            return true;
-        }
-    }
-
-    return false;
-}
+// TryParseExplicitPrefabDimensions moved to UBuildingTagHelper::TryParsePrefabDimensions
 
 FIntPoint ABuildGhostActor::RotateLocalCell(FIntPoint LocalXY, int32 RotationIndex, int32 Width, int32 Depth) const
 {
@@ -257,41 +183,7 @@ FIntPoint ABuildGhostActor::RotateLocalCell(FIntPoint LocalXY, int32 RotationInd
     }
 }
 
-int32 ABuildGhostActor::GetLegacyPrefabBlockCount(FGameplayTag BuildingTag) const
-{
-    const FString S = BuildingTag.ToString();
-
-    int32 TrailingDigitStart = INDEX_NONE;
-    for (int32 Index = S.Len() - 1; Index >= 0; --Index)
-    {
-        if (FChar::IsDigit(S[Index]))
-        {
-            TrailingDigitStart = Index;
-        }
-        else
-        {
-            break;
-        }
-    }
-
-    if (TrailingDigitStart != INDEX_NONE)
-    {
-        const FString TrailingDigits = S.Mid(TrailingDigitStart);
-        const int32 ParsedCount = FCString::Atoi(*TrailingDigits);
-        if (ParsedCount > 0)
-        {
-            return ParsedCount;
-        }
-    }
-
-    if (S.Contains(TEXT("Stockpile"))) return 8;
-    if (S.Contains(TEXT("Kitchen"))) return 16;
-    if (S.Contains(TEXT("Carpenter"))) return 20;
-    if (S.Contains(TEXT("Barracks"))) return 24;
-    if (S.Contains(TEXT("Shrine"))) return 12;
-
-    return 10;
-}
+// GetLegacyPrefabBlockCount moved to UBuildingTagHelper::GetBlockCountForBuildingTag
 
 void ABuildGhostActor::UpdatePrefabGhost(
     FVector WorldPosition,
@@ -313,7 +205,7 @@ void ABuildGhostActor::UpdatePrefabGhost(
     int32 Depth = 0;
     int32 Height = 0;
 
-    if (TryParseExplicitPrefabDimensions(BuildingTag.ToString(), Width, Depth, Height))
+    if (UBuildingTagHelper::TryParsePrefabDimensions(BuildingTag.ToString(), Width, Depth, Height))
     {
         PreviewBlocks.Reserve(Width * Depth * Height);
 
@@ -331,7 +223,7 @@ void ABuildGhostActor::UpdatePrefabGhost(
     }
     else
     {
-        const int32 LegacyCount = GetLegacyPrefabBlockCount(BuildingTag);
+        const int32 LegacyCount = UBuildingTagHelper::GetBlockCountForBuildingTag(BuildingTag);
         PreviewBlocks.Reserve(LegacyCount);
 
         for (int32 BlockNumber = 0; BlockNumber < LegacyCount; ++BlockNumber)

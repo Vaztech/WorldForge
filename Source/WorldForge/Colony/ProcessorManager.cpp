@@ -2,6 +2,7 @@
 
 #include "Processors/NeedsProcessor.h"
 #include "Processors/JobProcessor.h"
+#include "Processors/MiningProcessor.h"
 #include "Processors/ReservationProcessor.h"
 #include "Processors/ConstructionProcessor.h"
 #include "Processors/ProductionProcessor.h"
@@ -99,6 +100,7 @@ void UProcessorManager::InitializeProcessors()
 {
     OrderedProcessors.Add(NewObject<UNeedsProcessor>(this));
     OrderedProcessors.Add(NewObject<UJobProcessor>(this));
+    OrderedProcessors.Add(NewObject<UMiningProcessor>(this));
     OrderedProcessors.Add(NewObject<UReservationProcessor>(this));
     OrderedProcessors.Add(NewObject<UConstructionProcessor>(this));
     OrderedProcessors.Add(NewObject<UProductionProcessor>(this));

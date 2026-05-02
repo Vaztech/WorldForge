@@ -68,6 +68,16 @@ protected:
     UPROPERTY(EditDefaultsOnly, Category = "Input|Build")
     TObjectPtr<UInputAction> IA_BuildUndo;
 
+    // ----- Phase 1: Dig Mode Input -----
+
+    UPROPERTY(EditDefaultsOnly, Category = "Input|Build|Dig")
+    TObjectPtr<UInputAction> IA_ToggleDigMode;
+
+    // ----- Phase 4 Stub: Mine Mode Input -----
+
+    UPROPERTY(EditDefaultsOnly, Category = "Input|Build|Mine")
+    TObjectPtr<UInputAction> IA_ToggleMineMode;
+
     UPROPERTY(EditDefaultsOnly, Category = "UI")
     TSubclassOf<UBuildModeWidget> BuildWidgetClass;
 
@@ -79,6 +89,14 @@ protected:
 
     UPROPERTY(EditDefaultsOnly, Category = "Input|Build", meta = (ClampMin = "0.05", ClampMax = "1.0"))
     float BuildClickDebounceSeconds = 0.2f;
+
+    // ----- Phase 1: Dig Mode Methods -----
+
+    UFUNCTION()
+    void ToggleDigMode();
+
+    UFUNCTION()
+    void ToggleMineMode();
 
 private:
     void OnBuildClickStarted(const FInputActionValue& Value);

@@ -69,6 +69,9 @@ private:
     int32                      NextEntityID = 0;
     int32                      NextAnchorID = 0;
 
+    // BF-10: Per-settlement average PurposeNeed / 100.0, refreshed each OnSimStep.
+    TMap<int32, float>         CachedFaithFactors;
+
     // How many sim steps = 1 in-game day (from SimulationTimeManager.StepsPerDay)
     static constexpr int32 StepsPerDay = 50;
 

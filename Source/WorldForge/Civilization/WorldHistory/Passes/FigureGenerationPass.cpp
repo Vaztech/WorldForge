@@ -47,7 +47,7 @@ void FFigureGenerationPass::Execute(FWorldHistoryContext& Context)
 
         UE_LOG(
             LogTemp,
-            Warning,
+            Log,
             TEXT("[FigurePass] Generated Figure %d: %s"),
             i,
             *Figure);

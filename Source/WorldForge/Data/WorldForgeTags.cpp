@@ -11,6 +11,7 @@ UE_DEFINE_GAMEPLAY_TAG(TAG_Job_Idle, "WorldForge.Job.Idle");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Job_Harvest_Food, "WorldForge.Job.Harvest.Food");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Job_Harvest_Wood, "WorldForge.Job.Harvest.Wood");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Job_Harvest_Stone, "WorldForge.Job.Harvest.Stone");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Job_Mine, "WorldForge.Job.Mine");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Job_Harvest, "WorldForge.Job.Harvest");
 
 // ---- Item tags -----------------------------------------------------
@@ -69,6 +70,44 @@ UE_DEFINE_GAMEPLAY_TAG(TAG_Building_Economic_MarketStall, "WorldForge.Building.E
 // UWorldForgeTagLibrary -- Blueprint accessors for native tags
 // ====================================================================
 
+// ====================================================================
+// Phase 1: Digging & Mining Tags
+// ====================================================================
+
+// ---- Tool tags -----------------------------------------------------
+UE_DEFINE_GAMEPLAY_TAG(TAG_Tool_Dig, "WorldForge.Tool.Dig");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Tool_Mine, "WorldForge.Tool.Mine");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Tool_Pickaxe, "WorldForge.Tool.Pickaxe");
+
+// ---- Terrain block type tags ---------------------------------------
+UE_DEFINE_GAMEPLAY_TAG(TAG_Terrain_Dirt, "WorldForge.Terrain.Dirt");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Terrain_Stone, "WorldForge.Terrain.Stone");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Terrain_Gravel, "WorldForge.Terrain.Gravel");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Terrain_Clay, "WorldForge.Terrain.Clay");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Terrain_Sand, "WorldForge.Terrain.Sand");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Terrain_Bedrock, "WorldForge.Terrain.Bedrock");
+
+// ---- Depth tier tags -----------------------------------------------
+UE_DEFINE_GAMEPLAY_TAG(TAG_DepthTier_Surface, "WorldForge.DepthTier.Surface");
+UE_DEFINE_GAMEPLAY_TAG(TAG_DepthTier_Shallow, "WorldForge.DepthTier.Shallow");
+UE_DEFINE_GAMEPLAY_TAG(TAG_DepthTier_Mid, "WorldForge.DepthTier.Mid");
+UE_DEFINE_GAMEPLAY_TAG(TAG_DepthTier_Deep, "WorldForge.DepthTier.Deep");
+UE_DEFINE_GAMEPLAY_TAG(TAG_DepthTier_Abyss, "WorldForge.DepthTier.Abyss");
+
+// ---- Resource tags -------------------------------------------------
+UE_DEFINE_GAMEPLAY_TAG(TAG_Resource_Stone, "WorldForge.Resource.Stone");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Resource_Iron, "WorldForge.Resource.Iron");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Resource_Copper, "WorldForge.Resource.Copper");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Resource_Coal, "WorldForge.Resource.Coal");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Resource_Tin, "WorldForge.Resource.Tin");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Resource_Silver, "WorldForge.Resource.Silver");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Resource_Gold, "WorldForge.Resource.Gold");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Resource_Quartz, "WorldForge.Resource.Quartz");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Resource_Mithril, "WorldForge.Resource.Mithril");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Resource_Obsidian, "WorldForge.Resource.Obsidian");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Resource_VoidCrystal, "WorldForge.Resource.VoidCrystal");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Resource_Starstone, "WorldForge.Resource.Starstone");
+
 // ---- Job tags ------------------------------------------------------
 FGameplayTag UWorldForgeTagLibrary::GetJobEatTag()
 {
@@ -123,6 +162,11 @@ FGameplayTag UWorldForgeTagLibrary::GetJobHarvestWoodTag()
 FGameplayTag UWorldForgeTagLibrary::GetJobHarvestStoneTag()
 {
     return TAG_Job_Harvest_Stone;
+}
+
+FGameplayTag UWorldForgeTagLibrary::GetJobMineTag()
+{
+    return TAG_Job_Mine;
 }
 
 // ---- Item tags -----------------------------------------------------

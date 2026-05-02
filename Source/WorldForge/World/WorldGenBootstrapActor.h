@@ -7,6 +7,7 @@
 
 class UWorldForgeRNG;
 class UWorldGenPipeline;
+class UUserWidget;
 
 UCLASS()
 class WORLDFORGE_API AWorldGenBootstrapActor : public AActor
@@ -38,6 +39,9 @@ private:
 
     UPROPERTY(EditAnywhere, Category = "WorldForge|WorldGen")
     TSubclassOf<UWorldGenPipeline> PipelineClass;
+
+    UPROPERTY(EditAnywhere, Category = "WorldForge|UI")
+    TSubclassOf<UUserWidget> FullMapWidgetClass;
 
     UPROPERTY(Transient)
     TObjectPtr<UWorldForgeRNG> RNG = nullptr;

@@ -30,26 +30,16 @@ public:
     int32 SeaLevelVoxels = 10;
 
     // ── v2 terrain height fields (single-source-of-truth rewrite) ──
-    // These replace the old multi-system mountain/basin/river noise.
-    // Tile.Elevation (0–1) is the ONLY input for terrain shape.
-
-    // Tile elevation at or below this value → underwater.
-    // Must match Step04_AssignBiomes water threshold (~0.48).
+    // Tile.Elevation (0–1) is the primary input for terrain shape.
     UPROPERTY()
     float WaterThreshold = 0.48f;
 
-    // How deep the ocean floor goes below sea level (in voxels).
     UPROPERTY()
     int32 OceanDepthVoxels = 30;
 
-    // Maximum land height above sea level (in voxels).
-    // Mountain peaks at tile elevation 1.0 reach SeaLevel + this.
     UPROPERTY()
     int32 MaxLandHeightVoxels = 150;
 
-    // Power curve for land elevation.  < 1.0 expands lowlands and
-    // compresses peaks, giving most land gentle terrain with rare
-    // dramatic mountains.  0.65 is a good starting point.
     UPROPERTY()
     float LandElevationExponent = 0.65f;
 
@@ -101,11 +91,61 @@ public:
     UPROPERTY()
     float MountainFalloffPower = 2.2f;
 
-    // Step03 tectonic ranges — kept for future sub-tile crag detail.
-    // NOT consumed by the v2 height formula (tile elevation already
-    // encodes mountain contribution from Step03).
+    // ── v2.1 Mountain ridge detail layer ──
+    UPROPERTY()
+    float MountainRidgeHeightScale = 40.0f;
+
+    UPROPERTY()
+    float MountainRidgeWidthScale = 0.8f;
+
+    UPROPERTY()
+    float MountainCragFrequency = 0.06f;
+
+    UPROPERTY()
+    float MountainCragAmplitude = 6.0f;
+
     UPROPERTY()
     TArray<FMountainRange> PipelineMountainRanges;
+
+    // ── v3.0 Volcano primitives ──
+    UPROPERTY()
+    TArray<FVolcanoData> PipelineVolcanoes;
+
+    // ── v4.0: 3D SDF Worm Cave Parameters ──
+    UPROPERTY()
+    float CaveWormFrequency = 0.012f;
+
+    UPROPERTY()
+    float CaveWormThreshold = 0.35f;
+
+    UPROPERTY()
+    float CaveCarveStrength = 18.0f;
+
+    UPROPERTY()
+    float CaveDepthFadeStart = 8.0f;
+
+    UPROPERTY()
+    float CaveDepthFadeEnd = 128.0f;
+
+    // ── v4.0: 3D SDF Canyon Parameters ──
+    UPROPERTY()
+    float CanyonRidgeFrequency = 0.004f;
+
+    UPROPERTY()
+    float CanyonDomainWarpStrength = 200.0f;
+
+    UPROPERTY()
+    float CanyonDomainWarpFrequency = 0.003f;
+
+    UPROPERTY()
+    float CanyonMaxDepthVoxels = 40.0f;
+
+    // ── v4.0: Lava Tube Sub-Layer ──
+    UPROPERTY()
+    bool bEnableLavaTubes = true;
+
+    UPROPERTY()
+    float LavaTubeZCompress = 0.3f;
 
     UPROPERTY()
     float RiverFrequency = 0.001f;
@@ -202,6 +242,19 @@ public:
 
     UPROPERTY()
     TArray<float> CachedSurfaceHeightsVoxels;
+
+   
+
+    
+    // ─────────────────────────────────────────────────────────────
+    // Phase 1 Digging: persistent terrain edit mask
+    // ─────────────────────────────────────────────────────────────
+    // Generator-driven terrain is rebuilt from this snapshot. Without this
+    // mask, dug blocks visually regenerate because GetValueImpl only sees the
+    // original terrain height/cave field.
+    
+    UPROPERTY()
+    TSet<FIntVector> RemovedTerrainBlocks;
 
 public:
     bool IsValid() const
@@ -328,9 +381,26 @@ public:
         return FGameplayTag();
     }
 
+    
+
     int32 GetFoundationDepthVoxels() const
     {
         const float SafeVoxelSize = VoxelSize > KINDA_SMALL_NUMBER ? VoxelSize : 100.0f;
         return FMath::Max(8, FMath::RoundToInt(GlobalFoundationDepthWorld / SafeVoxelSize));
+    }
+
+    bool IsTerrainBlockRemoved(const FIntVector& GridPos) const
+    {
+        return RemovedTerrainBlocks.Contains(GridPos);
+    }
+
+    void MarkTerrainBlockRemoved(const FIntVector& GridPos)
+    {
+        RemovedTerrainBlocks.Add(GridPos);
+    }
+
+    void UnmarkTerrainBlockRemoved(const FIntVector& GridPos)
+    {
+        RemovedTerrainBlocks.Remove(GridPos);
     }
 };

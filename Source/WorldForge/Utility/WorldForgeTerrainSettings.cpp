@@ -78,6 +78,23 @@ UWorldForgeTerrainSettings::UWorldForgeTerrainSettings()
     CavePrimaryWeight = 0.7f;
     CaveSecondaryWeight = 0.3f;
 
+    // v4.0 — 3D SDF worm caves
+    CaveWormFrequency = 0.012f;
+    CaveWormThreshold = 0.35f;
+    CaveCarveStrength = 18.0f;
+    CaveDepthFadeStart = 8.0f;
+    CaveDepthFadeEnd = 128.0f;
+
+    // v4.0 — 3D SDF canyons
+    CanyonRidgeFrequency = 0.004f;
+    CanyonDomainWarpStrength = 200.0f;
+    CanyonDomainWarpFrequency = 0.003f;
+    CanyonMaxDepthVoxels = 40.0f;
+
+    // v4.0 — Lava tubes
+    bEnableLavaTubes = true;
+    LavaTubeZCompress = 0.3f;
+
     // Performance
     bUseFastTerrainSampling = false;
 
@@ -93,6 +110,12 @@ UWorldForgeTerrainSettings::UWorldForgeTerrainSettings()
     // Runtime
     TerrainRetryIntervalSeconds = 0.25f;
     MaxTerrainRetryCount = 40;
+
+    // v2.1 mountain ridge detail
+    MountainRidgeHeightScale = 60.0f;
+    MountainRidgeWidthScale = 1.0f;
+    MountainCragFrequency = 0.06f;
+    MountainCragAmplitude = 6.0f;
 
     // Classification helpers
     CoastBandVoxels = 1.5f;                // was 2.0 — narrower coastal sand strip

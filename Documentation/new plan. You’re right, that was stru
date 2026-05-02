@@ -1,0 +1,430 @@
+Ah — got it. You’re right, that was structured in sections but not as a **clean single cohesive doc**.
+
+Here’s a properly unified, ready-to-drop-in markdown document:
+
+---
+
+````markdown
+# WorldForge Terrain System Migration Plan  
+## 3D SDF Backend + Hybrid Runtime Modification Architecture
+
+---
+
+## 🎯 Objective
+
+Transition WorldForge to a modern voxel architecture that supports:
+
+- Deterministic world generation
+- True 3D terrain (caves, overhangs, lava tubes)
+- Smooth voxel rendering
+- Real-time digging and building
+- Persistent world modifications
+- Scalable simulation systems
+
+Without breaking the current working game loop.
+
+---
+
+## 🧠 Core Architectural Principle
+
+Separate the world into **three responsibilities**:
+
+```text
+Natural World      → 3D SDF Generator (deterministic)
+Modified World     → Runtime Edit Layer (dig/build)
+Persistent State   → Terrain Snapshot (save/load truth)
+````
+
+---
+
+## ⚠️ Critical Rule
+
+**Do NOT modify the current terrain system in-place.**
+
+Instead:
+
+```text
+Build new SDF system alongside existing system
+→ Add backend switch
+→ Test in isolation
+→ Gradually migrate systems
+→ Retire old system last
+```
+
+---
+
+## 🧩 Step 1 — Terrain Backend System
+
+### Add Backend Enum
+
+```cpp
+UENUM(BlueprintType)
+enum class EWorldForgeTerrainBackend : uint8
+{
+    LegacyHeightmap UMETA(DisplayName="Legacy Heightmap"),
+    SDFLayered      UMETA(DisplayName="3D SDF Layered")
+};
+```
+
+---
+
+### Add Setting
+
+```cpp
+UPROPERTY(EditAnywhere, Config, BlueprintReadOnly, Category="Terrain")
+EWorldForgeTerrainBackend TerrainBackend;
+```
+
+---
+
+## 🧩 Step 2 — VoxelWorldManager as Router
+
+Do NOT let this class become the terrain generator.
+
+It should only:
+
+```text
+- Receive world data
+- Cache snapshot
+- Select terrain backend
+- Apply generator to voxel world
+- Handle runtime edits
+```
+
+---
+
+### Backend Routing
+
+```cpp
+switch (TerrainBackend)
+{
+    case LegacyHeightmap:
+        ApplyLegacyTerrain();
+        break;
+
+    case SDFLayered:
+        ApplySDFTerrain();
+        break;
+}
+```
+
+---
+
+## 🧩 Step 3 — Create New SDF Generator
+
+Create new files:
+
+```text
+WorldForgeSDFTerrainGenerator.h
+WorldForgeSDFTerrainGenerator.cpp
+```
+
+---
+
+### Density Rules
+
+```text
+Density > 0 → Air
+Density < 0 → Solid
+Density = 0 → Surface
+```
+
+---
+
+### Layered Composition
+
+```text
+Base Terrain (height)
++ Mountain Noise
++ Cave Noise
++ Canyon Noise
++ Lava Tubes
++ Biome Modifiers
++ Foundation Layer
++ Removed Terrain Mask
+```
+
+---
+
+## 🧩 Step 4 — Preserve Existing Generator
+
+Keep:
+
+```text
+WorldForgeTerrainGenerator.cpp
+```
+
+Until the SDF system fully replaces it.
+
+---
+
+## 🧩 Step 5 — Shared Terrain Snapshot
+
+Use:
+
+```cpp
+FWorldForgeTerrainSnapshot
+```
+
+This remains the **single source of truth for persistence**.
+
+---
+
+### Snapshot Contains
+
+```text
+Grid size
+Voxel size
+World tiles
+Biomes
+Elevation
+Mountain ranges
+Volcanoes
+Seed
+RemovedTerrainBlocks
+PlacedBlocks
+```
+
+---
+
+## 🧩 Step 6 — Separate Apply Paths
+
+In `VoxelWorldManager`:
+
+```cpp
+bool ApplyLegacyTerrain(...);
+bool ApplySDFTerrain(...);
+```
+
+Keep them fully separate.
+
+---
+
+## 🧪 Step 7 — Create Test Maps
+
+Create isolated maps:
+
+```text
+LVL_Test_Legacy
+LVL_Test_SDF
+LVL_Test_Dig
+LVL_Test_Caves
+LVL_Test_Performance
+```
+
+---
+
+### Each Test Validates One Thing
+
+```text
+Terrain generation
+Player spawn
+Surface detection
+Digging
+Collision
+Save/load
+Performance
+```
+
+---
+
+## 🚀 Step 8 — Migration Phases
+
+---
+
+### Phase 1 — Backend Switch
+
+* Add enum
+* Add setting
+* Add routing
+
+✅ Success:
+Can switch between systems without breaking build
+
+---
+
+### Phase 2 — Basic SDF Terrain
+
+* Implement base terrain only
+
+❌ No caves yet
+
+✅ Success:
+Terrain generates and player can spawn
+
+---
+
+### Phase 3 — Surface Queries
+
+Update:
+
+```text
+TryGetSurfaceLocation
+TryGetTerrainHeight
+Line trace compatibility
+```
+
+✅ Success:
+Colony spawn + camera works
+
+---
+
+### Phase 4 — 3D Features
+
+Add:
+
+```text
+Caves
+Canyons
+Lava tubes
+Biome density shaping
+```
+
+✅ Success:
+True underground spaces exist
+
+---
+
+### Phase 5 — Hybrid Runtime Digging
+
+Replace rebuild logic with:
+
+```text
+Runtime voxel edit (instant)
++
+Snapshot update (persistent)
+```
+
+❌ No DestroyWorld()
+
+✅ Success:
+No flashing, instant digging
+
+---
+
+### Phase 6 — Persistence
+
+Ensure snapshot saves:
+
+```text
+Removed blocks
+Placed blocks
+Construction edits
+```
+
+✅ Success:
+Dig → Save → Reload → hole still exists
+
+---
+
+### Phase 7 — Retire Legacy
+
+Only after all systems work.
+
+---
+
+## ⚡ What This Fixes
+
+Current issue:
+
+```text
+Dig → DestroyWorld → Rebuild → 7s delay → flash
+```
+
+New system:
+
+```text
+Dig → Local voxel edit → instant update → no flash
+```
+
+---
+
+## 🏗 Final Architecture
+
+```text
+WorldGen Pipeline
+        ↓
+World Tiles
+        ↓
+VoxelWorldManager
+        ↓
+Terrain Backend
+   ├── Legacy Generator
+   └── SDF Generator
+            ↓
+        Voxel World
+            ↓
+    Runtime Edit Layer
+            ↓
+    Snapshot Persistence
+```
+
+---
+
+## 🔥 Priority Order
+
+```text
+1. Hybrid Runtime Edit Path
+2. Backend Switching System
+3. SDF Generator Implementation
+4. Surface Queries Compatibility
+5. Persistence Layer
+6. Advanced Terrain Features
+7. Optimization
+```
+
+---
+
+## ❌ Anti-Patterns (Avoid)
+
+```text
+Do NOT rebuild world per dig
+Do NOT delete legacy system early
+Do NOT mix generator + runtime edits
+Do NOT tie simulation directly to generator
+```
+
+---
+
+## ✅ Success Criteria
+
+```text
+✔ Terrain backend is switchable
+✔ Player can spawn on SDF terrain
+✔ Digging is instant (no rebuild)
+✔ Terrain edits persist
+✔ Caves exist in real 3D space
+✔ Performance is stable
+✔ Legacy system can be safely removed
+```
+
+---
+
+## 🧠 Final Insight
+
+This is not just a terrain upgrade.
+
+This is the foundation for:
+
+```text
+Mining systems
+Building systems
+Underground gameplay
+AI pathing depth
+Economy systems
+Historical world changes
+```
+
+Done correctly, this unlocks the entire design of WorldForge.
+
+```
+
+---
+
+If you want next, I can turn this into:
+
+- a **task checklist (Jira-style / dev pipeline)**
+- or a **Blueprint/C++ implementation order with exact functions to touch**
+
+Those are usually the next step after locking the architecture.
+```

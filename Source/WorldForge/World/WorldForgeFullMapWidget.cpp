@@ -4,6 +4,7 @@
 #include "Components/Border.h"
 #include "Components/TextBlock.h"
 #include "Components/Button.h"
+#include "Components/CheckBox.h"
 #include "Components/CanvasPanelSlot.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
@@ -14,7 +15,6 @@
 #include "WorldMapSubsystem.h"
 #include "ColonyManager.h"
 #include "../Voxel/VoxelWorldManager.h"
-
 
 namespace
 {
@@ -45,6 +45,22 @@ namespace
 
         return nullptr;
     }
+
+    static bool IsTileClaimedByCivilization(UWorldMapSubsystem* MapSubsystem, int32 TileIndex)
+    {
+        if (!MapSubsystem || TileIndex == INDEX_NONE)
+        {
+            return false;
+        }
+
+        FWorldTileData Tile;
+        if (!MapSubsystem->GetTileData(TileIndex, Tile))
+        {
+            return false;
+        }
+
+        return Tile.ControllingCivID >= 0;
+    }
 }
 
 // ============================================================
@@ -65,8 +81,6 @@ void UWorldForgeFullMapWidget::NativeConstruct()
 
     if (IMG_Map && MapSubsystem)
     {
-        // True biome map by default.
-        // Set this to true later only if you explicitly want the detailed terrain-debug map.
         constexpr bool bPreferDetailedMap = false;
 
         if (UTexture2D* MapTexture = GetPreferredFullMapTexture(MapSubsystem, bPreferDetailedMap))
@@ -80,6 +94,7 @@ void UWorldForgeFullMapWidget::NativeConstruct()
         BRD_SelectedCell->SetRenderOpacity(0.0f);
     }
 
+    // ── Core buttons ─────────────────────────────────────────────
     if (BTN_Confirm)
     {
         BTN_Confirm->OnClicked.RemoveDynamic(this, &UWorldForgeFullMapWidget::HandleConfirmClicked);
@@ -90,6 +105,80 @@ void UWorldForgeFullMapWidget::NativeConstruct()
     {
         BTN_Close->OnClicked.RemoveDynamic(this, &UWorldForgeFullMapWidget::HandleCloseClicked);
         BTN_Close->OnClicked.AddDynamic(this, &UWorldForgeFullMapWidget::HandleCloseClicked);
+    }
+
+    // ── Overlay toggle checkboxes (new DF-style multi-layer) ─────
+    if (CHK_Political)
+    {
+        CHK_Political->OnCheckStateChanged.RemoveDynamic(this, &UWorldForgeFullMapWidget::HandlePoliticalToggled);
+        CHK_Political->OnCheckStateChanged.AddDynamic(this, &UWorldForgeFullMapWidget::HandlePoliticalToggled);
+    }
+
+    if (CHK_Economy)
+    {
+        CHK_Economy->OnCheckStateChanged.RemoveDynamic(this, &UWorldForgeFullMapWidget::HandleEconomyToggled);
+        CHK_Economy->OnCheckStateChanged.AddDynamic(this, &UWorldForgeFullMapWidget::HandleEconomyToggled);
+    }
+
+    if (CHK_Cosmic)
+    {
+        CHK_Cosmic->OnCheckStateChanged.RemoveDynamic(this, &UWorldForgeFullMapWidget::HandleCosmicToggled);
+        CHK_Cosmic->OnCheckStateChanged.AddDynamic(this, &UWorldForgeFullMapWidget::HandleCosmicToggled);
+    }
+
+    if (CHK_Trade)
+    {
+        CHK_Trade->OnCheckStateChanged.RemoveDynamic(this, &UWorldForgeFullMapWidget::HandleTradeToggled);
+        CHK_Trade->OnCheckStateChanged.AddDynamic(this, &UWorldForgeFullMapWidget::HandleTradeToggled);
+    }
+
+    if (CHK_Underground)
+    {
+        CHK_Underground->OnCheckStateChanged.RemoveDynamic(this, &UWorldForgeFullMapWidget::HandleUndergroundToggled);
+        CHK_Underground->OnCheckStateChanged.AddDynamic(this, &UWorldForgeFullMapWidget::HandleUndergroundToggled);
+    }
+
+    if (CHK_Fog)
+    {
+        CHK_Fog->OnCheckStateChanged.RemoveDynamic(this, &UWorldForgeFullMapWidget::HandleFogToggled);
+        CHK_Fog->OnCheckStateChanged.AddDynamic(this, &UWorldForgeFullMapWidget::HandleFogToggled);
+    }
+
+    // ── Legacy overlay buttons (backwards compat) ────────────────
+    if (BTN_Terrain)
+    {
+        BTN_Terrain->OnClicked.RemoveDynamic(this, &UWorldForgeFullMapWidget::HandleTerrainOverlayClicked);
+        BTN_Terrain->OnClicked.AddDynamic(this, &UWorldForgeFullMapWidget::HandleTerrainOverlayClicked);
+    }
+
+    if (BTN_Political)
+    {
+        BTN_Political->OnClicked.RemoveDynamic(this, &UWorldForgeFullMapWidget::HandlePoliticalOverlayClicked);
+        BTN_Political->OnClicked.AddDynamic(this, &UWorldForgeFullMapWidget::HandlePoliticalOverlayClicked);
+    }
+
+    if (BTN_Economy)
+    {
+        BTN_Economy->OnClicked.RemoveDynamic(this, &UWorldForgeFullMapWidget::HandleEconomyOverlayClicked);
+        BTN_Economy->OnClicked.AddDynamic(this, &UWorldForgeFullMapWidget::HandleEconomyOverlayClicked);
+    }
+
+    if (BTN_Cosmic)
+    {
+        BTN_Cosmic->OnClicked.RemoveDynamic(this, &UWorldForgeFullMapWidget::HandleCosmicOverlayClicked);
+        BTN_Cosmic->OnClicked.AddDynamic(this, &UWorldForgeFullMapWidget::HandleCosmicOverlayClicked);
+    }
+
+    if (BTN_Trade)
+    {
+        BTN_Trade->OnClicked.RemoveDynamic(this, &UWorldForgeFullMapWidget::HandleTradeOverlayClicked);
+        BTN_Trade->OnClicked.AddDynamic(this, &UWorldForgeFullMapWidget::HandleTradeOverlayClicked);
+    }
+
+    if (BTN_Underground)
+    {
+        BTN_Underground->OnClicked.RemoveDynamic(this, &UWorldForgeFullMapWidget::HandleUndergroundOverlayClicked);
+        BTN_Underground->OnClicked.AddDynamic(this, &UWorldForgeFullMapWidget::HandleUndergroundOverlayClicked);
     }
 
     bHasValidSelection = false;
@@ -106,6 +195,9 @@ void UWorldForgeFullMapWidget::NativeConstruct()
         IMG_Map->SetRenderTransformPivot(FVector2D(0.5f, 0.5f));
         ApplyMapTransform();
     }
+
+    // Sync checkbox states to the subsystem's current layer mask.
+    SyncCheckboxesToOverlayState();
 
     EnsureValidInitialSelection();
     UpdateSelectionVisual();
@@ -328,6 +420,23 @@ void UWorldForgeFullMapWidget::HandleConfirmClicked()
 
     const FIntPoint DesiredCell(SelectedTileX, SelectedTileY);
 
+    // ── Spawn rule: reject civ-claimed territory ─────────────────
+    if (IsTileClaimedByCivilization(MapSubsystem, SelectedTileIndex))
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[FullMap] Confirm blocked: selected tile %d is already controlled."),
+            SelectedTileIndex);
+
+        if (TXT_SelectedCell)
+        {
+            TXT_SelectedCell->SetText(FText::FromString(
+                TEXT("Cannot start here: this region is already claimed by another civilization.")
+            ));
+        }
+
+        return;
+    }
+
     FVector SpawnWorldLocation = FVector::ZeroVector;
     FIntPoint ResolvedCell = DesiredCell;
 
@@ -339,6 +448,27 @@ void UWorldForgeFullMapWidget::HandleConfirmClicked()
             48,
             VoxelMgr->TerrainSurfaceZOffset
         );
+
+    // ── Spawn rule: check the RESOLVED tile too ──────────────────
+    int32 ResolvedIndex = INDEX_NONE;
+    if (bFoundSpawn && MapSubsystem->TileXYToIndex(ResolvedCell.X, ResolvedCell.Y, ResolvedIndex))
+    {
+        if (IsTileClaimedByCivilization(MapSubsystem, ResolvedIndex))
+        {
+            UE_LOG(LogTemp, Warning,
+                TEXT("[FullMap] Confirm blocked: resolved tile %d is already controlled."),
+                ResolvedIndex);
+
+            if (TXT_SelectedCell)
+            {
+                TXT_SelectedCell->SetText(FText::FromString(
+                    TEXT("Cannot start here: this region is already claimed by another civilization.")
+                ));
+            }
+
+            return;
+        }
+    }
 
     if (!bFoundSpawn)
     {
@@ -439,6 +569,157 @@ void UWorldForgeFullMapWidget::HandleCloseClicked()
 }
 
 // ============================================================
+// Checkbox toggle handlers (new DF-style multi-overlay)
+// ============================================================
+
+void UWorldForgeFullMapWidget::HandlePoliticalToggled(bool bIsChecked)
+{
+    SetOverlayLayerAndRefresh(WorldForgeOverlay::Political, bIsChecked);
+}
+
+void UWorldForgeFullMapWidget::HandleEconomyToggled(bool bIsChecked)
+{
+    SetOverlayLayerAndRefresh(WorldForgeOverlay::Economy, bIsChecked);
+}
+
+void UWorldForgeFullMapWidget::HandleCosmicToggled(bool bIsChecked)
+{
+    SetOverlayLayerAndRefresh(WorldForgeOverlay::Cosmic, bIsChecked);
+}
+
+void UWorldForgeFullMapWidget::HandleTradeToggled(bool bIsChecked)
+{
+    SetOverlayLayerAndRefresh(WorldForgeOverlay::Trade, bIsChecked);
+}
+
+void UWorldForgeFullMapWidget::HandleUndergroundToggled(bool bIsChecked)
+{
+    SetOverlayLayerAndRefresh(WorldForgeOverlay::Underground, bIsChecked);
+}
+
+void UWorldForgeFullMapWidget::HandleFogToggled(bool bIsChecked)
+{
+    SetOverlayLayerAndRefresh(WorldForgeOverlay::Fog, bIsChecked);
+}
+
+// ============================================================
+void UWorldForgeFullMapWidget::SetOverlayLayerAndRefresh(int32 LayerBit, bool bActive)
+{
+    if (!MapSubsystem)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[FullMapWidget] Cannot toggle overlay: MapSubsystem missing."));
+        return;
+    }
+
+    MapSubsystem->SetOverlayLayerActive(LayerBit, bActive);
+
+    RefreshMapTexture();
+    UpdateSelectionVisual();
+    UpdateSelectionText();
+
+    UE_LOG(LogTemp, Log, TEXT("[FullMapWidget] Overlay layer 0x%02X %s. Active=0x%02X"),
+        LayerBit,
+        bActive ? TEXT("ON") : TEXT("OFF"),
+        MapSubsystem->GetActiveOverlayLayers());
+}
+
+// ============================================================
+// Legacy button handlers (solo-mode backwards compat)
+// ============================================================
+
+void UWorldForgeFullMapWidget::HandleTerrainOverlayClicked()
+{
+    SetMapOverlayMode(EWorldMapOverlayMode::Terrain);
+}
+
+void UWorldForgeFullMapWidget::HandlePoliticalOverlayClicked()
+{
+    SetMapOverlayMode(EWorldMapOverlayMode::Political);
+}
+
+void UWorldForgeFullMapWidget::HandleEconomyOverlayClicked()
+{
+    SetMapOverlayMode(EWorldMapOverlayMode::Economy);
+}
+
+void UWorldForgeFullMapWidget::HandleCosmicOverlayClicked()
+{
+    SetMapOverlayMode(EWorldMapOverlayMode::Cosmic);
+}
+
+void UWorldForgeFullMapWidget::HandleTradeOverlayClicked()
+{
+    SetMapOverlayMode(EWorldMapOverlayMode::Trade);
+}
+
+void UWorldForgeFullMapWidget::HandleUndergroundOverlayClicked()
+{
+    SetMapOverlayMode(EWorldMapOverlayMode::Underground);
+}
+
+// ============================================================
+void UWorldForgeFullMapWidget::SetMapOverlayMode(EWorldMapOverlayMode NewMode)
+{
+    if (!MapSubsystem)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[FullMapWidget] Cannot set overlay: MapSubsystem missing."));
+        return;
+    }
+
+    MapSubsystem->SetOverlayMode(NewMode);
+
+    RefreshMapTexture();
+    SyncCheckboxesToOverlayState();
+    UpdateSelectionVisual();
+    UpdateSelectionText();
+
+    UE_LOG(LogTemp, Log, TEXT("[FullMapWidget] Overlay mode changed to %d (layers=0x%02X)"),
+        static_cast<int32>(NewMode), MapSubsystem->GetActiveOverlayLayers());
+}
+
+// ============================================================
+void UWorldForgeFullMapWidget::RefreshMapTexture()
+{
+    if (!IMG_Map || !MapSubsystem)
+    {
+        return;
+    }
+
+    constexpr bool bPreferDetailedMap = false;
+
+    if (UTexture2D* MapTexture = GetPreferredFullMapTexture(MapSubsystem, bPreferDetailedMap))
+    {
+        IMG_Map->SetBrushFromTexture(MapTexture, true);
+    }
+}
+
+// ============================================================
+void UWorldForgeFullMapWidget::SyncCheckboxesToOverlayState()
+{
+    if (!MapSubsystem)
+    {
+        return;
+    }
+
+    const int32 Layers = MapSubsystem->GetActiveOverlayLayers();
+
+    auto SetCheck = [](UCheckBox* Box, bool bOn)
+    {
+        if (Box)
+        {
+            Box->SetIsChecked(bOn);
+        }
+    };
+
+    SetCheck(CHK_Political,   (Layers & WorldForgeOverlay::Political)   != 0);
+    SetCheck(CHK_Economy,     (Layers & WorldForgeOverlay::Economy)     != 0);
+    SetCheck(CHK_Cosmic,      (Layers & WorldForgeOverlay::Cosmic)      != 0);
+    SetCheck(CHK_Trade,       (Layers & WorldForgeOverlay::Trade)       != 0);
+    SetCheck(CHK_Underground, (Layers & WorldForgeOverlay::Underground) != 0);
+    SetCheck(CHK_Fog,         (Layers & WorldForgeOverlay::Fog)         != 0);
+}
+
+// ============================================================
 void UWorldForgeFullMapWidget::UpdateSelectionVisual()
 {
     if (!BRD_SelectedCell || !IMG_Map || !MapSubsystem || !bHasValidSelection)
@@ -504,10 +785,11 @@ void UWorldForgeFullMapWidget::UpdateSelectionText()
     }
 
     const FString Str = FString::Printf(
-        TEXT("Tile X=%d Y=%d Index=%d  |  WASD pan  |  Shift=faster  |  Scroll=zoom  |  Arrows=move cursor  |  Enter confirm  |  Esc close"),
+        TEXT("Tile X=%d Y=%d Index=%d | Layers=0x%02X"),
         SelectedTileX,
         SelectedTileY,
-        SelectedTileIndex);
+        SelectedTileIndex,
+        MapSubsystem ? MapSubsystem->GetActiveOverlayLayers() : 0);
 
     TXT_SelectedCell->SetText(FText::FromString(Str));
 }

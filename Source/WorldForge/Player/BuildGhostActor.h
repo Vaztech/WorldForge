@@ -87,15 +87,7 @@ private:
     UStaticMeshComponent* GetOrCreateHighlight(int32 Index);
     void EnsurePoolSize(int32 RequiredSize);
 
-    bool TryParseExplicitPrefabDimensions(
-        const FString& Source,
-        int32& OutWidth,
-        int32& OutDepth,
-        int32& OutHeight
-    ) const;
-
     FIntPoint RotateLocalCell(FIntPoint LocalXY, int32 RotationIndex, int32 Width, int32 Depth) const;
-    int32 GetLegacyPrefabBlockCount(FGameplayTag BuildingTag) const;
 
     EBuildGhostState CurrentState = EBuildGhostState::Hidden;
 };

@@ -1,4 +1,4 @@
-#include "CivilizationGenerator.h"
+﻿#include "CivilizationGenerator.h"
 #include "../Core/WorldForgeRNG.h"
 #include "Generation/CivGenContext.h"         // ADDED
 #include "Generation/CivPlacementPass.h"       // ADDED
@@ -44,6 +44,144 @@ void UCivilizationGenerator::GenerateCulturalDNA(
 {
     // KEPT EXISTING: Public entry point remains available and routes through the dedicated culture pass.
     FCivCultureSeedPass::Execute(*this, Civs, WorldTiles, RNG);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Territory ownership — BFS flood-fill from each civ's start tile
+// ═══════════════════════════════════════════════════════════════════
+
+void UCivilizationGenerator::ClaimTerritories(
+    TArray<FCivilizationData>& Civs,
+    TArray<FWorldTileData>& WorldTiles,
+    int32 GridWidth,
+    int32 GridHeight)
+{
+    if (Civs.Num() == 0 || WorldTiles.Num() == 0 || GridWidth <= 0 || GridHeight <= 0)
+    {
+        return;
+    }
+
+    // Clear previous ownership before re-claiming.
+    for (FWorldTileData& Tile : WorldTiles)
+    {
+        Tile.ControllingCivID = -1;
+    }
+
+    for (FCivilizationData& Civ : Civs)
+    {
+        Civ.ControlledTileIDs.Reset();
+    }
+
+    // Minimum elevation to count as claimable land.
+    // Matches FindStartingTile's rejection threshold.
+    static constexpr float LandElevationMin = 0.1f;
+
+    // Territory radius range: base 5 tiles, up to 8 with max ExpansionDrive.
+    static constexpr int32 BaseRadius = 5;
+    static constexpr int32 MaxExtraRadius = 3;
+
+    // 4-directional BFS neighbors (N, S, E, W).
+    static constexpr int32 DX[] = { 0,  0, 1, -1 };
+    static constexpr int32 DY[] = { -1, 1, 0,  0 };
+
+    int32 TotalClaimed = 0;
+
+    for (FCivilizationData& Civ : Civs)
+    {
+        if (Civ.bCollapsed)
+        {
+            continue;
+        }
+
+        const int32 Origin = Civ.StartTileIndex;
+        if (!WorldTiles.IsValidIndex(Origin))
+        {
+            UE_LOG(LogTemp, Warning,
+                TEXT("[CivGen] Civ %d (%s) has no valid StartTileIndex (%d). Skipping territory claim."),
+                Civ.CivID, *Civ.Name, Origin);
+            continue;
+        }
+
+        const float Drive = FMath::Clamp(Civ.CulturalDNA.ExpansionDrive, 0.f, 100.f);
+        const int32 Radius = BaseRadius + FMath::RoundToInt((Drive / 100.f) * MaxExtraRadius);
+
+        const int32 OriginX = Origin % GridWidth;
+        const int32 OriginY = Origin / GridWidth;
+
+        TArray<int32> Queue;
+        TSet<int32> Visited;
+        TMap<int32, int32> Distance;
+
+        Queue.Add(Origin);
+        Visited.Add(Origin);
+        Distance.Add(Origin, 0);
+
+        int32 Head = 0;
+
+        while (Head < Queue.Num())
+        {
+            const int32 Current = Queue[Head++];
+            const int32 CurDist = Distance[Current];
+
+            FWorldTileData& Tile = WorldTiles[Current];
+
+            // Only claim unclaimed land tiles.
+            if (Tile.Elevation >= LandElevationMin && Tile.ControllingCivID < 0)
+            {
+                Tile.ControllingCivID = Civ.CivID;
+                Civ.ControlledTileIDs.AddUnique(Current);
+                ++TotalClaimed;
+            }
+
+            if (CurDist >= Radius)
+            {
+                continue;
+            }
+
+            const int32 CurX = Current % GridWidth;
+            const int32 CurY = Current / GridWidth;
+
+            for (int32 D = 0; D < 4; ++D)
+            {
+                const int32 NX = CurX + DX[D];
+                const int32 NY = CurY + DY[D];
+
+                if (NX < 0 || NX >= GridWidth || NY < 0 || NY >= GridHeight)
+                {
+                    continue;
+                }
+
+                const int32 NIdx = NY * GridWidth + NX;
+
+                if (Visited.Contains(NIdx))
+                {
+                    continue;
+                }
+
+                if (WorldTiles[NIdx].Elevation < LandElevationMin)
+                {
+                    continue;
+                }
+
+                if (WorldTiles[NIdx].ControllingCivID >= 0)
+                {
+                    continue;
+                }
+
+                Visited.Add(NIdx);
+                Distance.Add(NIdx, CurDist + 1);
+                Queue.Add(NIdx);
+            }
+        }
+
+        UE_LOG(LogTemp, Log,
+            TEXT("[CivGen] Civ %d (%s) claimed %d tiles. Radius=%d ExpansionDrive=%.0f Origin=(%d,%d)"),
+            Civ.CivID, *Civ.Name, Civ.ControlledTileIDs.Num(), Radius, Drive, OriginX, OriginY);
+    }
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[CivGen] ClaimTerritories complete. %d total tiles claimed across %d civs."),
+        TotalClaimed, Civs.Num());
 }
 
 int32 UCivilizationGenerator::FindStartingTile(

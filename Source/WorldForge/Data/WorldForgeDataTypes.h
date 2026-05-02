@@ -156,6 +156,7 @@ struct FVoxelBiomeProfile
 {
     GENERATED_BODY()
 
+    // ── Surface detail noise (existing) ──
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float NoiseFrequency = 0.02f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float NoiseAmplitude = 100.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 OctaveCount = 4;
@@ -163,6 +164,34 @@ struct FVoxelBiomeProfile
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float CaveThreshold = 0.3f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) bool bSmoothSDF = true;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TArray<FGameplayTag> SurfaceMaterials;
+
+    // ── v4.0: 3D SDF Cave layer ──
+    // Worm-cave noise frequency.  Higher = tighter, more frequent tunnels.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float CaveWormFrequency = 0.012f;
+    // Overall cave density multiplier.  0 = no caves, 1 = normal, 2+ = dense networks.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float CaveIntensity = 0.0f;
+    // Min depth below surface (voxels) before caves can start.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float CaveMinDepth = 8.0f;
+    // Max depth below surface (voxels) caves can reach.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float CaveMaxDepth = 128.0f;
+    // Z-axis frequency scale.  < 1 = horizontal bias (lava tubes).  1 = isotropic.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float CaveZScale = 1.0f;
+
+    // ── v4.0: 3D SDF Canyon layer ──
+    // Overall canyon carving strength.  0 = no canyons.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float CanyonIntensity = 0.0f;
+    // Max canyon carve depth in voxels below surface.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float CanyonMaxDepth = 40.0f;
+    // Ridge noise sharpness.  Higher = narrower, sharper canyon cuts.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float CanyonSharpness = 3.0f;
+
+    // ── v4.0: Underground modifiers ──
+    // Solid foundation depth below which terrain is always solid (voxels).
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float UndergroundFloorDepth = 200.0f;
+    // Global density offset.  Positive = more porous, negative = denser.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float DensityBias = 0.0f;
+    // Multiplier on surface detail noise amplitude.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float SurfaceRoughnessScale = 1.0f;
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -406,6 +435,16 @@ struct FMythRecord
     float MythStrength = 0.5f;
 };
 
+// Lightweight settlement reference for lore cross-referencing
+USTRUCT(BlueprintType)
+struct FSettlementRef
+{
+    GENERATED_BODY()
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 SettlementID = -1;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FIntPoint TileCoord = FIntPoint::ZeroValue;
+};
+
 USTRUCT(BlueprintType)
 struct FCivilizationData
 {
@@ -429,6 +468,23 @@ struct FCivilizationData
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TArray<int32> HistoryEventIDs;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 TotalPopulation = 0;
+
+    // ── Territory ownership — tile index where this civ was placed during Step09.
+    // Set by CivPlacementPass, consumed by ClaimTerritories() to BFS-flood territory.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 StartTileIndex = -1;
+
+    // ── Phase 3.5 — Lore integration fields ──
+    // Epoch indices set by WorldGenPipeline; consumed by Lore passes.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 FoundedEpoch = 0;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 CollapseEpoch = -1;  // -1 = still alive
+
+    // Gameplay tags that describe this civ's personality (e.g. Warlike, Scholarly).
+    // Populated by CivilizationGenerator from CulturalDNA thresholds.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FGameplayTagContainer TraitTags;
+
+    // Lightweight settlement list for lore cross-referencing.
+    // Populated by CivPlacementPass / SettlementSpawner.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TArray<FSettlementRef> Settlements;
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -740,8 +796,42 @@ struct FAgentData
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float EthicsPacifism = 50.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float EthicsCompassion = 50.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float EthicsHonour = 50.f;
+    // ── Health System ──
+// Overall health pool. 100 = healthy, 0 = dead/incapacitated depending on processor rules.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float Health = 100.f;
+
+    // Race/trait-adjusted max health. Default humans/neutral colonists use 100.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float MaxHealth = 100.f;
+
+    // Work/move efficiency multiplier. 1.0 = normal, 0.6 = injured, 0 = unable to work.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float CurrentEfficiency = 1.0f;
+
+    // Active injury state.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) bool bInjured = false;
+
+    // Remaining simulation steps before injury can naturally recover.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 InjuryStepsRemaining = 0;
+
+    // Severity of the current injury. 0 = none, 1 = minor, 2 = moderate, 3 = severe.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 InjurySeverity = 0;
+
+    // Passive healing per simulation step before modifiers.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float BaseHealingRate = 0.05f;
+
+    // Medical care modifier. Better doctors/medicine/rest increase this.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float MedicalCareMultiplier = 1.0f;
+
+    // Hygiene affects infection/disease risk. 1.0 = clean, 0 = filthy.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float Hygiene = 1.0f;
+
+    // Disease/infection resistance from race, traits, medicine, magic, etc.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float Immunity = 1.0f;
+
+    // True when healing magic, potion, medicine, or treatment was applied recently.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) bool bReceivingTreatment = false;
+
+    // Remaining steps for temporary treatment boost.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 TreatmentStepsRemaining = 0;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 ActiveReservationID = -1;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FGameplayTag CurrentJobTag;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FGameplayTag CurrentJobBuildingTag;
@@ -870,6 +960,62 @@ struct FMountainGenerationSettings
     float FalloffSharpness = 2.4f;
 };
 
+// ═══════════════════════════════════════════════════════════════════
+// VOLCANO (v3.0)
+// ═══════════════════════════════════════════════════════════════════
+
+USTRUCT(BlueprintType)
+struct FVolcanoData
+{
+    GENERATED_BODY()
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    FVector2D Center = FVector2D::ZeroVector;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    float ConeRadius = 12.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    float ConeHeight = 0.25f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    float CraterRadiusFraction = 0.20f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    float CraterDepthFraction = 0.40f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    float LavaFlowRadius = 18.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    float ConeSteepness = 2.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    bool bActive = true;
+};
+
+// ═══════════════════════════════════════════════════════════════════
+// WIND / CLIMATE CONFIG (v3.0)
+// ═══════════════════════════════════════════════════════════════════
+
+USTRUCT(BlueprintType)
+struct FWindConfig
+{
+    GENERATED_BODY()
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    FVector2D PrevailingDirection = FVector2D(1.0f, 0.0f);
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    float RainShadowStrength = 0.65f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    float RainShadowReach = 30.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    float LapseRate = 0.30f;
+};
+
 USTRUCT(BlueprintType)
 struct FWorldGenConfig
 {
@@ -891,6 +1037,9 @@ struct FWorldGenConfig
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
     FMountainGenerationSettings MountainSettings;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    FWindConfig WindSettings;
 };
 
 enum ECulturalAxis : int32

@@ -3,7 +3,9 @@
 #include "CoreMinimal.h"
 #include "BaseProcessor.h"
 #include "JobQueueManager.h"
-#include "JobProcessor.generated.h"
+
+
+#include "JobProcessor.generated.h" // ALWAYS LAST
 
 // ====================================================================
 // UJobProcessor
@@ -162,6 +164,7 @@ private:
         int32 StepNumber,
         UWorld* World);
 
+    
     // Generates fallback harvest jobs when no work is available in queue.
     // This keeps the colony productive during idle periods.
     void GenerateIdleHarvestJobs(
@@ -193,4 +196,6 @@ private:
     // Prevents spamming new fallback jobs every single simulation step.
     UPROPERTY()
     int32 LastIdleGenStep = -999;
+
+    
 };

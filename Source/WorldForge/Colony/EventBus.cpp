@@ -1,4 +1,5 @@
 #include "EventBus.h"
+#include "Player/DigResult.h"
 
 void UEventBus::Initialize(FSubsystemCollectionBase& Collection)
 {

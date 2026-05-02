@@ -14,7 +14,47 @@ namespace
             static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(InColor.B * Scalar), 0, 255)),
             InColor.A);
     }
+
+    // ─── Stable civ color palette ─────────────────────────────────
+    static const FColor GCivPalette[] =
+    {
+        FColor(220,  50,  50, 255),   //  0  Red
+        FColor(50, 120, 220, 255),   //  1  Blue
+        FColor(50, 190,  70, 255),   //  2  Green
+        FColor(220, 180,  40, 255),   //  3  Gold
+        FColor(180,  60, 200, 255),   //  4  Purple
+        FColor(240, 130,  30, 255),   //  5  Orange
+        FColor(30, 200, 200, 255),   //  6  Teal
+        FColor(200,  80, 120, 255),   //  7  Rose
+        FColor(100, 180,  40, 255),   //  8  Lime
+        FColor(100,  80, 180, 255),   //  9  Indigo
+        FColor(210, 150, 100, 255),   // 10  Tan
+        FColor(60, 160, 140, 255),   // 11  Jade
+        FColor(180, 120,  60, 255),   // 12  Bronze
+        FColor(140, 200, 220, 255),   // 13  Sky
+        FColor(220, 100, 180, 255),   // 14  Pink
+        FColor(160, 210, 100, 255),   // 15  Chartreuse
+    };
+    static constexpr int32 GCivPaletteCount = UE_ARRAY_COUNT(GCivPalette);
+
+    static FColor GetStableCivColor(int32 CivID)
+    {
+        if (CivID >= 0 && CivID < GCivPaletteCount)
+        {
+            return GCivPalette[CivID];
+        }
+
+        // Golden-ratio hash fallback for >16 civs
+        const uint8 R = static_cast<uint8>((CivID * 67 + 80) % 255);
+        const uint8 G = static_cast<uint8>((CivID * 131 + 110) % 255);
+        const uint8 B = static_cast<uint8>((CivID * 197 + 140) % 255);
+        return FColor(R, G, B, 255);
+    }
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Lifecycle
+// ═══════════════════════════════════════════════════════════════════
 
 void UWorldMapSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -70,18 +110,94 @@ void UWorldMapSubsystem::InitializeFromPipeline(UWorldGenPipeline* Pipeline)
             }
         }
     }
+
+    MarkMapTextureDirty();
+    MarkDetailedMapTextureDirty();
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[WorldMapSubsystem] Loaded %d tiles, %d civs, %d history events, CivTiles=%d"),
+        WorldTiles.Num(),
+        Civilizations.Num(),
+        HistoryLog.Num(),
+        CountCivControlledTiles());
+}
+
+void UWorldMapSubsystem::UpdateFromPartialPipeline(
+    const TArray<FWorldTileData>& InTiles,
+    const TArray<FCivilizationData>& InCivs,
+    int32 InGridWidth,
+    int32 InGridHeight)
+{
+    if (InTiles.Num() <= 0 || InGridWidth <= 0 || InGridHeight <= 0)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[WorldMapSubsystem] UpdateFromPartialPipeline ignored: invalid input."));
+        return;
+    }
+
+    WorldTiles = InTiles;
+    Civilizations = InCivs;
+    GridWidth = InGridWidth;
+    GridHeight = InGridHeight;
+    bInitialized = true;
+
+    MarkMapTextureDirty();
+    MarkDetailedMapTextureDirty();
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[WorldMapSubsystem] Partial update received. Tiles=%d Civs=%d Grid=%dx%d CivTiles=%d"),
+        WorldTiles.Num(),
+        Civilizations.Num(),
+        GridWidth,
+        GridHeight,
+        CountCivControlledTiles());
+}
+
+void UWorldMapSubsystem::NotifyCivTerritoryChanged()
+{
+    MarkMapTextureDirty();
+    MarkDetailedMapTextureDirty();
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[WorldMapSubsystem] Civ territory changed. CivTiles=%d"),
+        CountCivControlledTiles());
+}
+
+int32 UWorldMapSubsystem::CountCivControlledTiles() const
+{
+    int32 Count = 0;
+
+    for (const FWorldTileData& Tile : WorldTiles)
+    {
+        if (Tile.ControllingCivID >= 0)
+        {
+            ++Count;
+        }
+    }
+
+    return Count;
+}
+
+FColor UWorldMapSubsystem::GetCivColor(int32 CivID) const
+{
+    if (CivID < 0)
+    {
+        return FColor::Transparent;
+    }
+
+    return GetStableCivColor(CivID);
 }
 
 void UWorldMapSubsystem::HandleVoxelTerrainReady()
 {
     UE_LOG(LogTemp, Log, TEXT("[WorldMapSubsystem] Terrain-ready: rebuilding detailed map texture only."));
 
-    // Keep the main selectable map based on pipeline tile colors so it stays
-    // visually consistent with the world-gen result the player saw at startup.
-    // Only the detailed texture is refreshed from voxel terrain data.
     MarkDetailedMapTextureDirty();
     RebuildDetailedMapTexture();
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Tick
+// ═══════════════════════════════════════════════════════════════════
 
 void UWorldMapSubsystem::Tick(float DeltaTime)
 {
@@ -103,6 +219,10 @@ void UWorldMapSubsystem::TickLivingWorld()
 {
     UE_LOG(LogTemp, Verbose, TEXT("[WorldMapSubsystem] Living world tick"));
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Data accessors
+// ═══════════════════════════════════════════════════════════════════
 
 bool UWorldMapSubsystem::GetTileData(int32 TileID, FWorldTileData& OutTile) const
 {
@@ -174,9 +294,100 @@ int32 UWorldMapSubsystem::AddHistoryEvent(const FHistoryEventData& Event)
     return NewEvent.EventID;
 }
 
-// -----------------------------------------------------------------------
+// ═══════════════════════════════════════════════════════════════════
+// Overlay layer toggle API
+// ═══════════════════════════════════════════════════════════════════
+
+void UWorldMapSubsystem::SetOverlayLayerActive(int32 LayerBit, bool bActive)
+{
+    const int32 OldMask = ActiveOverlayLayers;
+
+    if (bActive)
+    {
+        ActiveOverlayLayers |= LayerBit;
+    }
+    else
+    {
+        ActiveOverlayLayers &= ~LayerBit;
+    }
+
+    // Terrain is always on — enforce invariant.
+    ActiveOverlayLayers |= WorldForgeOverlay::Terrain;
+
+    if (OldMask != ActiveOverlayLayers)
+    {
+        MarkMapTextureDirty();
+        MarkDetailedMapTextureDirty();
+
+        UE_LOG(LogTemp, Log,
+            TEXT("[WorldMapSubsystem] Overlay layers changed: 0x%02X -> 0x%02X"),
+            OldMask, ActiveOverlayLayers);
+    }
+}
+
+void UWorldMapSubsystem::ToggleOverlayLayer(int32 LayerBit)
+{
+    // Don't allow toggling terrain off.
+    if (LayerBit == WorldForgeOverlay::Terrain)
+    {
+        return;
+    }
+
+    SetOverlayLayerActive(LayerBit, !IsOverlayLayerActive(LayerBit));
+}
+
+bool UWorldMapSubsystem::IsOverlayLayerActive(int32 LayerBit) const
+{
+    return (ActiveOverlayLayers & LayerBit) != 0;
+}
+
+void UWorldMapSubsystem::SetAllOverlayLayers(int32 NewLayerMask)
+{
+    // Enforce terrain always on.
+    ActiveOverlayLayers = NewLayerMask | WorldForgeOverlay::Terrain;
+    MarkMapTextureDirty();
+    MarkDetailedMapTextureDirty();
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Legacy single-mode API — routes through the bitfield
+// ═══════════════════════════════════════════════════════════════════
+
+void UWorldMapSubsystem::SetOverlayMode(EWorldMapOverlayMode NewMode)
+{
+    // Clear all non-terrain bits, then enable the requested layer.
+    int32 NewMask = WorldForgeOverlay::Terrain | WorldForgeOverlay::Fog;
+
+    switch (NewMode)
+    {
+    case EWorldMapOverlayMode::Political:   NewMask |= WorldForgeOverlay::Political;   break;
+    case EWorldMapOverlayMode::Economy:     NewMask |= WorldForgeOverlay::Economy;     break;
+    case EWorldMapOverlayMode::Cosmic:      NewMask |= WorldForgeOverlay::Cosmic;      break;
+    case EWorldMapOverlayMode::Trade:       NewMask |= WorldForgeOverlay::Trade;       break;
+    case EWorldMapOverlayMode::Underground: NewMask |= WorldForgeOverlay::Underground; break;
+    case EWorldMapOverlayMode::Terrain:
+    default:
+        break;
+    }
+
+    SetAllOverlayLayers(NewMask);
+}
+
+EWorldMapOverlayMode UWorldMapSubsystem::GetOverlayMode() const
+{
+    // Return the highest-priority non-terrain overlay that is active.
+    // If multiple are on, the first one in priority order wins.
+    if (ActiveOverlayLayers & WorldForgeOverlay::Political)   return EWorldMapOverlayMode::Political;
+    if (ActiveOverlayLayers & WorldForgeOverlay::Economy)     return EWorldMapOverlayMode::Economy;
+    if (ActiveOverlayLayers & WorldForgeOverlay::Cosmic)      return EWorldMapOverlayMode::Cosmic;
+    if (ActiveOverlayLayers & WorldForgeOverlay::Trade)       return EWorldMapOverlayMode::Trade;
+    if (ActiveOverlayLayers & WorldForgeOverlay::Underground) return EWorldMapOverlayMode::Underground;
+    return EWorldMapOverlayMode::Terrain;
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // Standard 256x256 map texture
-// -----------------------------------------------------------------------
+// ═══════════════════════════════════════════════════════════════════
 
 UTexture2D* UWorldMapSubsystem::GetOrCreateMapTexture()
 {
@@ -213,20 +424,16 @@ void UWorldMapSubsystem::RebuildMapTexture()
         {
             const int32 Index = Y * GridWidth + X;
             const FWorldTileData& Tile = WorldTiles[Index];
-            PixelData[Index] = GetOverlayAwareTileColorAtCell(X, Y, Tile);
+            PixelData[Index] = ComputeBlendedTileColorAtCell(X, Y, Tile);
         }
     }
 
     UploadMapPixels(PixelData);
 
-    UE_LOG(LogTemp, Warning, TEXT("[WorldMapSubsystem] Map texture valid: %s Size=%dx%d"),
-        CachedMapTexture ? TEXT("YES") : TEXT("NO"),
-        GridWidth, GridHeight);
-
     bMapTextureDirty = false;
 
-    UE_LOG(LogTemp, Log, TEXT("[WorldMapSubsystem] Map texture rebuilt. Size=%dx%d Mode=%d"),
-        GridWidth, GridHeight, static_cast<int32>(OverlayMode));
+    UE_LOG(LogTemp, Log, TEXT("[WorldMapSubsystem] Map texture rebuilt. Size=%dx%d Layers=0x%02X CivTiles=%d"),
+        GridWidth, GridHeight, ActiveOverlayLayers, CountCivControlledTiles());
 }
 
 void UWorldMapSubsystem::MarkMapTextureDirty()
@@ -234,9 +441,9 @@ void UWorldMapSubsystem::MarkMapTextureDirty()
     bMapTextureDirty = true;
 }
 
-// -----------------------------------------------------------------------
+// ═══════════════════════════════════════════════════════════════════
 // Detailed map texture
-// -----------------------------------------------------------------------
+// ═══════════════════════════════════════════════════════════════════
 
 UTexture2D* UWorldMapSubsystem::GetOrCreateDetailedMapTexture()
 {
@@ -312,6 +519,7 @@ void UWorldMapSubsystem::RebuildDetailedMapTexture()
             case EWorldForgeTerrainType::Dirt:  return FColor(125, 110, 80);
             case EWorldForgeTerrainType::Rock:  return FColor(135, 135, 135);
             case EWorldForgeTerrainType::Snow:  return FColor(230, 230, 235);
+            case EWorldForgeTerrainType::Lava:  return FColor(200, 60, 20);
             default:                            return FColor(255, 0, 255);
             }
         };
@@ -385,6 +593,65 @@ void UWorldMapSubsystem::RebuildDetailedMapTexture()
                 PixelColor = MakeTerrainColorFromVoxelData(TileX, TileY, FallbackTile);
             }
 
+            // ── Apply overlay blending on the detailed map ─────────
+            // Resolve which world tile this pixel falls in and composite
+            // all active overlay layers, same as the standard map.
+            {
+                const int32 HalfGridX2 = GridWidth / 2;
+                const int32 HalfGridY2 = GridHeight / 2;
+
+                const int32 CivTileX = FMath::Clamp(
+                    FMath::FloorToInt(static_cast<float>(VoxelX) / static_cast<float>(ChunkSizeVoxels)) + HalfGridX2,
+                    0,
+                    GridWidth - 1);
+
+                const int32 CivTileY = FMath::Clamp(
+                    FMath::FloorToInt(static_cast<float>(VoxelY) / static_cast<float>(ChunkSizeVoxels)) + HalfGridY2,
+                    0,
+                    GridHeight - 1);
+
+                const int32 CivTileIdx = CivTileY * GridWidth + CivTileX;
+                if (WorldTiles.IsValidIndex(CivTileIdx))
+                {
+                    const FWorldTileData& OverlayTile = WorldTiles[CivTileIdx];
+
+                    // Civ territory tint (always applied on terrain base).
+                    if (OverlayTile.ControllingCivID >= 0)
+                    {
+                        PixelColor = BlendLayer(
+                            PixelColor,
+                            GetStableCivColor(OverlayTile.ControllingCivID),
+                            CivTerritoryTintAlpha);
+                    }
+
+                    // Composite each active overlay layer.
+                    if (IsOverlayLayerActive(WorldForgeOverlay::Political) && OverlayTile.ControllingCivID >= 0)
+                    {
+                        PixelColor = BlendLayer(PixelColor, MakePoliticalLayerColor(OverlayTile), PoliticalAlpha);
+                    }
+                    if (IsOverlayLayerActive(WorldForgeOverlay::Economy))
+                    {
+                        PixelColor = BlendLayer(PixelColor, MakeEconomyLayerColor(OverlayTile), EconomyAlpha);
+                    }
+                    if (IsOverlayLayerActive(WorldForgeOverlay::Cosmic))
+                    {
+                        PixelColor = BlendLayer(PixelColor, MakeCosmicLayerColor(OverlayTile), CosmicAlpha);
+                    }
+                    if (IsOverlayLayerActive(WorldForgeOverlay::Trade))
+                    {
+                        PixelColor = BlendLayer(PixelColor, MakeTradeLayerColor(OverlayTile), TradeAlpha);
+                    }
+                    if (IsOverlayLayerActive(WorldForgeOverlay::Underground))
+                    {
+                        PixelColor = BlendLayer(PixelColor, MakeUndergroundLayerColor(OverlayTile), UndergroundAlpha);
+                    }
+                    if (IsOverlayLayerActive(WorldForgeOverlay::Fog))
+                    {
+                        PixelColor = BlendLayer(PixelColor, MakeFogLayerColor(OverlayTile), FogAlpha);
+                    }
+                }
+            }
+
             Pixels[PY * Res + PX] = PixelColor;
         }
     }
@@ -415,17 +682,115 @@ void UWorldMapSubsystem::RebuildDetailedMapTexture()
         MetersPerPixelY);
 }
 
-// -----------------------------------------------------------------------
+// ═══════════════════════════════════════════════════════════════════
+// Selection
+// ═══════════════════════════════════════════════════════════════════
 
-void UWorldMapSubsystem::SetOverlayMode(EWorldMapOverlayMode NewMode)
+void UWorldMapSubsystem::SetSelectedStartTile(int32 TileX, int32 TileY, int32 TileIndex)
 {
-    if (OverlayMode != NewMode)
+    if (TileX < 0 || TileY < 0 || TileX >= GridWidth || TileY >= GridHeight)
     {
-        OverlayMode = NewMode;
-        MarkMapTextureDirty();
-        MarkDetailedMapTextureDirty();
+        UE_LOG(LogTemp, Warning,
+            TEXT("[WorldMapSubsystem] Rejecting selected start tile. Invalid XY=(%d,%d) Grid=%dx%d"),
+            TileX, TileY, GridWidth, GridHeight);
+        return;
     }
+
+    int32 VerifiedIndex = TileIndex;
+    if (VerifiedIndex < 0 || VerifiedIndex >= WorldTiles.Num())
+    {
+        VerifiedIndex = TileY * GridWidth + TileX;
+    }
+
+    if (!WorldTiles.IsValidIndex(VerifiedIndex))
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[WorldMapSubsystem] Rejecting selected start tile. Invalid Index=%d"), VerifiedIndex);
+        return;
+    }
+
+    SelectedStartTileX = TileX;
+    SelectedStartTileY = TileY;
+    SelectedStartTileIndex = VerifiedIndex;
+    bHasSelectedStartTile = true;
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[WorldMapSubsystem] Selected start tile set: X=%d Y=%d Index=%d"),
+        SelectedStartTileX, SelectedStartTileY, SelectedStartTileIndex);
 }
+
+bool UWorldMapSubsystem::GetSelectedStartTile(int32& OutTileX, int32& OutTileY, int32& OutTileIndex) const
+{
+    if (!bHasSelectedStartTile)
+    {
+        return false;
+    }
+
+    OutTileX = SelectedStartTileX;
+    OutTileY = SelectedStartTileY;
+    OutTileIndex = SelectedStartTileIndex;
+    return true;
+}
+
+void UWorldMapSubsystem::ClearSelectedStartTile()
+{
+    bHasSelectedStartTile = false;
+    SelectedStartTileX = -1;
+    SelectedStartTileY = -1;
+    SelectedStartTileIndex = -1;
+
+    UE_LOG(LogTemp, Log, TEXT("[WorldMapSubsystem] Selected start tile cleared."));
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Texture allocation / upload
+// ═══════════════════════════════════════════════════════════════════
+
+void UWorldMapSubsystem::AllocateMapTextureIfNeeded()
+{
+    if (CachedMapTexture &&
+        CachedMapTexture->GetSizeX() == GridWidth &&
+        CachedMapTexture->GetSizeY() == GridHeight)
+    {
+        return;
+    }
+
+    CachedMapTexture = UTexture2D::CreateTransient(GridWidth, GridHeight, PF_B8G8R8A8);
+    if (!CachedMapTexture)
+    {
+        UE_LOG(LogTemp, Error, TEXT("[WorldMapSubsystem] Failed to create transient map texture."));
+        return;
+    }
+
+    CachedMapTexture->SRGB = true;
+    CachedMapTexture->Filter = TF_Nearest;
+    CachedMapTexture->AddressX = TA_Clamp;
+    CachedMapTexture->AddressY = TA_Clamp;
+    CachedMapTexture->UpdateResource();
+}
+
+void UWorldMapSubsystem::UploadMapPixels(const TArray<FColor>& PixelData)
+{
+    if (!CachedMapTexture || !CachedMapTexture->GetPlatformData() ||
+        CachedMapTexture->GetPlatformData()->Mips.Num() == 0)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[WorldMapSubsystem] UploadMapPixels failed: invalid texture."));
+        return;
+    }
+
+    FTexture2DMipMap& Mip = CachedMapTexture->GetPlatformData()->Mips[0];
+    void* Data = Mip.BulkData.Lock(LOCK_READ_WRITE);
+
+    const SIZE_T ExpectedBytes = static_cast<SIZE_T>(GridWidth * GridHeight) * sizeof(FColor);
+    FMemory::Memcpy(Data, PixelData.GetData(), ExpectedBytes);
+
+    Mip.BulkData.Unlock();
+    CachedMapTexture->UpdateResource();
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Coordinate helpers
+// ═══════════════════════════════════════════════════════════════════
 
 bool UWorldMapSubsystem::TileXYToIndex(int32 TileX, int32 TileY, int32& OutTileIndex) const
 {
@@ -611,6 +976,104 @@ bool UWorldMapSubsystem::WorldUVToBestSpawnTile(
     return true;
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// Blending utilities
+// ═══════════════════════════════════════════════════════════════════
+
+FColor UWorldMapSubsystem::BlendLayer(const FColor& DstColor, const FColor& SrcColor, float Alpha)
+{
+    const float A = FMath::Clamp(Alpha, 0.0f, 1.0f);
+    const float InvA = 1.0f - A;
+
+    return FColor(
+        static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(DstColor.R * InvA + SrcColor.R * A), 0, 255)),
+        static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(DstColor.G * InvA + SrcColor.G * A), 0, 255)),
+        static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(DstColor.B * InvA + SrcColor.B * A), 0, 255)),
+        255);
+}
+
+FColor UWorldMapSubsystem::BlendCivTerritoryTint(const FColor& BaseColor, const FWorldTileData& Tile) const
+{
+    if (Tile.ControllingCivID < 0)
+    {
+        return BaseColor;
+    }
+
+    return BlendLayer(BaseColor, GetStableCivColor(Tile.ControllingCivID), CivTerritoryTintAlpha);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Central blending pipeline
+//
+// Composites all active overlay layers over terrain in fixed order:
+//   Terrain (always) → Political → Economy → Cosmic → Trade →
+//   Underground → Fog
+//
+// This is the ONLY function that should be called when computing the
+// final pixel color for the standard (256x256) map.
+// ═══════════════════════════════════════════════════════════════════
+
+FColor UWorldMapSubsystem::ComputeBlendedTileColor(const FWorldTileData& Tile) const
+{
+    // 1. Start with terrain base.
+    FColor Color = ApplyKnowledgeToColor(MakeTileMapColor(Tile), Tile);
+
+    // 2. Civ territory tint (always applied on terrain, not gated by
+    //    the Political overlay bit — territory borders should always
+    //    be visible on the terrain layer).
+    Color = BlendCivTerritoryTint(Color, Tile);
+
+    // 3. Overlay layers in fixed order.
+    if (IsOverlayLayerActive(WorldForgeOverlay::Political) && Tile.ControllingCivID >= 0)
+    {
+        Color = BlendLayer(Color, MakePoliticalLayerColor(Tile), PoliticalAlpha);
+    }
+
+    if (IsOverlayLayerActive(WorldForgeOverlay::Economy))
+    {
+        Color = BlendLayer(Color, MakeEconomyLayerColor(Tile), EconomyAlpha);
+    }
+
+    if (IsOverlayLayerActive(WorldForgeOverlay::Cosmic))
+    {
+        Color = BlendLayer(Color, MakeCosmicLayerColor(Tile), CosmicAlpha);
+    }
+
+    if (IsOverlayLayerActive(WorldForgeOverlay::Trade))
+    {
+        Color = BlendLayer(Color, MakeTradeLayerColor(Tile), TradeAlpha);
+    }
+
+    if (IsOverlayLayerActive(WorldForgeOverlay::Underground))
+    {
+        Color = BlendLayer(Color, MakeUndergroundLayerColor(Tile), UndergroundAlpha);
+    }
+
+    // 4. Fog is always last — it darkens unknown areas on top of
+    //    everything else.
+    if (IsOverlayLayerActive(WorldForgeOverlay::Fog))
+    {
+        Color = BlendLayer(Color, MakeFogLayerColor(Tile), FogAlpha);
+    }
+
+    return Color;
+}
+
+FColor UWorldMapSubsystem::ComputeBlendedTileColorAtCell(int32 TileX, int32 TileY, const FWorldTileData& Tile) const
+{
+    // For the standard map the cell coordinates are unused (no voxel
+    // sampling), so we just delegate to the tile-only blender.
+    return ComputeBlendedTileColor(Tile);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Per-layer color functions
+//
+// Each returns the RAW overlay color — no terrain base, no alpha
+// blending.  The central pipeline (ComputeBlendedTileColor) handles
+// compositing.
+// ═══════════════════════════════════════════════════════════════════
+
 FColor UWorldMapSubsystem::MakeTileMapColor(const FWorldTileData& Tile) const
 {
     const float Elevation = FMath::Clamp(Tile.Elevation, 0.0f, 1.0f);
@@ -706,30 +1169,6 @@ FColor UWorldMapSubsystem::MakeTileMapColor(const FWorldTileData& Tile) const
     return ScaleColor(BaseColor, Brightness);
 }
 
-FColor UWorldMapSubsystem::GetOverlayAwareTileColorAtCell(int32 TileX, int32 TileY, const FWorldTileData& Tile) const
-{
-    switch (OverlayMode)
-    {
-    case EWorldMapOverlayMode::Political:
-        return MakePoliticalOverlayColor(Tile);
-
-    case EWorldMapOverlayMode::Economy:
-        return MakeEconomyOverlayColor(Tile);
-
-    case EWorldMapOverlayMode::Cosmic:
-        return MakeCosmicOverlayColor(Tile);
-
-    case EWorldMapOverlayMode::Trade:
-        return MakeTradeOverlayColor(Tile);
-
-    case EWorldMapOverlayMode::Terrain:
-    default:
-        // Main world map should stay faithful to pipeline-generated tile/biome data.
-        // This preserves the green grass / sandy coast look the player expects.
-        return ApplyKnowledgeToColor(MakeTileMapColor(Tile), Tile);
-    }
-}
-
 FColor UWorldMapSubsystem::MakeTerrainColorFromVoxelData(int32 TileX, int32 TileY, const FWorldTileData& FallbackTile) const
 {
     if (const UWorld* World = GetWorld())
@@ -747,6 +1186,7 @@ FColor UWorldMapSubsystem::MakeTerrainColorFromVoxelData(int32 TileX, int32 Tile
                 case EWorldForgeTerrainType::Dirt:  return FColor(125, 110, 80);
                 case EWorldForgeTerrainType::Rock:  return FColor(135, 135, 135);
                 case EWorldForgeTerrainType::Snow:  return FColor(230, 230, 235);
+                case EWorldForgeTerrainType::Lava:  return FColor(200, 60, 20);
                 default: break;
                 }
             }
@@ -761,35 +1201,39 @@ FColor UWorldMapSubsystem::ApplyKnowledgeToColor(const FColor& InColor, const FW
     return InColor;
 }
 
-FColor UWorldMapSubsystem::MakePoliticalOverlayColor(const FWorldTileData& Tile) const
+// ─── Political layer ──────────────────────────────────────────────
+// Returns the civ's territory color.  The central blender applies
+// the PoliticalAlpha blend.
+FColor UWorldMapSubsystem::MakePoliticalLayerColor(const FWorldTileData& Tile) const
 {
     if (Tile.ControllingCivID < 0)
     {
-        return ApplyKnowledgeToColor(MakeTileMapColor(Tile), Tile);
+        // No civ — transparent black (won't affect blend).
+        return FColor(0, 0, 0, 0);
     }
 
-    const uint8 R = static_cast<uint8>((Tile.ControllingCivID * 67 + 80) % 255);
-    const uint8 G = static_cast<uint8>((Tile.ControllingCivID * 131 + 110) % 255);
-    const uint8 B = static_cast<uint8>((Tile.ControllingCivID * 197 + 140) % 255);
-
-    return ApplyKnowledgeToColor(FColor(R, G, B, 255), Tile);
+    return GetStableCivColor(Tile.ControllingCivID);
 }
 
-FColor UWorldMapSubsystem::MakeEconomyOverlayColor(const FWorldTileData& Tile) const
+// ─── Economy layer ────────────────────────────────────────────────
+// Heat map from CommercePressure: brown (low) → gold (high).
+FColor UWorldMapSubsystem::MakeEconomyLayerColor(const FWorldTileData& Tile) const
 {
     const float Commerce = FMath::Clamp(Tile.CommercePressure, 0.0f, 1.0f);
 
     const FColor Low(70, 50, 35);
     const FColor High(240, 210, 80);
 
-    return ApplyKnowledgeToColor(FColor(
+    return FColor(
         static_cast<uint8>(FMath::Lerp(float(Low.R), float(High.R), Commerce)),
         static_cast<uint8>(FMath::Lerp(float(Low.G), float(High.G), Commerce)),
         static_cast<uint8>(FMath::Lerp(float(Low.B), float(High.B), Commerce)),
-        255), Tile);
+        255);
 }
 
-FColor UWorldMapSubsystem::MakeCosmicOverlayColor(const FWorldTileData& Tile) const
+// ─── Cosmic layer ─────────────────────────────────────────────────
+// Sacredness → green, Corruption → purple, Fear → red.
+FColor UWorldMapSubsystem::MakeCosmicLayerColor(const FWorldTileData& Tile) const
 {
     const float Sacred = FMath::Clamp(Tile.Sacredness, 0.0f, 1.0f);
     const float Corrupt = FMath::Clamp(Tile.Corruption, 0.0f, 1.0f);
@@ -799,125 +1243,82 @@ FColor UWorldMapSubsystem::MakeCosmicOverlayColor(const FWorldTileData& Tile) co
     const uint8 G = static_cast<uint8>(FMath::Clamp(Sacred * 220.0f, 0.0f, 255.0f));
     const uint8 B = static_cast<uint8>(FMath::Clamp(Corrupt * 255.0f + Sacred * 80.0f, 0.0f, 255.0f));
 
-    return ApplyKnowledgeToColor(FColor(R, G, B, 255), Tile);
+    return FColor(R, G, B, 255);
 }
 
-FColor UWorldMapSubsystem::MakeTradeOverlayColor(const FWorldTileData& Tile) const
+// ─── Trade layer ──────────────────────────────────────────────────
+// Yellow-gold intensity based on commerce.
+FColor UWorldMapSubsystem::MakeTradeLayerColor(const FWorldTileData& Tile) const
 {
     const float Trade = FMath::Clamp(Tile.CommercePressure, 0.0f, 1.0f);
     const uint8 V = static_cast<uint8>(FMath::Lerp(30.0f, 230.0f, Trade));
 
-    return ApplyKnowledgeToColor(FColor(V, V, 40, 255), Tile);
+    return FColor(V, V, 40, 255);
 }
 
-FColor UWorldMapSubsystem::GetOverlayAwareTileColor(const FWorldTileData& Tile) const
+// ─── Underground layer ────────────────────────────────────────────
+// Caves → blue, Canyons → red, Lava tubes → orange, None → dark gray.
+FColor UWorldMapSubsystem::MakeUndergroundLayerColor(const FWorldTileData& Tile) const
 {
-    switch (OverlayMode)
+    const float Elev = FMath::Clamp(Tile.Elevation, 0.0f, 1.0f);
+
+    // Water tiles → dark blue
+    if (Elev < 0.48f)
     {
-    case EWorldMapOverlayMode::Political: return MakePoliticalOverlayColor(Tile);
-    case EWorldMapOverlayMode::Economy:   return MakeEconomyOverlayColor(Tile);
-    case EWorldMapOverlayMode::Cosmic:    return MakeCosmicOverlayColor(Tile);
-    case EWorldMapOverlayMode::Trade:     return MakeTradeOverlayColor(Tile);
-    case EWorldMapOverlayMode::Terrain:
+        return FColor(8, 20, 50, 255);
+    }
+
+    const float CaveIntensity = FMath::Clamp(Tile.VoxelProfile.CaveIntensity, 0.0f, 3.0f);
+    const float CanyonIntensity = FMath::Clamp(Tile.VoxelProfile.CanyonIntensity, 0.0f, 3.0f);
+    const float CaveZScale = FMath::Clamp(Tile.VoxelProfile.CaveZScale, 0.0f, 1.0f);
+    const bool bIsLavaTube = (CaveIntensity > 0.0f && CaveZScale < 0.5f);
+
+    // No underground features → dark gray
+    if (CaveIntensity <= 0.0f && CanyonIntensity <= 0.0f)
+    {
+        return FColor(35, 35, 35, 255);
+    }
+
+    // Lava tubes → orange gradient
+    if (bIsLavaTube)
+    {
+        const float T = FMath::Clamp(CaveIntensity / 2.0f, 0.0f, 1.0f);
+        const uint8 R = static_cast<uint8>(FMath::Lerp(80.0f, 230.0f, T));
+        const uint8 G = static_cast<uint8>(FMath::Lerp(30.0f, 100.0f, T));
+        return FColor(R, G, 10, 255);
+    }
+
+    // Cave + canyon blend
+    const float CaveT = FMath::Clamp(CaveIntensity / 2.5f, 0.0f, 1.0f);
+    const float CanyonT = FMath::Clamp(CanyonIntensity / 2.0f, 0.0f, 1.0f);
+
+    const uint8 R = static_cast<uint8>(FMath::Lerp(25.0f, 200.0f, CanyonT));
+    const uint8 G = static_cast<uint8>(FMath::Lerp(25.0f, 60.0f, FMath::Max(CaveT, CanyonT)));
+    const uint8 B = static_cast<uint8>(FMath::Lerp(25.0f, 220.0f, CaveT));
+
+    return FColor(R, G, B, 255);
+}
+
+// ─── Fog layer ────────────────────────────────────────────────────
+// Unexplored tiles → near-black.  Surveyed/known tiles → transparent
+// (returns base color unchanged when blended at FogAlpha).
+FColor UWorldMapSubsystem::MakeFogLayerColor(const FWorldTileData& Tile) const
+{
+    switch (Tile.KnowledgeState.KnowledgeLevel)
+    {
+    case EKnowledgeLevel::Unexplored:
+        // Full fog — dark.
+        return FColor(10, 10, 12, 255);
+
+    case EKnowledgeLevel::Rumored:
+        // Partial fog — dim.
+        return FColor(30, 28, 35, 255);
+
+    case EKnowledgeLevel::Surveyed:
     default:
+        // No fog — return the "identity" color for this tile's terrain
+        // so the blend is a no-op.  This avoids needing a separate
+        // "skip this pixel" path in the blender.
         return ApplyKnowledgeToColor(MakeTileMapColor(Tile), Tile);
     }
-}
-
-void UWorldMapSubsystem::SetSelectedStartTile(int32 TileX, int32 TileY, int32 TileIndex)
-{
-    if (TileX < 0 || TileY < 0 || TileX >= GridWidth || TileY >= GridHeight)
-    {
-        UE_LOG(LogTemp, Warning,
-            TEXT("[WorldMapSubsystem] Rejecting selected start tile. Invalid XY=(%d,%d) Grid=%dx%d"),
-            TileX, TileY, GridWidth, GridHeight);
-        return;
-    }
-
-    int32 VerifiedIndex = TileIndex;
-    if (VerifiedIndex < 0 || VerifiedIndex >= WorldTiles.Num())
-    {
-        VerifiedIndex = TileY * GridWidth + TileX;
-    }
-
-    if (!WorldTiles.IsValidIndex(VerifiedIndex))
-    {
-        UE_LOG(LogTemp, Warning,
-            TEXT("[WorldMapSubsystem] Rejecting selected start tile. Invalid Index=%d"), VerifiedIndex);
-        return;
-    }
-
-    SelectedStartTileX = TileX;
-    SelectedStartTileY = TileY;
-    SelectedStartTileIndex = VerifiedIndex;
-    bHasSelectedStartTile = true;
-
-    UE_LOG(LogTemp, Log,
-        TEXT("[WorldMapSubsystem] Selected start tile set: X=%d Y=%d Index=%d"),
-        SelectedStartTileX, SelectedStartTileY, SelectedStartTileIndex);
-}
-
-bool UWorldMapSubsystem::GetSelectedStartTile(int32& OutTileX, int32& OutTileY, int32& OutTileIndex) const
-{
-    if (!bHasSelectedStartTile)
-    {
-        return false;
-    }
-
-    OutTileX = SelectedStartTileX;
-    OutTileY = SelectedStartTileY;
-    OutTileIndex = SelectedStartTileIndex;
-    return true;
-}
-
-void UWorldMapSubsystem::ClearSelectedStartTile()
-{
-    bHasSelectedStartTile = false;
-    SelectedStartTileX = -1;
-    SelectedStartTileY = -1;
-    SelectedStartTileIndex = -1;
-
-    UE_LOG(LogTemp, Log, TEXT("[WorldMapSubsystem] Selected start tile cleared."));
-}
-
-void UWorldMapSubsystem::AllocateMapTextureIfNeeded()
-{
-    if (CachedMapTexture &&
-        CachedMapTexture->GetSizeX() == GridWidth &&
-        CachedMapTexture->GetSizeY() == GridHeight)
-    {
-        return;
-    }
-
-    CachedMapTexture = UTexture2D::CreateTransient(GridWidth, GridHeight, PF_B8G8R8A8);
-    if (!CachedMapTexture)
-    {
-        UE_LOG(LogTemp, Error, TEXT("[WorldMapSubsystem] Failed to create transient map texture."));
-        return;
-    }
-
-    CachedMapTexture->SRGB = true;
-    CachedMapTexture->Filter = TF_Nearest;
-    CachedMapTexture->AddressX = TA_Clamp;
-    CachedMapTexture->AddressY = TA_Clamp;
-    CachedMapTexture->UpdateResource();
-}
-
-void UWorldMapSubsystem::UploadMapPixels(const TArray<FColor>& PixelData)
-{
-    if (!CachedMapTexture || !CachedMapTexture->GetPlatformData() ||
-        CachedMapTexture->GetPlatformData()->Mips.Num() == 0)
-    {
-        UE_LOG(LogTemp, Warning, TEXT("[WorldMapSubsystem] UploadMapPixels failed: invalid texture."));
-        return;
-    }
-
-    FTexture2DMipMap& Mip = CachedMapTexture->GetPlatformData()->Mips[0];
-    void* Data = Mip.BulkData.Lock(LOCK_READ_WRITE);
-
-    const SIZE_T ExpectedBytes = static_cast<SIZE_T>(GridWidth * GridHeight) * sizeof(FColor);
-    FMemory::Memcpy(Data, PixelData.GetData(), ExpectedBytes);
-
-    Mip.BulkData.Unlock();
-    CachedMapTexture->UpdateResource();
 }

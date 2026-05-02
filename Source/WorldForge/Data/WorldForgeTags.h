@@ -23,6 +23,7 @@ UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Job_Idle);
 UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Job_Harvest_Food);
 UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Job_Harvest_Wood);
 UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Job_Harvest_Stone);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Job_Mine);
 
 // ---- Job category parent tags --------------------------------------
 // Correct usage:
@@ -83,6 +84,44 @@ UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Building_Spiritual_Shrine);
 UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Building_Economic_MarketStall);
 
 // ====================================================================
+// Phase 1: Digging & Mining Tags
+// ====================================================================
+
+// ---- Tool tags -----------------------------------------------------
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Tool_Dig);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Tool_Mine);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Tool_Pickaxe);
+
+// ---- Terrain block type tags ---------------------------------------
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Terrain_Dirt);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Terrain_Stone);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Terrain_Gravel);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Terrain_Clay);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Terrain_Sand);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Terrain_Bedrock);
+
+// ---- Depth tier tags -----------------------------------------------
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_DepthTier_Surface);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_DepthTier_Shallow);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_DepthTier_Mid);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_DepthTier_Deep);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_DepthTier_Abyss);
+
+// ---- Resource tags -------------------------------------------------
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Resource_Stone);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Resource_Iron);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Resource_Copper);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Resource_Coal);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Resource_Tin);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Resource_Silver);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Resource_Gold);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Resource_Quartz);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Resource_Mithril);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Resource_Obsidian);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Resource_VoidCrystal);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Resource_Starstone);
+
+// ====================================================================
 // Blueprint Access Library
 // ====================================================================
 
@@ -126,6 +165,9 @@ public:
 
     UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Job")
     static FGameplayTag GetJobHarvestStoneTag();
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Job")
+    static FGameplayTag GetJobMineTag();
 
     // ---- Item tags -------------------------------------------------
     UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Item")

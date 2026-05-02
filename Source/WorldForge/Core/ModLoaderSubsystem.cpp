@@ -28,7 +28,8 @@ void UModLoaderSubsystem::ScanAndLoadMods()
 
     if (!IFileManager::Get().DirectoryExists(*ModsFolderPath))
     {
-        UE_LOG(LogTemp, Log, TEXT("[ModLoader] No mods folder found at %s - skipping."), *ModsFolderPath);
+        IFileManager::Get().MakeDirectory(*ModsFolderPath, true);
+        UE_LOG(LogTemp, Log, TEXT("[ModLoader] Created mods folder at %s"), *ModsFolderPath);
         return;
     }
 

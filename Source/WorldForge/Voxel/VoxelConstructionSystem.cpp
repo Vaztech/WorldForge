@@ -1,86 +1,14 @@
 ﻿// VoxelConstructionSystem.cpp
 
 #include "VoxelConstructionSystem.h"
+#include "BuildingTagHelper.h"
 #include "Engine/World.h"
 #include "SettlementManager.h"
 #include "EventBus.h"
 #include "VoxelWorldManager.h"
 #include "WorldForgeTags.h"
 
-namespace
-{
-    static bool TryParseExplicitPrefabDimensions(const FString& Source, int32& OutWidth, int32& OutDepth, int32& OutHeight)
-    {
-        OutWidth = 0;
-        OutDepth = 0;
-        OutHeight = 0;
-
-        const int32 Length = Source.Len();
-        for (int32 Start = 0; Start < Length; ++Start)
-        {
-            if (!FChar::IsDigit(Source[Start]))
-            {
-                continue;
-            }
-
-            int32 Cursor = Start;
-
-            FString A;
-            while (Cursor < Length && FChar::IsDigit(Source[Cursor]))
-            {
-                A.AppendChar(Source[Cursor]);
-                ++Cursor;
-            }
-
-            if (A.IsEmpty() || Cursor >= Length || (Source[Cursor] != TCHAR('x') && Source[Cursor] != TCHAR('X')))
-            {
-                continue;
-            }
-
-            ++Cursor;
-
-            FString B;
-            while (Cursor < Length && FChar::IsDigit(Source[Cursor]))
-            {
-                B.AppendChar(Source[Cursor]);
-                ++Cursor;
-            }
-
-            if (B.IsEmpty() || Cursor >= Length || (Source[Cursor] != TCHAR('x') && Source[Cursor] != TCHAR('X')))
-            {
-                continue;
-            }
-
-            ++Cursor;
-
-            FString C;
-            while (Cursor < Length && FChar::IsDigit(Source[Cursor]))
-            {
-                C.AppendChar(Source[Cursor]);
-                ++Cursor;
-            }
-
-            if (C.IsEmpty())
-            {
-                continue;
-            }
-
-            const int32 ParsedWidth = FCString::Atoi(*A);
-            const int32 ParsedDepth = FCString::Atoi(*B);
-            const int32 ParsedHeight = FCString::Atoi(*C);
-
-            if (ParsedWidth > 0 && ParsedDepth > 0 && ParsedHeight > 0)
-            {
-                OutWidth = ParsedWidth;
-                OutDepth = ParsedDepth;
-                OutHeight = ParsedHeight;
-                return true;
-            }
-        }
-
-        return false;
-    }
-}
+// TryParseExplicitPrefabDimensions moved to UBuildingTagHelper::TryParsePrefabDimensions
 
 void UVoxelConstructionSystem::Initialize(FSubsystemCollectionBase& C)
 {
@@ -562,38 +490,7 @@ FActiveBuildTask* UVoxelConstructionSystem::GetMutableTaskForAgent(int32 AgentID
 
 int32 UVoxelConstructionSystem::GetBlockCount(FGameplayTag Tag) const
 {
-    const FString S = Tag.ToString();
-
-    int32 TrailingDigitStart = INDEX_NONE;
-    for (int32 Index = S.Len() - 1; Index >= 0; --Index)
-    {
-        if (FChar::IsDigit(S[Index]))
-        {
-            TrailingDigitStart = Index;
-        }
-        else
-        {
-            break;
-        }
-    }
-
-    if (TrailingDigitStart != INDEX_NONE)
-    {
-        const FString TrailingDigits = S.Mid(TrailingDigitStart);
-        const int32 ParsedCount = FCString::Atoi(*TrailingDigits);
-        if (ParsedCount > 0)
-        {
-            return ParsedCount;
-        }
-    }
-
-    if (S.Contains(TEXT("Stockpile"))) return 8;
-    if (S.Contains(TEXT("Kitchen"))) return 16;
-    if (S.Contains(TEXT("Carpenter"))) return 20;
-    if (S.Contains(TEXT("Barracks"))) return 24;
-    if (S.Contains(TEXT("Shrine"))) return 12;
-
-    return 10;
+    return UBuildingTagHelper::GetBlockCountForBuildingTag(Tag);
 }
 
 TArray<FIntVector> UVoxelConstructionSystem::BuildPrefabBlockList(FGameplayTag BuildTag, FIntPoint Origin) const
@@ -604,7 +501,7 @@ TArray<FIntVector> UVoxelConstructionSystem::BuildPrefabBlockList(FGameplayTag B
     int32 ExplicitDepth = 0;
     int32 ExplicitHeight = 0;
 
-    if (TryParseExplicitPrefabDimensions(BuildTag.ToString(), ExplicitWidth, ExplicitDepth, ExplicitHeight))
+    if (UBuildingTagHelper::TryParsePrefabDimensions(BuildTag.ToString(), ExplicitWidth, ExplicitDepth, ExplicitHeight))
     {
         Blocks.Reserve(ExplicitWidth * ExplicitDepth * ExplicitHeight);
 
@@ -696,19 +593,7 @@ bool UVoxelConstructionSystem::TaskOccupiesBlock(const FActiveBuildTask& Task, c
 
 FGameplayTag UVoxelConstructionSystem::ResolveRequiredStockpileItem(FGameplayTag MaterialTag) const
 {
-    const FString MaterialString = MaterialTag.ToString();
-
-    if (MaterialString.Contains(TEXT("Wood")))
-    {
-        return TAG_Item_Wood;
-    }
-
-    if (MaterialString.Contains(TEXT("Stone")))
-    {
-        return TAG_Item_Stone;
-    }
-
-    return TAG_Item_Stone;
+    return UBuildingTagHelper::ResolveStockpileItemForMaterial(MaterialTag);
 }
 
 bool UVoxelConstructionSystem::HasEnoughStockpileForTask(

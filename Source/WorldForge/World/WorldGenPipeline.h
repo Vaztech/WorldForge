@@ -37,6 +37,8 @@ public:
     const TArray<FMountainRange>& GetMountainRanges() const { return MountainRanges; }
     const TArray<FMountainProvince>& GetMountainProvinces() const { return MountainProvinces; }
     const TArray<FIntPoint>& GetVolcanicHotspots() const { return VolcanicHotspots; }
+    const TArray<FVolcanoData>& GetVolcanoes() const { return Volcanoes; }
+    const FWindConfig& GetWindConfig() const { return WindConfig; }
     int32 GetGridWidth() const { return GridWidth; }
     int32 GetGridHeight() const { return GridHeight; }
     bool  IsComplete() const { return bComplete; }
@@ -57,6 +59,12 @@ private:
     void Step14_AssignWorldTraits();
     void Step15_RecordFinalState();
     void Step16_FinalizeWorldMap();
+
+    // DF-style staged map update — pushes partial world data to
+    // WorldMapSubsystem so the player sees the map "build itself"
+    // during generation.
+    void PushPartialMapUpdate();
+
     int32 GetDimension(EWorldSize Size) const;
     int32 TileIndex(int32 X, int32 Y) const { return Y * GridWidth + X; }
     TArray<FWorldTileData>      WorldTiles;
@@ -67,6 +75,8 @@ private:
     TArray<FMountainRange>      MountainRanges;
     TArray<FMountainProvince>   MountainProvinces;
     TArray<FIntPoint>           VolcanicHotspots;
+    TArray<FVolcanoData>        Volcanoes;
+    FWindConfig                 WindConfig;
     FWorldGenConfig CurrentConfig;
     int64           WorldSeed = 0;
     int32           GridWidth = 256;

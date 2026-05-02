@@ -4,6 +4,8 @@
 #include "Subsystems/WorldSubsystem.h"
 #include "GameplayTagContainer.h"
 #include "WorldForgeDataTypes.h"
+#include "Player/DigResult.h"
+#include "Player/BuildModeTypes.h"
 #include "PlayerBuildContext.generated.h"
 
 // UPlayerBuildContext
@@ -100,6 +102,93 @@ public:
 
     UFUNCTION(BlueprintPure)
     FString GetLastCommitResultMessage() const { return LastCommitResultMessage; }
+
+    // ================================
+    // Phase 1: Dig State
+    // ================================
+
+    /** Current dig tool settings. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Build|Dig")
+    FDigSettings DigSettings;
+
+    /** Grid position the dig ghost is currently targeting. */
+    UPROPERTY(BlueprintReadOnly, Category = "Build|Dig")
+    FIntVector CurrentDigTarget = FIntVector::ZeroValue;
+
+    /** World position of the current dig target. */
+    UPROPERTY(BlueprintReadOnly, Category = "Build|Dig")
+    FVector CurrentDigWorldPosition = FVector::ZeroVector;
+
+    /** True if the current dig target is valid. */
+    UPROPERTY(BlueprintReadOnly, Category = "Build|Dig")
+    bool bDigTargetValid = false;
+
+    /** Time remaining before the next dig action is allowed. */
+    UPROPERTY(BlueprintReadOnly, Category = "Build|Dig")
+    float DigCooldownRemaining = 0.0f;
+
+    /** Stack of dig operations for undo. Most recent dig is at the end. */
+    UPROPERTY(SaveGame)
+    TArray<FDigUndoEntry> DigUndoStack;
+
+    /** Maximum number of dig operations stored in undo stack. */
+    UPROPERTY(EditDefaultsOnly, Category = "Build|Dig")
+    int32 MaxDigUndoEntries = 50;
+
+    /** Push a dig result onto the undo stack. */
+    void PushDigUndo(const FDigResult& Result, int64 SimTick)
+    {
+        FDigUndoEntry Entry;
+        Entry.DigResult = Result;
+        Entry.SimTick = SimTick;
+
+        DigUndoStack.Add(MoveTemp(Entry));
+
+        while (DigUndoStack.Num() > MaxDigUndoEntries)
+        {
+            DigUndoStack.RemoveAt(0);
+        }
+    }
+
+    /** Pop the most recent dig from the undo stack. */
+    bool PopDigUndo(FDigUndoEntry& OutEntry)
+    {
+        if (DigUndoStack.Num() == 0)
+        {
+            return false;
+        }
+
+        OutEntry = DigUndoStack.Last();
+        DigUndoStack.RemoveAt(DigUndoStack.Num() - 1);
+        return true;
+    }
+
+    /** Clear the dig undo stack. */
+    void ClearDigUndoStack()
+    {
+        DigUndoStack.Empty();
+    }
+
+    /** Update dig cooldown. */
+    void TickDigCooldown(float DeltaTime)
+    {
+        if (DigCooldownRemaining > 0.0f)
+        {
+            DigCooldownRemaining = FMath::Max(0.0f, DigCooldownRemaining - DeltaTime);
+        }
+    }
+
+    /** Check if a dig action is off cooldown. */
+    bool CanDigNow() const
+    {
+        return DigCooldownRemaining <= 0.0f;
+    }
+
+    /** Start the dig cooldown after a successful dig. */
+    void StartDigCooldown()
+    {
+        DigCooldownRemaining = DigSettings.DigCooldown;
+    }
 
 private:
 

@@ -124,17 +124,51 @@ void UDiplomacySubsystem::SetEmbargo(int32 CivA, int32 CivB, bool bActive, UWorl
     }
 }
 
-void UDiplomacySubsystem::SetTradeRouteFlowMod(int32 CivA, int32 CivB, float Mod, UWorld* World) const
+void UDiplomacySubsystem::SetTradeRouteFlowMod(int32 CivA, int32 CivB, float Mod, UWorld* World)
 {
-    (void)World; // ADDED
+    // ── BF-07 IMPLEMENTATION ─────────────────────────────────────────────
+    // Apply the economic effect of diplomatic trade flow changes via the
+    // currency trust system.  A Mod of 0.0 (embargo/blockade) tanks trade
+    // reputation; a Mod > 1.0 (trade agreement boost) improves it.
+    //
+    // TODO: When UWorldEconomySimulation exposes a public method to iterate
+    // and mutate FTradeFlowState::DiplomaticMod on its TradeRoutes map,
+    // upgrade this to directly modify route flow states.
+    // ─────────────────────────────────────────────────────────────────────
+    UWorldEconomySimulation* ES = World ? World->GetSubsystem<UWorldEconomySimulation>() : nullptr;
 
-    // ADDED
-    // Phase 3B stub dependency:
-    // this only logs for now. Real mutation of FTradeFlowState.DiplomaticMod
-    // is deferred until trade routes are mutable/populated.
+    if (!ES)
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[Diplomacy] SetTradeRouteFlowMod: EconSim missing. %d <-> %d = %.2f"),
+            CivA, CivB, Mod);
+        return;
+    }
+
+    // Map the flow modifier to a trust delta on TradeReputation.
+    // Mod=0.0 (full blockade) -> -0.3 trust hit
+    // Mod=1.0 (normal)        ->  0.0 (no change)
+    // Mod=1.3 (trade boost)   -> +0.09 trust gain
+    const float TrustDelta = (Mod - 1.0f) * 0.3f;
+
+    if (FMath::Abs(TrustDelta) > KINDA_SMALL_NUMBER)
+    {
+        const FGameplayTag CurA = GetCivCurrencyTag(CivA, World);
+        const FGameplayTag CurB = GetCivCurrencyTag(CivB, World);
+
+        if (CurA.IsValid())
+        {
+            ES->QueueTrustDelta(CurA, ETrustComponent::TradeReputation, TrustDelta);
+        }
+        if (CurB.IsValid())
+        {
+            ES->QueueTrustDelta(CurB, ETrustComponent::TradeReputation, TrustDelta);
+        }
+    }
+
     UE_LOG(LogTemp, Log,
-        TEXT("[Diplomacy] SetTradeRouteFlowMod stub: %d <-> %d = %.2f"),
-        CivA, CivB, Mod);
+        TEXT("[Diplomacy] SetTradeRouteFlowMod: %d <-> %d = %.2f (TrustDelta=%.3f)"),
+        CivA, CivB, Mod, TrustDelta);
 }
 
 void UDiplomacySubsystem::CheckAndExpireTreaties(int32 StepNumber, UWorld* World)

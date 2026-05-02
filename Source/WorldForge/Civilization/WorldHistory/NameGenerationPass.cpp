@@ -28,7 +28,7 @@ void FNameGenerationPass::Execute(FWorldHistoryContext& Context)
 
             UE_LOG(
                 LogTemp,
-                Warning,
+                Log,
                 TEXT("[WorldHistory] Generated Name %d: %s"),
                 NameIndex,
                 *Name);

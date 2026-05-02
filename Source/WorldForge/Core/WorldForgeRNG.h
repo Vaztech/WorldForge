@@ -68,7 +68,11 @@ public:
     static const int32 BRANCH_COSMIC = 12;      // Cosmic entity generation
     static const int32 BRANCH_ANCHORS = 13;     // Anchor + relic properties
     static const int32 BRANCH_ECONOMY = 14;     // Economy + currency seeding
-    static const int32 NUM_BRANCHES = 15;       // TOTAL — update when adding
+    static const int32 BRANCH_VOLCANO = 15;     // Volcano placement + lava flow
+    static const int32 BRANCH_CAVES = 16;       // v4.0: Cave network noise seeding
+    static const int32 BRANCH_CANYONS = 17;     // v4.0: Canyon carving noise seeding
+    static const int32 NUM_BRANCHES = 18;       // TOTAL — update when adding
+    static const int32 BRANCH_INCIDENTS = 19;
 
 private:
     int64 MasterSeed = 0;

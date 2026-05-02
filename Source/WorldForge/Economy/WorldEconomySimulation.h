@@ -113,6 +113,12 @@ public:
     FEconomySaveState GetEconomySaveState() const;
     void RestoreEconomyFromSave(const FEconomySaveState& SaveState);
 
+    int32 SetDiplomaticModForSettlementPairs(
+        const TSet<int32>& FromSettlementIDs,
+        const TSet<int32>& ToSettlementIDs,
+        float DiplomaticMod
+    );
+
 private:
     // ── Existing Phase 1 helpers (preserved) ─────────────────────────
     FGameplayTag DeriveGovernmentType(

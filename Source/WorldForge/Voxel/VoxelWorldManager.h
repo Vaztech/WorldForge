@@ -22,7 +22,8 @@ enum class EWorldForgeTerrainType : uint8
     Dirt  UMETA(DisplayName = "Dirt"),
     Rock  UMETA(DisplayName = "Rock"),
     Sand  UMETA(DisplayName = "Sand"),
-    Snow  UMETA(DisplayName = "Snow")
+    Snow  UMETA(DisplayName = "Snow"),
+    Lava  UMETA(DisplayName = "Lava")
 };
 
 USTRUCT(BlueprintType)
@@ -118,10 +119,82 @@ public:
     UFUNCTION(BlueprintCallable, Category = "WorldForge|Voxel")
     void NotifyVoxelDig(FVector WorldPosition, int32 AgentID);
 
+    // ----- Phase 1: Dig API -----
+
+    /**
+     * Remove the block at the given grid position, replacing it with air.
+     *
+     * @param GridPos  Grid-space position of the block to remove.
+     * @return         True if a solid block was removed. False if already air,
+     *                 out of bounds, or is bedrock/undiggable.
+     */
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Voxel")
+    bool RemoveBlockAt(const FIntVector& GridPos);
+
+    bool TryFindTopSolidBlockInColumn(
+        const FIntPoint& GridXY,
+        FIntVector& OutBlock,
+        int32 MaxSearchDown = 64) const;
+
+    
+    /**
+     * Restore a previously removed block for undo.
+     *
+     * @param GridPos    Grid-space position to restore.
+     * @param BlockType  Gameplay tag identifying the block type to place.
+     * @return           True if restoration succeeded.
+     */
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Voxel")
+    bool RestoreBlockAt(const FIntVector& GridPos, const FGameplayTag& BlockType);
+
+    /**
+     * Query the block type at a given grid position.
+     *
+     * @return Valid gameplay tag if a solid block exists.
+     *         Invalid tag if air, void, or out of bounds.
+     */
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
+    FGameplayTag GetBlockTypeAt(const FIntVector& GridPos) const;
+
+    /**
+ * Finds the nearest local surface block around a target Z.
+ *
+ * This is used by digging so slope brushes do not search from the
+ * absolute top of the column and accidentally drill downward under hills.
+ */
+    bool TryFindSurfaceBlockNearZ(
+        const FIntPoint& GridXY,
+        int32 TargetZ,
+        int32 VerticalSearchRadius,
+        FIntVector& OutBlock) const;
+
+    /**
+     * Check if a grid position is within valid terrain/world bounds.
+     */
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
+    bool IsValidGridPosition(const FIntVector& GridPos) const;
+
+    /**
+     * Get the Z coordinate of the topmost solid terrain block at this XY column.
+     */
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
+    int32 GetSurfaceZAt(const FIntPoint& GridXY) const;
+
+    /**
+     * Get the contiguous solid terrain depth from the surface downward.
+     */
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
+    int32 GetTerrainDepthAt(const FIntPoint& GridXY) const;
+
+
+
     // ── FIX (Issue 1): Accept Step03 tectonic ranges so the voxel generator
     // uses the same mountain data as the tile map.  Call before GenerateTerrainFromTiles.
     UFUNCTION(BlueprintCallable, Category = "WorldForge|Voxel")
     void SetPipelineMountainRanges(const TArray<FMountainRange>& InRanges);
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Voxel")
+    void SetPipelineVolcanoes(const TArray<FVolcanoData>& InVolcanoes);
 
     UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
     bool HasCachedTerrainData() const;
@@ -296,6 +369,19 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Terrain|Mountains", meta = (ClampMin = "0.1"))
     float MountainFalloffPower = 2.2f;
 
+    // ── v2.1 Mountain ridge detail layer ──
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Terrain|Mountains", meta = (ClampMin = "0.0"))
+    float MountainRidgeHeightScale = 40.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Terrain|Mountains", meta = (ClampMin = "0.1"))
+    float MountainRidgeWidthScale = 0.8f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Terrain|Mountains", meta = (ClampMin = "0.001"))
+    float MountainCragFrequency = 0.06f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Terrain|Mountains", meta = (ClampMin = "0.0"))
+    float MountainCragAmplitude = 6.0f;
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Terrain|Base")
     float BaseHeight = 4000.0f;
 
@@ -331,6 +417,42 @@ public:
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Terrain|Caves", meta = (ClampMin = "0.0", ClampMax = "1.0"))
     float CaveSecondaryWeight = 0.3f;
+
+    // ── v4.0: 3D SDF Worm Cave Settings ──
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Terrain|Caves|WormCaves", meta = (ClampMin = "0.001"))
+    float CaveWormFrequency = 0.012f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Terrain|Caves|WormCaves", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float CaveWormThreshold = 0.55f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Terrain|Caves|WormCaves", meta = (ClampMin = "0.0"))
+    float CaveCarveStrength = 12.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Terrain|Caves|WormCaves", meta = (ClampMin = "0.0"))
+    float CaveDepthFadeStart = 8.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Terrain|Caves|WormCaves", meta = (ClampMin = "0.0"))
+    float CaveDepthFadeEnd = 128.0f;
+
+    // ── v4.0: 3D SDF Canyon Settings ──
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Terrain|Canyons", meta = (ClampMin = "0.001"))
+    float CanyonRidgeFrequency = 0.004f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Terrain|Canyons", meta = (ClampMin = "0.0"))
+    float CanyonDomainWarpStrength = 200.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Terrain|Canyons", meta = (ClampMin = "0.001"))
+    float CanyonDomainWarpFrequency = 0.003f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Terrain|Canyons", meta = (ClampMin = "0.0"))
+    float CanyonMaxDepthVoxels = 40.0f;
+
+    // ── v4.0: Lava Tube Settings ──
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Terrain|Caves|LavaTubes")
+    bool bEnableLavaTubes = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Terrain|Caves|LavaTubes", meta = (ClampMin = "0.05", ClampMax = "1.0"))
+    float LavaTubeZCompress = 0.3f;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Voxel|Debug")
     bool bLogGridConversions = false;
@@ -386,6 +508,7 @@ private:
     bool ApplyBiomeChunkNative(AVoxelWorld* VoxelWorld, FIntPoint ChunkCoord, const FVoxelBiomeProfile& Profile, float TileElevation);
     bool ApplyTerrainFromTilesInternal(AVoxelWorld* VoxelWorld, const TArray<FWorldTileData>& WorldTiles, int32 GridWidth, int32 GridHeight);
     bool ApplyGlobalFoundationNative(AVoxelWorld* VoxelWorld, int32 GridWidth, int32 GridHeight);
+    bool RebuildVoxelWorldFromCurrentSnapshot();
     void CacheTerrainMetadata(const TArray<FWorldTileData>& WorldTiles, int32 GridWidth, int32 GridHeight);
     void ClearTerrainCache();
     void ClearPlacedBlockVisuals();
@@ -454,6 +577,19 @@ private:
 
     FWorldForgeTerrainSnapshot TerrainSnapshot;
 
+    void MarkTerrainBlockRemoved(const FIntVector& GridPos);
+    void UnmarkTerrainBlockRemoved(const FIntVector& GridPos);
+    bool IsTerrainBlockRemoved(const FIntVector& GridPos) const;
+    void RefreshEditedVoxel(const FIntVector& GridPos);
+    bool ApplyRuntimeVoxelRemoval(const FIntVector& GridPos);
+    bool ApplyRuntimeVoxelRestore(const FIntVector& GridPos);
+
+    UPROPERTY(Transient)
+    TMap<FIntVector, TObjectPtr<AStaticMeshActor>> RuntimeDigHoleActors;
+
+    AStaticMeshActor* SpawnRuntimeDigHoleActor(const FIntVector& GridPos);
+    void RemoveRuntimeDigHoleActor(const FIntVector& GridPos);
+
     UPROPERTY(Transient)
     TArray<FWorldTileData> PendingWorldTiles;
 
@@ -475,10 +611,28 @@ private:
     TArray<FMountainRange> CachedMountainRanges;
 
     UPROPERTY(Transient)
+    TArray<FVolcanoData> CachedVolcanoes;
+
+    UPROPERTY(Transient)
     TMap<FIntVector, TObjectPtr<AStaticMeshActor>> FallbackPlacedBlockActors;
 
     UPROPERTY(Transient)
+    TSet<FIntVector> RemovedTerrainBlocks;
+
+    UPROPERTY(Transient)
     FTimerHandle TerrainRetryTimerHandle;
+
+    FTimerHandle BatchedTerrainRebuildTimerHandle;
+    bool bBatchedTerrainRebuildPending = false;
+
+    void RequestBatchedTerrainRebuild();
+    void ExecuteBatchedTerrainRebuild();
+
+    UPROPERTY(EditAnywhere, Category = "WorldForge|Voxel|Dig")
+    bool bRebuildWorldAfterDigEdits = false;
+
+    UPROPERTY(EditAnywhere, Category = "WorldForge|Voxel|Dig", meta = (ClampMin = "0.25"))
+    float DigFullRebuildDebounceSeconds = 5.0f;
 
     UPROPERTY(Transient)
     int32 PendingGridWidth = 0;

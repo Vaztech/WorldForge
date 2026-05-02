@@ -66,9 +66,7 @@ void AWorldForgePlayerController::BeginPlay()
         }
     }
 
-    // Force the active camera view target in C++ instead of Blueprint.
     AcquireAndApplyCameraViewTarget(true);
-
     RefreshBuildInputSuppression();
 }
 
@@ -84,29 +82,47 @@ void AWorldForgePlayerController::SetupInputComponent()
             EIC->BindAction(IA_BuildClick, ETriggerEvent::Completed, this, &AWorldForgePlayerController::OnBuildClickReleased);
             EIC->BindAction(IA_BuildClick, ETriggerEvent::Canceled, this, &AWorldForgePlayerController::OnBuildClickReleased);
         }
+
         if (IA_BuildSecondary)
         {
             EIC->BindAction(IA_BuildSecondary, ETriggerEvent::Triggered, this, &AWorldForgePlayerController::OnBuildSecondary);
         }
+
         if (IA_BuildRotate)
         {
             EIC->BindAction(IA_BuildRotate, ETriggerEvent::Triggered, this, &AWorldForgePlayerController::OnBuildRotate);
         }
+
         if (IA_BuildConfirm)
         {
             EIC->BindAction(IA_BuildConfirm, ETriggerEvent::Triggered, this, &AWorldForgePlayerController::OnBuildConfirm);
         }
+
         if (IA_BuildCancel)
         {
             EIC->BindAction(IA_BuildCancel, ETriggerEvent::Triggered, this, &AWorldForgePlayerController::OnBuildCancel);
         }
+
         if (IA_BuildToggle)
         {
             EIC->BindAction(IA_BuildToggle, ETriggerEvent::Triggered, this, &AWorldForgePlayerController::OnBuildToggle);
         }
+
         if (IA_BuildUndo)
         {
             EIC->BindAction(IA_BuildUndo, ETriggerEvent::Triggered, this, &AWorldForgePlayerController::OnBuildUndo);
+        }
+
+        // ===== NEW: DIG MODE =====
+        if (IA_ToggleDigMode)
+        {
+            EIC->BindAction(IA_ToggleDigMode, ETriggerEvent::Started, this, &AWorldForgePlayerController::ToggleDigMode);
+        }
+
+        // ===== NEW: MINE MODE (stub) =====
+        if (IA_ToggleMineMode)
+        {
+            EIC->BindAction(IA_ToggleMineMode, ETriggerEvent::Started, this, &AWorldForgePlayerController::ToggleMineMode);
         }
 
         UE_LOG(LogWorldForgePC, Log, TEXT("[WorldForgePC] Enhanced Input actions bound."));
@@ -117,7 +133,6 @@ void AWorldForgePlayerController::PlayerTick(float DeltaTime)
 {
     Super::PlayerTick(DeltaTime);
 
-    // Retry camera acquisition until possession is fully settled.
     if (!bCameraViewTargetApplied)
     {
         AcquireAndApplyCameraViewTarget(false);
@@ -143,12 +158,7 @@ bool AWorldForgePlayerController::IsCustomDrawActive() const
 
 bool AWorldForgePlayerController::ShouldLockBuildCamera() const
 {
-    if (!BuildModeManager)
-    {
-        return false;
-    }
-
-    return BuildModeManager->IsInBuildMode();
+    return BuildModeManager && BuildModeManager->IsInBuildMode();
 }
 
 bool AWorldForgePlayerController::IsBuildCameraSuppressed() const
@@ -166,7 +176,6 @@ void AWorldForgePlayerController::RefreshBuildInputSuppression()
     }
 
     bBuildInputSuppressed = bShouldSuppress;
-
     SetIgnoreMoveInput(false);
 
     const bool bInBuildMode = BuildModeManager && BuildModeManager->IsInBuildMode();
@@ -174,7 +183,7 @@ void AWorldForgePlayerController::RefreshBuildInputSuppression()
     UE_LOG(
         LogWorldForgePC,
         Log,
-        TEXT("[WorldForgePC] Camera input state refreshed. InBuildMode=%s MoveSuppressed=%s"),
+        TEXT("[WorldForgePC] Camera input refreshed. InBuildMode=%s Suppressed=%s"),
         bInBuildMode ? TEXT("true") : TEXT("false"),
         bBuildInputSuppressed ? TEXT("true") : TEXT("false"));
 }
@@ -182,29 +191,10 @@ void AWorldForgePlayerController::RefreshBuildInputSuppression()
 bool AWorldForgePlayerController::AcquireAndApplyCameraViewTarget(bool bLogResult)
 {
     APawn* ControlledPawn = GetPawn();
-    if (!ControlledPawn)
-    {
-        if (bLogResult)
-        {
-            UE_LOG(LogWorldForgePC, Warning, TEXT("[WorldForgePC] No possessed pawn yet; camera view target not applied."));
-        }
-        return false;
-    }
+    if (!ControlledPawn) return false;
 
     AWorldForgeCamera* CameraPawn = Cast<AWorldForgeCamera>(ControlledPawn);
-    if (!CameraPawn)
-    {
-        if (bLogResult)
-        {
-            UE_LOG(
-                LogWorldForgePC,
-                Warning,
-                TEXT("[WorldForgePC] Possessed pawn '%s' is not AWorldForgeCamera; camera view target not applied."),
-                *GetNameSafe(ControlledPawn)
-            );
-        }
-        return false;
-    }
+    if (!CameraPawn) return false;
 
     WorldForgeCamera = CameraPawn;
 
@@ -217,52 +207,36 @@ bool AWorldForgePlayerController::AcquireAndApplyCameraViewTarget(bool bLogResul
 
     if (bLogResult)
     {
-        UE_LOG(
-            LogWorldForgePC,
-            Log,
-            TEXT("[WorldForgePC] View target set to possessed camera pawn '%s'."),
-            *GetNameSafe(CameraPawn)
-        );
+        UE_LOG(LogWorldForgePC, Log, TEXT("[WorldForgePC] View target set to camera pawn."));
     }
 
     return true;
 }
 
 // ===================================================================
-// Input handlers
+// INPUT
 // ===================================================================
 
 void AWorldForgePlayerController::OnBuildClickStarted(const FInputActionValue& Value)
 {
-    if (!BuildModeManager) return;
-    if (!BuildModeManager->IsInBuildMode()) return;
+    if (!BuildModeManager || !BuildModeManager->IsInBuildMode()) return;
 
-    const UWorld* W = GetWorld();
-    if (W)
-    {
-        const double Now = W->GetTimeSeconds();
-        if ((Now - LastBuildClickTime) < BuildClickDebounceSeconds)
-        {
-            return;
-        }
-        LastBuildClickTime = Now;
-    }
+    const double Now = GetWorld()->GetTimeSeconds();
+    if ((Now - LastBuildClickTime) < BuildClickDebounceSeconds) return;
 
+    LastBuildClickTime = Now;
     BuildModeManager->HandlePrimaryClick();
 }
 
 void AWorldForgePlayerController::OnBuildClickReleased(const FInputActionValue& Value)
 {
-    if (!BuildModeManager) return;
-    if (!BuildModeManager->IsInBuildMode()) return;
-
+    if (!BuildModeManager || !BuildModeManager->IsInBuildMode()) return;
     BuildModeManager->SetDragBuildActive(false);
 }
 
 void AWorldForgePlayerController::OnBuildSecondary(const FInputActionValue& Value)
 {
     if (!BuildModeManager || !BuildModeManager->IsInBuildMode()) return;
-
     BuildModeManager->HandleSecondaryClick();
 }
 
@@ -282,7 +256,6 @@ void AWorldForgePlayerController::OnBuildCancel(const FInputActionValue& Value)
 {
     if (!BuildModeManager || !BuildModeManager->IsInBuildMode()) return;
     BuildModeManager->HandleCancel();
-
     RefreshBuildInputSuppression();
 }
 
@@ -295,7 +268,6 @@ void AWorldForgePlayerController::OnBuildToggle(const FInputActionValue& Value)
     if (bBuildWidgetVisible)
     {
         BuildWidgetInstance->SetVisibility(ESlateVisibility::SelfHitTestInvisible);
-        UE_LOG(LogWorldForgePC, Log, TEXT("[WorldForgePC] Build widget shown."));
     }
     else
     {
@@ -305,8 +277,6 @@ void AWorldForgePlayerController::OnBuildToggle(const FInputActionValue& Value)
         {
             BuildModeManager->ExitBuildMode();
         }
-
-        UE_LOG(LogWorldForgePC, Log, TEXT("[WorldForgePC] Build widget hidden. Build mode exited."));
     }
 
     RefreshBuildInputSuppression();
@@ -316,4 +286,33 @@ void AWorldForgePlayerController::OnBuildUndo(const FInputActionValue& Value)
 {
     if (!BuildModeManager || !BuildModeManager->IsInBuildMode()) return;
     BuildModeManager->HandleUndo();
+}
+
+// ===================================================================
+// DIG MODE
+// ===================================================================
+
+void AWorldForgePlayerController::ToggleDigMode()
+{
+    if (!BuildModeManager) return;
+
+    if (BuildModeManager->IsInDigMode())
+    {
+        BuildModeManager->ExitDigMode();
+        UE_LOG(LogWorldForgePC, Log, TEXT("[WorldForgePC] Dig Mode OFF"));
+    }
+    else
+    {
+        BuildModeManager->EnterDigMode();
+        UE_LOG(LogWorldForgePC, Log, TEXT("[WorldForgePC] Dig Mode ON"));
+    }
+}
+
+// ===================================================================
+// MINE MODE (STUB FOR PHASE 4)
+// ===================================================================
+
+void AWorldForgePlayerController::ToggleMineMode()
+{
+    UE_LOG(LogWorldForgePC, Log, TEXT("[WorldForgePC] Mine Mode toggle (not implemented yet)"));
 }

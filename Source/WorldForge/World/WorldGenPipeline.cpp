@@ -1,4 +1,12 @@
-﻿// WorldGenPipeline.cpp
+// WorldGenPipeline.cpp — v3.2
+// ════════════════════════════════════════════════════════════════════
+// CHANGELOG v3.1:
+//   Step02: Thresholded noise + channel carving (no circular seeds)
+//   Step03: Stronger mountain stamp, river generation, lake placement,
+//           canyon carving, volcano placement (kept from v3.0)
+//   Step04: River/Lake/Canyon/Lava biome tags, improved Whittaker diagram
+// ════════════════════════════════════════════════════════════════════
+
 #include "WorldGenPipeline.h"
 #include "../Core/WorldForgeRNG.h"
 #include "GameplayTagContainer.h"
@@ -7,15 +15,19 @@
 #include "../Civilization/WorldHistory/WorldHistoryGenerator.h"
 #include "../Civilization/WorldHistory/WorldHistoryContext.h"
 #include "../Economy/WorldEconomySimulation.h"
+#include "../Cosmic/CosmicSimulationSubsystem.h"
+#include "WorldMapSubsystem.h"
 #include "VoxelWorldManager.h"
+#include "../Lore/WorldLoreTypes.h"
+#include "../Lore/LoreGenerationContext.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
 
 namespace
 {
     static FString CleanNameArtifacts(const FString& Input)
     {
         FString Result = Input;
-
-        // Remove triple repeated characters (rrr -> rr)
         for (int32 i = 0; i < Result.Len() - 2; ++i)
         {
             if (Result[i] == Result[i + 1] && Result[i] == Result[i + 2])
@@ -24,22 +36,16 @@ namespace
                 --i;
             }
         }
-
-        // Remove repeated 2-letter syllables (e.g. riri -> ri)
         for (int32 i = 0; i < Result.Len() - 3; ++i)
         {
-            if (Result[i] == Result[i + 2] &&
-                Result[i + 1] == Result[i + 3])
+            if (Result[i] == Result[i + 2] && Result[i + 1] == Result[i + 3])
             {
                 Result.RemoveAt(i + 2, 2);
                 --i;
             }
         }
-
-        // Keep previous replacements (safe)
         Result.ReplaceInline(TEXT("ririr"), TEXT("rir"));
         Result.ReplaceInline(TEXT("lalal"), TEXT("lal"));
-
         return Result;
     }
 
@@ -48,26 +54,16 @@ namespace
         const float Rad = FMath::DegreesToRadians(Degrees);
         const float C = FMath::Cos(Rad);
         const float S = FMath::Sin(Rad);
-
-        return FVector2D(
-            Vec.X * C - Vec.Y * S,
-            Vec.X * S + Vec.Y * C
-        );
+        return FVector2D(Vec.X * C - Vec.Y * S, Vec.X * S + Vec.Y * C);
     }
 
     static float DistanceToSegment2D(const FVector2D& P, const FVector2D& A, const FVector2D& B)
     {
         const FVector2D AB = B - A;
         const float Denom = FVector2D::DotProduct(AB, AB);
-
-        if (Denom <= KINDA_SMALL_NUMBER)
-        {
-            return FVector2D::Distance(P, A);
-        }
-
+        if (Denom <= KINDA_SMALL_NUMBER) return FVector2D::Distance(P, A);
         const float T = FMath::Clamp(FVector2D::DotProduct(P - A, AB) / Denom, 0.f, 1.f);
-        const FVector2D Closest = A + AB * T;
-        return FVector2D::Distance(P, Closest);
+        return FVector2D::Distance(P, A + AB * T);
     }
 
     static float GaussianLikeFalloff(float NormalizedDistance, float Sharpness)
@@ -81,15 +77,12 @@ namespace
         float FalloffSharpness)
     {
         float Total = 0.f;
-
         for (const FMountainRange& Range : Ranges)
         {
             const FVector2D End = Range.Start + Range.Direction * Range.Length;
             const float Distance = DistanceToSegment2D(Tile, Range.Start, End);
-
             const float RidgeNorm = Distance / FMath::Max(Range.Width, 1.f);
             const float Ridge = GaussianLikeFalloff(RidgeNorm, FalloffSharpness) * Range.HeightMultiplier;
-
             float Basin = 0.f;
             if (Range.BasinWidth > KINDA_SMALL_NUMBER && Range.BasinStrength > KINDA_SMALL_NUMBER)
             {
@@ -97,23 +90,14 @@ namespace
                 const float BasinNorm = BasinDistance / Range.BasinWidth;
                 Basin = GaussianLikeFalloff(BasinNorm, FalloffSharpness) * Range.BasinStrength;
             }
-
             Total += (Ridge - Basin);
         }
-
         return Total;
     }
 
-    // ── Perlin FBM helper (fractal Brownian motion) ──
-    // Layers multiple octaves of UE's built-in PerlinNoise2D to produce
-    // richer terrain variation than a single sample.
     static float PerlinFBM2D(float X, float Y, int32 Octaves, float Persistence, float Lacunarity)
     {
-        float Sum = 0.0f;
-        float Amplitude = 1.0f;
-        float Frequency = 1.0f;
-        float MaxVal = 0.0f;
-
+        float Sum = 0.0f, Amplitude = 1.0f, Frequency = 1.0f, MaxVal = 0.0f;
         for (int32 Oct = 0; Oct < Octaves; ++Oct)
         {
             Sum += FMath::PerlinNoise2D(FVector2D(X * Frequency, Y * Frequency)) * Amplitude;
@@ -121,7 +105,6 @@ namespace
             Amplitude *= Persistence;
             Frequency *= Lacunarity;
         }
-
         return (MaxVal > KINDA_SMALL_NUMBER) ? (Sum / MaxVal) : 0.0f;
     }
 }
@@ -145,7 +128,6 @@ void UWorldGenPipeline::GenerateWorld(
         return;
     }
 
-    // Reset generated results for repeat-safe execution
     Civilizations.Reset();
     HistoryLog.Reset();
     Currencies.Reset();
@@ -153,8 +135,8 @@ void UWorldGenPipeline::GenerateWorld(
     MountainRanges.Reset();
     MountainProvinces.Reset();
     VolcanicHotspots.Reset();
+    Volcanoes.Reset();
 
-    // Allocate tiles
     WorldTiles.SetNum(GridWidth * GridHeight);
     for (int32 i = 0; i < WorldTiles.Num(); i++)
     {
@@ -163,43 +145,78 @@ void UWorldGenPipeline::GenerateWorld(
         WorldTiles[i].KnowledgeState.KnowledgeLevel = EKnowledgeLevel::Unexplored;
     }
 
-    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Start Seed=%lld Grid=%dx%d"),
-        WorldSeed, GridWidth, GridHeight);
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Start Seed=%lld Grid=%dx%d"), WorldSeed, GridWidth, GridHeight);
 
     Step01_InitializeSeed();
+
     Step02_GenerateHeightmap();
+    PushPartialMapUpdate();                      // land/water appears
+
     Step03_RunTectonics();
+    PushPartialMapUpdate();                      // mountains/rivers/canyons
+
     Step04_AssignBiomes();
+    PushPartialMapUpdate();                      // terrain colors improve
+
     Step05_InitVoxelChunks();
     Step06_PCGDecorationPass();
     Step07_ApplyWorldDriver();
     Step08_SeedResources();
+
     Step09_PlaceCivilizations();
+    PushPartialMapUpdate();                      // civ territory appears
+
     Step10_GenerateCulturalDNA();
     Step11_GenerateEconomyLayer();
     Step12_GenerateCosmicRoster();
+
     Step13_RunPreHistory();
+    PushPartialMapUpdate();                      // history/civ changes
+
     Step14_AssignWorldTraits();
     Step15_RecordFinalState();
+
     Step16_FinalizeWorldMap();
+    PushPartialMapUpdate();                      // final locked map
 
     bComplete = true;
     UE_LOG(LogTemp, Log,
-        TEXT("[WorldGen] Complete Tiles=%d Civs=%d Events=%d Currencies=%d Hotspots=%d"),
+        TEXT("[WorldGen] Complete Tiles=%d Civs=%d Events=%d Currencies=%d Hotspots=%d Volcanoes=%d"),
         WorldTiles.Num(), Civilizations.Num(),
-        HistoryLog.Num(), Currencies.Num(), VolcanicHotspots.Num());
+        HistoryLog.Num(), Currencies.Num(), VolcanicHotspots.Num(), Volcanoes.Num());
 }
 
 void UWorldGenPipeline::HandlePCGDecorationPass_Implementation(const TArray<FWorldTileData>& InWorldTiles, int32 InGridWidth, int32 InGridHeight)
 {
-    UE_LOG(
-        LogTemp,
-        Log,
-        TEXT("[WorldGen] HandlePCGDecorationPass default implementation. Tiles=%d Grid=%dx%d"),
-        InWorldTiles.Num(),
-        InGridWidth,
-        InGridHeight
-    );
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] HandlePCGDecorationPass default. Tiles=%d Grid=%dx%d"),
+        InWorldTiles.Num(), InGridWidth, InGridHeight);
+}
+
+// ────────────────────────────────────────────────────────────────────
+// DF-style staged map update.
+//
+// Pushes partial world data to WorldMapSubsystem so the player sees
+// the map "build itself" during generation.  Called after each major
+// pipeline step that visually changes the map.
+// ────────────────────────────────────────────────────────────────────
+void UWorldGenPipeline::PushPartialMapUpdate()
+{
+    if (!WorldRef)
+    {
+        return;
+    }
+
+    UWorldMapSubsystem* MapSub = WorldRef->GetSubsystem<UWorldMapSubsystem>();
+    if (!MapSub)
+    {
+        return;
+    }
+
+    MapSub->UpdateFromPartialPipeline(WorldTiles, Civilizations, GridWidth, GridHeight);
+
+    // Force immediate texture rebuild so the player sees the update
+    // before the next step begins.
+    MapSub->RebuildMapTexture();
 }
 
 int32 UWorldGenPipeline::GetDimension(EWorldSize S) const
@@ -219,420 +236,242 @@ void UWorldGenPipeline::Step01_InitializeSeed()
     UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step01 done"));
 }
 
+// ════════════════════════════════════════════════════════════════════
+// STEP 02 — v3.3: Multi-continent heightmap
+//
+// Produces 3–5 separated continents with ~25–35% ocean.
+//
+// Architecture:
+//   1. Domain-warped FBM for organic continent shapes
+//   2. Power curve to control land/ocean ratio
+//   3. TWO channel carvers at different frequencies/orientations
+//      to split the landmass into 3–5 pieces
+//   4. Detail noise for interior variation
+//   5. Edge fade for guaranteed ocean border
+//   6. Ridge noise for volcanic hotspot candidates
+//
+// The dual-channel approach is the key to multi-continent separation:
+//   Channel A (low freq)  → creates 1 broad ocean gap (2 halves)
+//   Channel B (med freq)  → creates a second gap at a different angle
+//   Combined              → 3–5 natural-looking landmasses
+// ════════════════════════════════════════════════════════════════════
+
 void UWorldGenPipeline::Step02_GenerateHeightmap()
 {
-    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step02: Heightmap..."));
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step02: Multi-continent heightmap (v3.3)..."));
 
     // ── Deterministic offsets ──
-    const float TerrainOffsetX = RNGRef->NextFloatRange(UWorldForgeRNG::BRANCH_TERRAIN, -10000.0f, 10000.0f);
-    const float TerrainOffsetY = RNGRef->NextFloatRange(UWorldForgeRNG::BRANCH_TERRAIN, -10000.0f, 10000.0f);
-    const float BiomeOffsetX = RNGRef->NextFloatRange(UWorldForgeRNG::BRANCH_BIOME, -10000.0f, 10000.0f);
-    const float BiomeOffsetY = RNGRef->NextFloatRange(UWorldForgeRNG::BRANCH_BIOME, -10000.0f, 10000.0f);
+    const float OffX = RNGRef->NextFloatRange(UWorldForgeRNG::BRANCH_TERRAIN, -10000.f, 10000.f);
+    const float OffY = RNGRef->NextFloatRange(UWorldForgeRNG::BRANCH_TERRAIN, -10000.f, 10000.f);
+    const float WarpOffX = RNGRef->NextFloatRange(UWorldForgeRNG::BRANCH_TERRAIN, -10000.f, 10000.f);
+    const float WarpOffY = RNGRef->NextFloatRange(UWorldForgeRNG::BRANCH_TERRAIN, -10000.f, 10000.f);
+    const float ChannelAOffX = RNGRef->NextFloatRange(UWorldForgeRNG::BRANCH_TERRAIN, -10000.f, 10000.f);
+    const float ChannelAOffY = RNGRef->NextFloatRange(UWorldForgeRNG::BRANCH_TERRAIN, -10000.f, 10000.f);
+    const float ChannelBOffX = RNGRef->NextFloatRange(UWorldForgeRNG::BRANCH_TERRAIN, -10000.f, 10000.f);
+    const float ChannelBOffY = RNGRef->NextFloatRange(UWorldForgeRNG::BRANCH_TERRAIN, -10000.f, 10000.f);
 
-    // ── Noise scales ──
-    const float MacroScaleA = 0.0060f;
-    const float MacroScaleB = 0.0120f;
-    const float DetailScale = 0.0280f;
-    const float TempScale = 0.0100f;
-    const float RainScale = 0.0130f;
+    // ── Main continent noise ──
+    const float ContinentScale = 0.0038f;
+    const int32 ContinentOctaves = 6;
+    const float ContinentPersist = 0.48f;
+    const float ContinentLacun = 2.1f;
 
+    // ── Domain warp for organic coastlines ──
+    const float WarpScale = 0.0028f;
+    const float WarpStrength = 25.0f;
+
+    // ── Interior detail noise ──
+    const float DetailScale = 0.020f;
+    const float DetailWeight = 0.06f;
+
+    // ── Channel carver A — primary ocean gap (low frequency = broad) ──
+    const float ChannelAScale = 0.0025f;
+    const float ChannelAThreshold = 0.38f;
+    const float ChannelAStrength = 0.55f;
+
+    // ── Channel carver B — secondary ocean gap (slightly higher freq) ──
+    const float ChannelBScale = 0.0038f;
+    const float ChannelBThreshold = 0.42f;
+    const float ChannelBStrength = 0.45f;
+
+    // ── Land shaping ──
+    const float LandPower = 0.72f;      // higher = more ocean (was 0.55)
+    const float SeaThreshold = 0.48f;
+    const float LandBias = 0.06f;       // much less bias (was 0.12)
+
+    // ── Edge fade ──
     const FVector2D MapCenter((GridWidth - 1) * 0.5f, (GridHeight - 1) * 0.5f);
-    const float MaxCenterDist = FVector2D::Distance(FVector2D(0.0f, 0.0f), MapCenter);
+    const float MaxCenterDist = FVector2D::Distance(FVector2D::ZeroVector, MapCenter);
 
-    // ====================================================================
-    // CONTINENT SEEDS
-    // ====================================================================
-    // Spawn 5–8 smaller, well-separated elliptical blobs plus archipelago
-    // islands near their edges.  Each blob gets domain-warped boundaries
-    // and noise-driven interior elevation instead of a flat boost.
+    VolcanicHotspots.Reset();
 
-    struct FContinentSeed
+    for (int32 Y = 0; Y < GridHeight; ++Y)
     {
-        FVector2D Center;
-        float     RadiusA;       // major half-axis (in tiles)
-        float     RadiusB;       // minor half-axis
-        float     RotRad;        // rotation in radians
-        bool      bIsIsland;     // true = archipelago island (smaller, lower max elevation)
-        bool      bVolcanicCandidate;  // true = can host a volcano in future steps
-    };
-
-    const int32 NumContinents = RNGRef->NextInt(UWorldForgeRNG::BRANCH_TERRAIN, 4, 6);
-
-    TArray<FContinentSeed> Seeds;
-    Seeds.Reserve(NumContinents + 20);  // room for islands
-
-    // Keep seeds away from the extreme edges so the edge-ocean pass can work.
-    const float Margin = 0.12f;  // 12% inset from each edge
-
-    // -- Minimum spacing enforcement --
-    const float MinSeedSpacing = GridWidth * 0.18f;
-    const int32 MaxRetries = 10;
-    int32 RetryCount = 0;
-
-    for (int32 i = 0; i < NumContinents; ++i)
-    {
-        FContinentSeed Seed;
-        Seed.bIsIsland = false;
-        Seed.bVolcanicCandidate = false;
-
-        Seed.Center.X = FMath::Lerp(
-            GridWidth * Margin,
-            GridWidth * (1.0f - Margin),
-            RNGRef->NextFloat(UWorldForgeRNG::BRANCH_TERRAIN));
-
-        Seed.Center.Y = FMath::Lerp(
-            GridHeight * Margin,
-            GridHeight * (1.0f - Margin),
-            RNGRef->NextFloat(UWorldForgeRNG::BRANCH_TERRAIN));
-
-        // Radius range scaled to grid size.  On 256×256 this gives roughly
-        // 28–68 tile radii — large enough to read as continents, small enough
-        // that 5–8 of them fit with ocean channels between.
-        const float BaseRadius = GridWidth * 0.24f;
-        Seed.RadiusA = BaseRadius * FMath::Lerp(0.55f, 1.6f, RNGRef->NextFloat(UWorldForgeRNG::BRANCH_TERRAIN));
-        Seed.RadiusB = Seed.RadiusA * FMath::Lerp(0.45f, 0.85f, RNGRef->NextFloat(UWorldForgeRNG::BRANCH_TERRAIN));
-
-        Seed.RotRad = RNGRef->NextFloat(UWorldForgeRNG::BRANCH_TERRAIN) * PI;
-
-        // Check spacing against all previously placed seeds
-        bool bTooClose = false;
-        for (const FContinentSeed& Existing : Seeds)
-        {
-            if (FVector2D::Distance(Seed.Center, Existing.Center) < MinSeedSpacing)
-            {
-                bTooClose = true;
-                break;
-            }
-        }
-
-        if (bTooClose && RetryCount < MaxRetries)
-        {
-            ++RetryCount;
-            --i;  // re-roll this index
-            continue;
-        }
-        RetryCount = 0;
-
-        Seeds.Add(Seed);
-    }
-
-    // ====================================================================
-    // ARCHIPELAGO ISLANDS — spawn small landmasses near continent edges
-    // ====================================================================
-    // These create island chains, barrier islands, and volcanic arcs that
-    // break up the open ocean and give future volcano placement natural sites.
-
-    const int32 NumIslands = RNGRef->NextInt(UWorldForgeRNG::BRANCH_TERRAIN, 6, 12);
-
-    for (int32 i = 0; i < NumIslands; ++i)
-    {
-        // Pick a random main continent to spawn near
-        const int32 ParentIdx = RNGRef->NextInt(UWorldForgeRNG::BRANCH_TERRAIN, 0, Seeds.Num() - 1);
-        const FContinentSeed& Parent = Seeds[ParentIdx];
-
-        const float Angle = RNGRef->NextFloat(UWorldForgeRNG::BRANCH_TERRAIN) * 2.0f * PI;
-        const float SpawnDist = (Parent.RadiusA + Parent.RadiusB) * 0.5f
-            + RNGRef->NextFloat(UWorldForgeRNG::BRANCH_TERRAIN) * GridWidth * 0.08f;
-
-        FContinentSeed Isle;
-        Isle.bIsIsland = true;
-        Isle.bVolcanicCandidate = (RNGRef->NextFloat(UWorldForgeRNG::BRANCH_TERRAIN) > 0.55f);
-
-        Isle.Center.X = Parent.Center.X + FMath::Cos(Angle) * SpawnDist;
-        Isle.Center.Y = Parent.Center.Y + FMath::Sin(Angle) * SpawnDist;
-
-        // Clamp to grid (keep off absolute edges)
-        Isle.Center.X = FMath::Clamp(Isle.Center.X, 5.0f, static_cast<float>(GridWidth - 5));
-        Isle.Center.Y = FMath::Clamp(Isle.Center.Y, 5.0f, static_cast<float>(GridHeight - 5));
-
-        // Small radii — these are islands, not continents
-        const float IsleBase = GridWidth * FMath::Lerp(0.03f, 0.08f, RNGRef->NextFloat(UWorldForgeRNG::BRANCH_TERRAIN));
-        Isle.RadiusA = IsleBase * FMath::Lerp(0.8f, 1.2f, RNGRef->NextFloat(UWorldForgeRNG::BRANCH_TERRAIN));
-        Isle.RadiusB = IsleBase * FMath::Lerp(0.8f, 1.2f, RNGRef->NextFloat(UWorldForgeRNG::BRANCH_TERRAIN));
-        Isle.RotRad = RNGRef->NextFloat(UWorldForgeRNG::BRANCH_TERRAIN) * PI;
-
-        Seeds.Add(Isle);
-    }
-
-    // ── Breakup noise offset (consumed once, deterministic) ──
-    const float BreakupScale = 0.0024f;
-
-    // ── Domain-warp settings for fractal coastlines ──
-    const float WarpScale = 0.016f;   // controls coastline feature frequency
-    const float WarpStrength = 8.0f;    // how jagged coastlines get (in tiles)
-
-    // ── Interior-noise settings (replaces flat ContinentBoost) ──
-    const float InteriorDetailScale = 0.030f;  // rolling-hills frequency
-    const float InteriorRidgeScale = 0.014f;  // mountain-ridge frequency
-
-    // ====================================================================
-    // PER-TILE LOOP
-    // ====================================================================
-    for (int32 Y = 0; Y < GridHeight; Y++)
-    {
-        for (int32 X = 0; X < GridWidth; X++)
+        for (int32 X = 0; X < GridWidth; ++X)
         {
             FWorldTileData& Tile = WorldTiles[TileIndex(X, Y)];
-
             const float SX = static_cast<float>(X);
             const float SY = static_cast<float>(Y);
 
-            // ── Base elevation from noise ──
-            const float MacroA = FMath::PerlinNoise2D(FVector2D(
-                (SX + TerrainOffsetX) * MacroScaleA,
-                (SY + TerrainOffsetY) * MacroScaleA));
+            // ── 1. Domain warp ──
+            const float WarpDX = PerlinFBM2D(
+                (SX + WarpOffX) * WarpScale, (SY + WarpOffY) * WarpScale,
+                3, 0.5f, 2.0f) * WarpStrength;
+            const float WarpDY = PerlinFBM2D(
+                (SX + WarpOffX + 5000.f) * WarpScale, (SY + WarpOffY + 5000.f) * WarpScale,
+                3, 0.5f, 2.0f) * WarpStrength;
+            const float WarpedX = SX + WarpDX;
+            const float WarpedY = SY + WarpDY;
 
-            const float MacroB = FMath::PerlinNoise2D(FVector2D(
-                (SX + TerrainOffsetX + 2000.0f) * MacroScaleB,
-                (SY + TerrainOffsetY + 2000.0f) * MacroScaleB));
+            // ── 2. Base continent noise ──
+            const float ContinentRaw = PerlinFBM2D(
+                (WarpedX + OffX) * ContinentScale,
+                (WarpedY + OffY) * ContinentScale,
+                ContinentOctaves, ContinentPersist, ContinentLacun);
+            float Continent01 = (ContinentRaw + 1.0f) * 0.5f;
 
-            const float Detail = FMath::PerlinNoise2D(FVector2D(
-                (SX + TerrainOffsetX - 4000.0f) * DetailScale,
-                (SY + TerrainOffsetY - 4000.0f) * DetailScale));
+            // ── 3. Power curve ──
+            Continent01 = FMath::Pow(FMath::Clamp(Continent01, 0.0f, 1.0f), LandPower);
 
-            const float Macro01A = (MacroA + 1.0f) * 0.5f;
-            const float Macro01B = (MacroB + 1.0f) * 0.5f;
-            const float Detail01 = (Detail + 1.0f) * 0.5f;
-
-            // ── Domain warp — compute warped sample position ──
-            // Two independent noise fields shift X and Y, giving fractal
-            // coastlines with peninsulas, bays, and inlets.
-            const float WarpX = FMath::PerlinNoise2D(FVector2D(
-                (SX + TerrainOffsetX + 300.0f) * WarpScale,
-                (SY + TerrainOffsetY + 300.0f) * WarpScale)) * WarpStrength;
-
-            const float WarpY = FMath::PerlinNoise2D(FVector2D(
-                (SX + TerrainOffsetX + 700.0f) * WarpScale,
-                (SY + TerrainOffsetY + 700.0f) * WarpScale)) * WarpStrength;
-
-            const float WarpedX = SX + WarpX;
-            const float WarpedY = SY + WarpY;
-
-            // ── Continent mask (multi-seed with domain warp) ──
-            // For each seed, use the WARPED position to compute elliptical
-            // distance.  Take MAX across all seeds.
-            float ContinentMask = 0.0f;
-            float BestInterior = 0.0f;   // 0..1 how deep inside the winning continent
-            bool  bBestIsIsland = false;
-
-            for (const FContinentSeed& Seed : Seeds)
+            // ── 4. Channel carver A — broad primary ocean gap ──
             {
-                // Translate to seed-local coords using warped position
-                float LX = WarpedX - Seed.Center.X;
-                float LY = WarpedY - Seed.Center.Y;
+                const float ChNoise = PerlinFBM2D(
+                    (WarpedX + ChannelAOffX) * ChannelAScale,
+                    (WarpedY + ChannelAOffY) * ChannelAScale,
+                    3, 0.45f, 2.2f);
+                const float Ch01 = (ChNoise + 1.0f) * 0.5f;
 
-                // Rotate into ellipse-aligned frame
-                const float CosR = FMath::Cos(Seed.RotRad);
-                const float SinR = FMath::Sin(Seed.RotRad);
-                const float RX = LX * CosR + LY * SinR;
-                const float RY = -LX * SinR + LY * CosR;
-
-                // Normalised elliptical distance (1.0 = on the ellipse boundary)
-                const float EllipDist = FMath::Sqrt(
-                    (RX * RX) / (Seed.RadiusA * Seed.RadiusA) +
-                    (RY * RY) / (Seed.RadiusB * Seed.RadiusB));
-
-                // Smooth falloff: 1.0 at center, fading to 0 around dist ~1.0
-                const float Influence = FMath::Clamp(1.0f - EllipDist, 0.0f, 1.0f);
-                const float SeedMask = Influence * Influence * (3.0f - 2.0f * Influence);  // smoothstep
-
-                if (SeedMask > ContinentMask)
+                if (Ch01 > ChannelAThreshold)
                 {
-                    ContinentMask = SeedMask;
-                    BestInterior = Influence;
-                    bBestIsIsland = Seed.bIsIsland;
+                    const float Depth = (Ch01 - ChannelAThreshold) / (1.0f - ChannelAThreshold);
+                    Continent01 -= Depth * ChannelAStrength;
                 }
             }
 
-            // ── Edge-ocean ring ──
+            // ── 5. Channel carver B — secondary ocean gap ──
+            {
+                const float ChNoise = PerlinFBM2D(
+                    (WarpedX + ChannelBOffX) * ChannelBScale,
+                    (WarpedY + ChannelBOffY) * ChannelBScale,
+                    3, 0.50f, 2.0f);
+                const float Ch01 = (ChNoise + 1.0f) * 0.5f;
+
+                if (Ch01 > ChannelBThreshold)
+                {
+                    const float Depth = (Ch01 - ChannelBThreshold) / (1.0f - ChannelBThreshold);
+                    Continent01 -= Depth * ChannelBStrength;
+                }
+            }
+
+            // ── 6. Detail noise ──
+            const float DetailRaw = PerlinFBM2D(
+                (SX + OffX + 3000.f) * DetailScale,
+                (SY + OffY + 3000.f) * DetailScale,
+                4, 0.5f, 2.0f);
+            const float Detail01 = (DetailRaw + 1.0f) * 0.5f;
+
+            // ── 7. Edge fade — guarantee ocean border ──
             const float DistToCenter = FVector2D::Distance(FVector2D(SX, SY), MapCenter);
             const float EdgeNorm = FMath::Clamp(DistToCenter / MaxCenterDist, 0.0f, 1.0f);
-            const float EdgeOcean = FMath::SmoothStep(0.70f, 1.0f, EdgeNorm);
+            const float EdgeFade = FMath::SmoothStep(0.65f, 0.92f, EdgeNorm);
 
-            // ── Continent-breakup noise ──
-            const float BreakupRaw = FMath::PerlinNoise2D(FVector2D(
-                (SX + TerrainOffsetX + 7777.0f) * BreakupScale,
-                (SY + TerrainOffsetY + 7777.0f) * BreakupScale));
-            const float Breakup01 = (BreakupRaw + 1.0f) * 0.5f;
-            const float BreakupCarve = FMath::Clamp((0.35f - Breakup01) / 0.35f, 0.0f, 1.0f) * 0.10f;
+            // ── 8. Combine ──
+            float Elevation = Continent01 * 0.85f + Detail01 * DetailWeight + LandBias;
+            Elevation *= (1.0f - EdgeFade);
 
-            // ── Interior terrain noise (replaces flat ContinentBoost) ──
-            // Instead of pushing all continent interiors to uniform high
-            // elevation, we use noise to create varied terrain: plains next
-            // to rolling hills next to ridge-mountains.  The Interior value
-            // acts as a MASK (fading features toward the coast) rather than
-            // a direct elevation source.
-            float InteriorContribution = 0.0f;
+            // ── 9. Ridge noise for volcanic hotspot candidates ──
+            const float RidgeRaw = FMath::PerlinNoise2D(FVector2D(
+                (WarpedX + OffX + 1000.f) * 0.012f,
+                (WarpedY + OffY + 1000.f) * 0.012f));
+            float RidgeVal = 1.0f - FMath::Abs(RidgeRaw);
+            RidgeVal = RidgeVal * RidgeVal;
 
-            if (BestInterior > 0.01f)
+            if (Elevation > SeaThreshold)
             {
-                // Detail noise — rolling hills, plains, gentle valleys within the continent
-                const float DetailFBM = PerlinFBM2D(
-                    (SX + TerrainOffsetX + 500.0f) * InteriorDetailScale,
-                    (SY + TerrainOffsetY + 500.0f) * InteriorDetailScale,
-                    4, 0.5f, 2.0f);
-                const float DetailNorm = (DetailFBM + 1.0f) * 0.5f;  // remap -1..1 → 0..1
+                const float CoastalFade = FMath::Clamp(
+                    (Elevation - SeaThreshold) / 0.15f, 0.0f, 1.0f);
+                Elevation += RidgeVal * 0.10f * CoastalFade;
 
-                // Ridge noise — sharp mountain-range-like features via abs trick
-                const float RidgeRaw = FMath::PerlinNoise2D(FVector2D(
-                    (SX + TerrainOffsetX + 1000.0f) * InteriorRidgeScale,
-                    (SY + TerrainOffsetY + 1000.0f) * InteriorRidgeScale));
-                float RidgeVal = 1.0f - FMath::Abs(RidgeRaw);   // invert abs → sharp ridges
-                RidgeVal = RidgeVal * RidgeVal;                   // square to sharpen peaks
-
-                // ── Coastal-fade mask (kills the sombrero) ──
-                // Instead of multiplying noise by BestInterior (which peaks at
-                // center → dome), use a threshold that is 1.0 across most of
-                // the continent interior and only fades in the outermost 25%
-                // coastal fringe.  This means terrain noise is at full strength
-                // everywhere except right at the shoreline.
-                const float CoastalFade = FMath::Clamp((BestInterior - 0.08f) / 0.20f, 0.0f, 1.0f);
-                // CoastalFade = 0 when Interior < 0.10 (shore)
-                // CoastalFade = 1 when Interior > 0.35 (most of the continent)
-
-                // NO GentleRise — that was the dome.  Let noise alone drive
-                // elevation so mountains appear wherever the ridge noise peaks,
-                // not at the geometric center.
-                const float DetailLayer = DetailNorm * 0.08f * CoastalFade;
-                const float RidgeLayer = RidgeVal * 0.42f * CoastalFade;
-
-                InteriorContribution = DetailLayer + RidgeLayer;
-
-                // Islands get reduced interior contribution — they shouldn't
-                // have massive mountain ranges.
-                if (bBestIsIsland)
-                {
-                    InteriorContribution *= 0.40f;
-                }
-
-                // ── Volcanic hotspot detection (for future Step) ──
-                // Record tiles where ridge noise peaks inside continent interiors.
-                // These are natural volcano placement sites.
-                if (RidgeVal > 0.96f && BestInterior > 0.45f)
+                if (RidgeVal > 0.78f && CoastalFade > 0.3f)
                 {
                     VolcanicHotspots.Add(FIntPoint(X, Y));
                 }
             }
 
-            // ── Combine ──
-            const float LandBias = 0.12f;
-
-            float Elevation =
-                Macro01A * 0.55f +
-                Macro01B * 0.30f +
-                Detail01 * 0.15f +
-                LandBias
-                - BreakupCarve;
-
-            // Apply continent mask: outside blobs → crush to ocean floor.
-            // Inside blobs → keep elevation + add interior terrain contribution
-            // (which replaces the old flat ContinentBoost).
-            const float OceanFloor = 0.24f;
-            Elevation = FMath::Lerp(
-                Elevation * OceanFloor,
-                Elevation + InteriorContribution,
-                ContinentMask);
-
-            // Apply edge-ocean ring on top (drown the outer rim)
-            Elevation = FMath::Lerp(Elevation, Elevation * OceanFloor, EdgeOcean);
-
             Tile.Elevation = FMath::Clamp(Elevation, 0.0f, 1.0f);
-
-            // ── Temperature ──
-            const float Latitude01 = 1.0f - FMath::Abs((SY / float(GridHeight - 1)) * 2.0f - 1.0f);
-
-            const float TempNoise = FMath::PerlinNoise2D(FVector2D(
-                (SX + BiomeOffsetX) * TempScale,
-                (SY + BiomeOffsetY) * TempScale));
-            const float TempNoise01 = (TempNoise + 1.0f) * 0.5f;
-
-            float Temperature =
-                Latitude01 * 0.70f +
-                TempNoise01 * 0.30f;
-            Temperature -= Tile.Elevation * 0.25f;
-            Tile.Temperature = FMath::Clamp(Temperature, 0.0f, 1.0f);
-
-            // ── Rainfall ──
-            const float RainNoiseA = FMath::PerlinNoise2D(FVector2D(
-                (SX + BiomeOffsetX + 3000.0f) * RainScale,
-                (SY + BiomeOffsetY + 3000.0f) * RainScale));
-            const float RainNoiseB = FMath::PerlinNoise2D(FVector2D(
-                (SX + BiomeOffsetX - 1500.0f) * (RainScale * 2.0f),
-                (SY + BiomeOffsetY - 1500.0f) * (RainScale * 2.0f)));
-
-            const float Rain01A = (RainNoiseA + 1.0f) * 0.5f;
-            const float Rain01B = (RainNoiseB + 1.0f) * 0.5f;
-
-            float Rainfall =
-                Rain01A * 0.7f +
-                Rain01B * 0.3f;
-            Rainfall += (1.0f - Tile.Elevation) * 0.10f;
-            Tile.Rainfall = FMath::Clamp(Rainfall, 0.0f, 1.0f);
+            Tile.Temperature = 0.5f;
+            Tile.Rainfall = 0.5f;
         }
     }
 
-    UE_LOG(LogTemp, Log,
-        TEXT("[WorldGen] Step02 done. Seeds=%d (continents=%d islands=%d) VolcanicHotspots=%d"),
-        Seeds.Num(), NumContinents, Seeds.Num() - NumContinents, VolcanicHotspots.Num());
+    // ── Diagnostic: count water tiles ──
+    int32 WaterCount = 0;
+    for (const FWorldTileData& Tile : WorldTiles)
+    {
+        if (Tile.Elevation < SeaThreshold) ++WaterCount;
+    }
+
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step02 done. Water=%d (%d%%) Land=%d (%d%%) VolcanicHotspots=%d"),
+        WaterCount, WorldTiles.Num() > 0 ? WaterCount * 100 / WorldTiles.Num() : 0,
+        WorldTiles.Num() - WaterCount, WorldTiles.Num() > 0 ? (WorldTiles.Num() - WaterCount) * 100 / WorldTiles.Num() : 0,
+        VolcanicHotspots.Num());
 }
+
+// ════════════════════════════════════════════════════════════════════
+// STEP 03 — Tectonics + Mountains + Volcanoes + Rivers + Lakes +
+//           Canyons (v3.1)
+//
+// Runs in phases:
+//   A. Tectonic provinces → mountain range splines (kept from v2)
+//   B. Apply mountain elevation to tiles (STRONGER than v3.0)
+//   C. Volcano composite primitives (kept from v3.0)
+//   D. River generation (NEW — flow from mountains to coast)
+//   E. Lake placement (NEW — inland water at basins)
+//   F. Canyon carving (NEW — deep cuts near mountains)
+// ════════════════════════════════════════════════════════════════════
 
 void UWorldGenPipeline::Step03_RunTectonics()
 {
-    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step03: Tectonics..."));
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step03: Tectonics + terrain features..."));
 
     MountainRanges.Reset();
     MountainProvinces.Reset();
-
     const FMountainGenerationSettings& Settings = CurrentConfig.MountainSettings;
 
-    // Generate tectonic provinces and mountain ranges using the project RNG only.
+    // ── Phase A: Generate tectonic provinces ──
     const int32 ProvinceCount = FMath::Clamp(
-        RNGRef->NextInt(UWorldForgeRNG::BRANCH_TERRAIN, Settings.MinProvinceCount, Settings.MaxProvinceCount),
-        1,
-        64);
+        RNGRef->NextInt(UWorldForgeRNG::BRANCH_TERRAIN, Settings.MinProvinceCount, Settings.MaxProvinceCount), 1, 64);
 
     MountainProvinces.Reserve(ProvinceCount);
-
     for (int32 ProvinceIdx = 0; ProvinceIdx < ProvinceCount; ++ProvinceIdx)
     {
         FMountainProvince Province;
-
         Province.Center = FVector2D(
             RNGRef->NextFloat(UWorldForgeRNG::BRANCH_TERRAIN) * float(GridWidth - 1),
             RNGRef->NextFloat(UWorldForgeRNG::BRANCH_TERRAIN) * float(GridHeight - 1));
-
         const float AngleDeg = RNGRef->NextFloat(UWorldForgeRNG::BRANCH_TERRAIN) * 360.0f;
         Province.Direction = FVector2D(
             FMath::Cos(FMath::DegreesToRadians(AngleDeg)),
             FMath::Sin(FMath::DegreesToRadians(AngleDeg))).GetSafeNormal();
-
         Province.SpreadRadius = FMath::Lerp(20.0f, 70.0f, RNGRef->NextFloat(UWorldForgeRNG::BRANCH_TERRAIN));
         Province.Strength = FMath::Lerp(2.2f, 3.5f, RNGRef->NextFloat(UWorldForgeRNG::BRANCH_TERRAIN));
-
-
         Province.RangeCount = FMath::Clamp(
-            RNGRef->NextInt(UWorldForgeRNG::BRANCH_TERRAIN, Settings.MinRangesPerProvince, Settings.MaxRangesPerProvince),
-            1,
-            32);
-
+            RNGRef->NextInt(UWorldForgeRNG::BRANCH_TERRAIN, Settings.MinRangesPerProvince, Settings.MaxRangesPerProvince), 1, 32);
         MountainProvinces.Add(Province);
     }
 
+    // ── Generate mountain ranges per province ──
     for (const FMountainProvince& Province : MountainProvinces)
     {
         for (int32 RangeIdx = 0; RangeIdx < Province.RangeCount; ++RangeIdx)
         {
-            const float DirAlpha = RNGRef->NextFloat(UWorldForgeRNG::BRANCH_TERRAIN);
             const float DirJitter = FMath::Lerp(
-                -Settings.ProvinceDirectionJitterDegrees,
-                Settings.ProvinceDirectionJitterDegrees,
-                DirAlpha);
-
+                -Settings.ProvinceDirectionJitterDegrees, Settings.ProvinceDirectionJitterDegrees,
+                RNGRef->NextFloat(UWorldForgeRNG::BRANCH_TERRAIN));
             const FVector2D FinalDir = Rotate2D(Province.Direction, DirJitter).GetSafeNormal();
 
             const float OffsetAngleDeg = RNGRef->NextFloat(UWorldForgeRNG::BRANCH_TERRAIN) * 360.0f;
             const float OffsetRadius = RNGRef->NextFloat(UWorldForgeRNG::BRANCH_TERRAIN) * Settings.StartOffsetJitterRadius;
-
             const FVector2D Offset(
                 FMath::Cos(FMath::DegreesToRadians(OffsetAngleDeg)) * OffsetRadius,
                 FMath::Sin(FMath::DegreesToRadians(OffsetAngleDeg)) * OffsetRadius);
@@ -641,97 +480,431 @@ void UWorldGenPipeline::Step03_RunTectonics()
             Range.Start = Province.Center + Offset;
             Range.Start.X = FMath::Clamp(Range.Start.X, 0.0f, float(GridWidth - 1));
             Range.Start.Y = FMath::Clamp(Range.Start.Y, 0.0f, float(GridHeight - 1));
-
             Range.Direction = FinalDir;
             Range.Length = FMath::Lerp(Settings.MinRangeLength, Settings.MaxRangeLength, RNGRef->NextFloat(UWorldForgeRNG::BRANCH_TERRAIN));
             Range.Width = FMath::Lerp(Settings.MinRangeWidth, Settings.MaxRangeWidth, RNGRef->NextFloat(UWorldForgeRNG::BRANCH_TERRAIN));
-
-            const float BaseHeight = FMath::Lerp(
-                Settings.MinHeightMultiplier,
-                Settings.MaxHeightMultiplier,
-                RNGRef->NextFloat(UWorldForgeRNG::BRANCH_TERRAIN));
-
-            Range.HeightMultiplier = BaseHeight * Province.Strength;
-
+            Range.HeightMultiplier = FMath::Lerp(Settings.MinHeightMultiplier, Settings.MaxHeightMultiplier,
+                RNGRef->NextFloat(UWorldForgeRNG::BRANCH_TERRAIN)) * Province.Strength;
             Range.BasinOffset = Range.Width * FMath::Lerp(1.0f, 1.8f, RNGRef->NextFloat(UWorldForgeRNG::BRANCH_TERRAIN));
             Range.BasinWidth = Range.Width * FMath::Lerp(0.7f, 1.3f, RNGRef->NextFloat(UWorldForgeRNG::BRANCH_TERRAIN));
             Range.BasinStrength = Range.HeightMultiplier * Settings.BasinStrengthScale;
-
             MountainRanges.Add(Range);
         }
     }
 
-    // Keep some broad tectonic variation, but let ridge ranges drive the visible structure.
-    const float PlateStrength = 0.03f;
-    const float RidgeNoiseStrength = 0.18f;
-    const float ValleyNoiseStrength = 0.09f;
-    const float PlateScale = 0.004f;
-    const float RidgeScale = 0.0014f;
-
+    // ── Phase B: Apply mountain contribution to tiles (STRONGER) ──
     for (int32 Y = 0; Y < GridHeight; Y++)
     {
         for (int32 X = 0; X < GridWidth; X++)
         {
-            const int32 Index = TileIndex(X, Y);
-            FWorldTileData& Tile = WorldTiles[Index];
+            FWorldTileData& Tile = WorldTiles[TileIndex(X, Y)];
+            if (Tile.Elevation < 0.48f) continue; // Skip ocean tiles
 
             float Elevation = Tile.Elevation;
 
-            const float PlateNoise =
-                FMath::PerlinNoise2D(FVector2D(X * PlateScale, Y * PlateScale));
-            Elevation += PlateNoise * PlateStrength;
+            // Tectonic plate noise
+            Elevation += FMath::PerlinNoise2D(FVector2D(X * 0.004f, Y * 0.004f)) * 0.03f;
 
-            const float RidgeNoise =
-                FMath::Abs(FMath::PerlinNoise2D(FVector2D(X * RidgeScale, Y * RidgeScale)));
-            Elevation += RidgeNoise * RidgeNoiseStrength;
+            // Ridge noise for natural mountain shapes
+            const float RidgeNoise = FMath::Abs(FMath::PerlinNoise2D(FVector2D(X * 0.0014f, Y * 0.0014f)));
+            Elevation += RidgeNoise * 0.15f;
 
-            const float ValleyNoise =
-                FMath::PerlinNoise2D(FVector2D((X + 1000) * RidgeScale, (Y + 1000) * RidgeScale));
-            Elevation -= FMath::Abs(ValleyNoise) * ValleyNoiseStrength;
+            // Valley noise
+            const float ValleyNoise = FMath::PerlinNoise2D(FVector2D((X + 1000) * 0.0014f, (Y + 1000) * 0.0014f));
+            Elevation -= FMath::Abs(ValleyNoise) * 0.08f;
 
+            // Mountain range contribution — MUCH stronger than v3.0
             const float MountainContribution = CalculateMountainContributionAtTile(
-                FVector2D(float(X), float(Y)),
-                MountainRanges,
-                Settings.FalloffSharpness);
+                FVector2D(float(X), float(Y)), MountainRanges, Settings.FalloffSharpness);
+            Elevation += MountainContribution * 1.5f; // v3.0 was 1.0
 
-            Elevation += MountainContribution;
-            Elevation = FMath::Clamp(Elevation, 0.0f, 1.0f);
-
-            Tile.Elevation = Elevation;
+            Tile.Elevation = FMath::Clamp(Elevation, 0.0f, 1.0f);
         }
     }
 
-    UE_LOG(LogTemp, Log,
-        TEXT("[WorldGen] Step03 done. Provinces=%d Ranges=%d"),
-        MountainProvinces.Num(),
-        MountainRanges.Num());
+    // ── Phase C: Volcano placement ──
+    Volcanoes.Reset();
+    const int32 MaxVolcanoes = FMath::Clamp(GridWidth / 64, 2, 8);
+    const float MinVolcanoSpacing = GridWidth * 0.15f;
+
+    TArray<FIntPoint> ShuffledHotspots = VolcanicHotspots;
+    for (int32 i = ShuffledHotspots.Num() - 1; i > 0; --i)
+    {
+        const int32 j = RNGRef->NextInt(UWorldForgeRNG::BRANCH_VOLCANO, 0, i);
+        ShuffledHotspots.Swap(i, j);
+    }
+
+    for (const FIntPoint& Hotspot : ShuffledHotspots)
+    {
+        if (Volcanoes.Num() >= MaxVolcanoes) break;
+        const FVector2D Candidate(static_cast<float>(Hotspot.X), static_cast<float>(Hotspot.Y));
+        bool bTooClose = false;
+        for (const FVolcanoData& Existing : Volcanoes)
+        {
+            if (FVector2D::Distance(Candidate, Existing.Center) < MinVolcanoSpacing) { bTooClose = true; break; }
+        }
+        if (bTooClose) continue;
+        const int32 Idx = TileIndex(Hotspot.X, Hotspot.Y);
+        if (!WorldTiles.IsValidIndex(Idx) || WorldTiles[Idx].Elevation < 0.52f) continue;
+
+        FVolcanoData V;
+        V.Center = Candidate;
+        V.ConeRadius = RNGRef->NextFloatRange(UWorldForgeRNG::BRANCH_VOLCANO, 8.0f, 16.0f);
+        V.ConeHeight = RNGRef->NextFloatRange(UWorldForgeRNG::BRANCH_VOLCANO, 0.18f, 0.35f);
+        V.CraterRadiusFraction = RNGRef->NextFloatRange(UWorldForgeRNG::BRANCH_VOLCANO, 0.15f, 0.25f);
+        V.CraterDepthFraction = RNGRef->NextFloatRange(UWorldForgeRNG::BRANCH_VOLCANO, 0.30f, 0.50f);
+        V.LavaFlowRadius = V.ConeRadius * RNGRef->NextFloatRange(UWorldForgeRNG::BRANCH_VOLCANO, 1.2f, 1.8f);
+        V.ConeSteepness = RNGRef->NextFloatRange(UWorldForgeRNG::BRANCH_VOLCANO, 1.5f, 2.5f);
+        V.bActive = RNGRef->NextBool(UWorldForgeRNG::BRANCH_VOLCANO, 0.7f);
+        Volcanoes.Add(V);
+    }
+
+    // Stamp volcano elevation
+    for (const FVolcanoData& V : Volcanoes)
+    {
+        const int32 Radius = FMath::CeilToInt(V.ConeRadius) + 1;
+        const int32 CX = FMath::RoundToInt(V.Center.X);
+        const int32 CY = FMath::RoundToInt(V.Center.Y);
+        for (int32 DY = -Radius; DY <= Radius; ++DY)
+        {
+            for (int32 DX = -Radius; DX <= Radius; ++DX)
+            {
+                const int32 TX = CX + DX, TY = CY + DY;
+                if (TX < 0 || TX >= GridWidth || TY < 0 || TY >= GridHeight) continue;
+                const float Dist = FMath::Sqrt(static_cast<float>(DX * DX + DY * DY));
+                if (Dist >= V.ConeRadius) continue;
+                FWorldTileData& Tile = WorldTiles[TileIndex(TX, TY)];
+                const float NormDist = Dist / V.ConeRadius;
+                const float ConeElev = FMath::Pow(1.0f - FMath::Clamp(NormDist, 0.0f, 1.0f), V.ConeSteepness) * V.ConeHeight;
+                float CraterCarve = 0.0f;
+                const float CraterRadius = V.ConeRadius * V.CraterRadiusFraction;
+                if (Dist < CraterRadius)
+                    CraterCarve = (1.0f - FMath::Square(Dist / FMath::Max(1.0f, CraterRadius))) * V.ConeHeight * V.CraterDepthFraction;
+                Tile.Elevation = FMath::Clamp(Tile.Elevation + ConeElev - CraterCarve, 0.0f, 1.0f);
+            }
+        }
+    }
+
+    // ── Phase D: River generation ──
+    // Trace downhill paths from high-elevation land tiles.
+    // Rivers depress elevation slightly and are marked via WaterDepth > 0.
+    {
+        const int32 MaxRiverSources = FMath::Clamp(GridWidth / 8, 8, 64);
+        const float RiverSourceMinElev = 0.70f;
+        const float RiverDepression = 0.03f;
+        const float RiverMinSpacing = GridWidth * 0.06f;
+
+        // Collect candidate sources (high elevation land)
+        TArray<FIntPoint> RiverSources;
+        for (int32 Y = 2; Y < GridHeight - 2; ++Y)
+        {
+            for (int32 X = 2; X < GridWidth - 2; ++X)
+            {
+                const FWorldTileData& Tile = WorldTiles[TileIndex(X, Y)];
+                if (Tile.Elevation >= RiverSourceMinElev)
+                {
+                    RiverSources.Add(FIntPoint(X, Y));
+                }
+            }
+        }
+
+        // Shuffle and select spaced sources
+        for (int32 i = RiverSources.Num() - 1; i > 0; --i)
+        {
+            const int32 j = RNGRef->NextInt(UWorldForgeRNG::BRANCH_TERRAIN, 0, i);
+            RiverSources.Swap(i, j);
+        }
+
+        TArray<FIntPoint> SelectedSources;
+        for (const FIntPoint& Src : RiverSources)
+        {
+            if (SelectedSources.Num() >= MaxRiverSources) break;
+            bool bTooClose = false;
+            for (const FIntPoint& Existing : SelectedSources)
+            {
+                if (FVector2D::Distance(FVector2D(Src), FVector2D(Existing)) < RiverMinSpacing)
+                {
+                    bTooClose = true; break;
+                }
+            }
+            if (!bTooClose) SelectedSources.Add(Src);
+        }
+
+        // Trace each river downhill
+        int32 TotalRiverTiles = 0;
+        const int32 MaxRiverLength = GridWidth;
+        static const FIntPoint Neighbors[] = {
+            {-1, 0}, {1, 0}, {0, -1}, {0, 1},
+            {-1, -1}, {1, -1}, {-1, 1}, {1, 1}
+        };
+
+        for (const FIntPoint& Source : SelectedSources)
+        {
+            FIntPoint Current = Source;
+            TSet<int32> Visited;
+
+            for (int32 Step = 0; Step < MaxRiverLength; ++Step)
+            {
+                const int32 CurIdx = TileIndex(Current.X, Current.Y);
+                if (Visited.Contains(CurIdx)) break;
+                Visited.Add(CurIdx);
+
+                FWorldTileData& CurTile = WorldTiles[CurIdx];
+
+                // Reached ocean — stop
+                if (CurTile.Elevation < 0.48f) break;
+
+                // Mark as river (small WaterDepth signals river presence)
+                CurTile.WaterDepth = FMath::Max(CurTile.WaterDepth, 0.05f);
+                CurTile.Elevation = FMath::Max(0.48f, CurTile.Elevation - RiverDepression);
+                ++TotalRiverTiles;
+
+                // Find lowest neighbor
+                float LowestElev = CurTile.Elevation;
+                FIntPoint LowestNeighbor = Current;
+                for (const FIntPoint& N : Neighbors)
+                {
+                    const int32 NX = Current.X + N.X;
+                    const int32 NY = Current.Y + N.Y;
+                    if (NX < 0 || NX >= GridWidth || NY < 0 || NY >= GridHeight) continue;
+                    const float NElev = WorldTiles[TileIndex(NX, NY)].Elevation;
+                    if (NElev < LowestElev)
+                    {
+                        LowestElev = NElev;
+                        LowestNeighbor = FIntPoint(NX, NY);
+                    }
+                }
+
+                // If no downhill neighbor, break (local minimum = lake candidate)
+                if (LowestNeighbor == Current)
+                {
+                    // Create a small lake at the local minimum
+                    for (const FIntPoint& N : Neighbors)
+                    {
+                        const int32 NX = Current.X + N.X;
+                        const int32 NY = Current.Y + N.Y;
+                        if (NX >= 0 && NX < GridWidth && NY >= 0 && NY < GridHeight)
+                        {
+                            FWorldTileData& LakeTile = WorldTiles[TileIndex(NX, NY)];
+                            if (LakeTile.Elevation >= 0.48f && LakeTile.Elevation < 0.58f)
+                            {
+                                LakeTile.WaterDepth = FMath::Max(LakeTile.WaterDepth, 0.15f);
+                            }
+                        }
+                    }
+                    CurTile.WaterDepth = FMath::Max(CurTile.WaterDepth, 0.20f);
+                    break;
+                }
+
+                Current = LowestNeighbor;
+            }
+        }
+
+        UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step03 Phase D: %d river sources, %d river tiles"),
+            SelectedSources.Num(), TotalRiverTiles);
+    }
+
+    // ── Phase E: Lake placement using basin noise ──
+    {
+        const float BasinNoiseOff = RNGRef->NextFloatRange(UWorldForgeRNG::BRANCH_TERRAIN, -5000.f, 5000.f);
+        const float BasinScale = 0.008f;
+        const float BasinThreshold = 0.70f;
+        int32 LakeCount = 0;
+
+        for (int32 Y = 3; Y < GridHeight - 3; ++Y)
+        {
+            for (int32 X = 3; X < GridWidth - 3; ++X)
+            {
+                FWorldTileData& Tile = WorldTiles[TileIndex(X, Y)];
+                if (Tile.Elevation < 0.50f || Tile.Elevation > 0.62f) continue;
+                if (Tile.WaterDepth > 0.0f) continue; // Already river/lake
+
+                const float BasinNoise = FMath::PerlinNoise2D(FVector2D(
+                    (X + BasinNoiseOff) * BasinScale, (Y + BasinNoiseOff + 2000.f) * BasinScale));
+                if (BasinNoise < BasinThreshold) continue;
+
+                // Check if this is a local depression
+                bool bIsBasin = true;
+                for (int32 DY = -2; DY <= 2 && bIsBasin; ++DY)
+                {
+                    for (int32 DX = -2; DX <= 2 && bIsBasin; ++DX)
+                    {
+                        if (DX == 0 && DY == 0) continue;
+                        const int32 NX = X + DX, NY = Y + DY;
+                        if (NX < 0 || NX >= GridWidth || NY < 0 || NY >= GridHeight) continue;
+                        if (WorldTiles[TileIndex(NX, NY)].Elevation < Tile.Elevation - 0.02f)
+                            bIsBasin = false;
+                    }
+                }
+
+                if (bIsBasin)
+                {
+                    Tile.WaterDepth = 0.25f;
+                    Tile.Elevation = FMath::Max(0.48f, Tile.Elevation - 0.04f);
+                    ++LakeCount;
+
+                    // Expand lake to adjacent similar-elevation tiles
+                    for (int32 DY = -1; DY <= 1; ++DY)
+                    {
+                        for (int32 DX = -1; DX <= 1; ++DX)
+                        {
+                            if (DX == 0 && DY == 0) continue;
+                            const int32 NX = X + DX, NY = Y + DY;
+                            if (NX < 0 || NX >= GridWidth || NY < 0 || NY >= GridHeight) continue;
+                            FWorldTileData& Adj = WorldTiles[TileIndex(NX, NY)];
+                            if (Adj.WaterDepth <= 0.0f && FMath::Abs(Adj.Elevation - Tile.Elevation) < 0.04f)
+                            {
+                                Adj.WaterDepth = 0.15f;
+                                Adj.Elevation = FMath::Max(0.48f, Adj.Elevation - 0.03f);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step03 Phase E: %d lake basins"), LakeCount);
+    }
+
+    // ── Phase F: Canyon carving near mountain ranges ──
+    {
+        const float CanyonNoiseOff = RNGRef->NextFloatRange(UWorldForgeRNG::BRANCH_TERRAIN, -5000.f, 5000.f);
+        const float CanyonScale = 0.018f;
+        const float CanyonThreshold = 0.88f;
+        const float CanyonDepression = 0.08f;
+        int32 CanyonCount = 0;
+
+        for (int32 Y = 1; Y < GridHeight - 1; ++Y)
+        {
+            for (int32 X = 1; X < GridWidth - 1; ++X)
+            {
+                FWorldTileData& Tile = WorldTiles[TileIndex(X, Y)];
+                if (Tile.Elevation < 0.58f || Tile.Elevation > 0.78f) continue;
+
+                // Check proximity to a mountain range
+                const FVector2D TilePos{ static_cast<float>(X), static_cast<float>(Y) };
+                float MinRangeDist = 9999.f;
+                for (const FMountainRange& Range : MountainRanges)
+                {
+                    const FVector2D End = Range.Start + Range.Direction * Range.Length;
+                    MinRangeDist = FMath::Min(MinRangeDist, DistanceToSegment2D(TilePos, Range.Start, End));
+                }
+
+                if (MinRangeDist > 20.0f) continue; // Too far from mountains
+
+                // Canyon noise — abs-inverted for narrow channels
+                const float CanyonNoise = 1.0f - FMath::Abs(FMath::PerlinNoise2D(FVector2D(
+                    (X + CanyonNoiseOff) * CanyonScale,
+                    (Y + CanyonNoiseOff + 3000.f) * CanyonScale)));
+
+                if (CanyonNoise > CanyonThreshold)
+                {
+                    Tile.Elevation -= CanyonDepression;
+                    Tile.Elevation = FMath::Max(0.48f, Tile.Elevation);
+                    Tile.WaterDepth = FMath::Max(Tile.WaterDepth, 0.02f); // Mark as canyon (tiny water depth)
+                    ++CanyonCount;
+                }
+            }
+        }
+        UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step03 Phase F: %d canyon tiles"), CanyonCount);
+    }
+
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step03 done. Provinces=%d Ranges=%d Volcanoes=%d"),
+        MountainProvinces.Num(), MountainRanges.Num(), Volcanoes.Num());
 }
+
+// ════════════════════════════════════════════════════════════════════
+// STEP 04 — Climate + Whittaker Biomes (v3.1)
+//
+// Four passes:
+//   1. Temperature (latitude − lapse rate) + base Rainfall
+//   2. Rain Shadow (upwind raycast)
+//   3. Water feature biome assignment (River, Lake, Canyon, Lava)
+//   4. Whittaker Diagram for remaining land tiles
+// ════════════════════════════════════════════════════════════════════
 
 void UWorldGenPipeline::Step04_AssignBiomes()
 {
-    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step04: Biomes..."));
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step04: Climate + Whittaker biomes..."));
 
-    // Pre-cache biome tags outside the tight per-tile loop.
-    // ── Water biomes ──
+    WindConfig = CurrentConfig.WindSettings;
+    const FVector2D WindDir = WindConfig.PrevailingDirection.GetSafeNormal();
+    const float LapseRate = FMath::Clamp(WindConfig.LapseRate, 0.0f, 1.0f);
+    const float ShadowStrength = FMath::Clamp(WindConfig.RainShadowStrength, 0.0f, 1.0f);
+    const float ShadowReach = FMath::Max(1.0f, WindConfig.RainShadowReach);
+
+    const float TempOffX = RNGRef->NextFloatRange(UWorldForgeRNG::BRANCH_BIOME, -10000.f, 10000.f);
+    const float TempOffY = RNGRef->NextFloatRange(UWorldForgeRNG::BRANCH_BIOME, -10000.f, 10000.f);
+    const float RainOffX = RNGRef->NextFloatRange(UWorldForgeRNG::BRANCH_BIOME, -10000.f, 10000.f);
+    const float RainOffY = RNGRef->NextFloatRange(UWorldForgeRNG::BRANCH_BIOME, -10000.f, 10000.f);
+
+    // ── PASS 1: Temperature + base Rainfall ──
+    for (int32 Y = 0; Y < GridHeight; ++Y)
+    {
+        for (int32 X = 0; X < GridWidth; ++X)
+        {
+            FWorldTileData& Tile = WorldTiles[TileIndex(X, Y)];
+            const float SX = static_cast<float>(X), SY = static_cast<float>(Y);
+
+            const float Latitude01 = 1.0f - FMath::Abs((SY / FMath::Max(1.0f, static_cast<float>(GridHeight - 1))) * 2.0f - 1.0f);
+            const float TempNoise01 = (FMath::PerlinNoise2D(FVector2D((SX + TempOffX) * 0.010f, (SY + TempOffY) * 0.010f)) + 1.0f) * 0.5f;
+            Tile.Temperature = FMath::Clamp(Latitude01 * 0.70f + TempNoise01 * 0.30f - Tile.Elevation * LapseRate, 0.0f, 1.0f);
+
+            const float RainA = (FMath::PerlinNoise2D(FVector2D((SX + RainOffX) * 0.013f, (SY + RainOffY) * 0.013f)) + 1.0f) * 0.5f;
+            const float RainB = (FMath::PerlinNoise2D(FVector2D((SX + RainOffX - 1500.f) * 0.026f, (SY + RainOffY - 1500.f) * 0.026f)) + 1.0f) * 0.5f;
+            Tile.Rainfall = FMath::Clamp(RainA * 0.7f + RainB * 0.3f + (1.0f - Tile.Elevation) * 0.10f, 0.0f, 1.0f);
+        }
+    }
+
+    // ── PASS 2: Rain Shadow ──
+    {
+        const float MountainElevThreshold = 0.68f;
+        for (int32 Y = 0; Y < GridHeight; ++Y)
+        {
+            for (int32 X = 0; X < GridWidth; ++X)
+            {
+                FWorldTileData& Tile = WorldTiles[TileIndex(X, Y)];
+                if (Tile.Elevation < 0.48f) continue;
+
+                float MaxUpwindElev = 0.0f;
+                float ClosestMountainDist = ShadowReach + 1.0f;
+                const int32 Steps = FMath::CeilToInt(ShadowReach);
+                for (int32 S = 1; S <= Steps; ++S)
+                {
+                    const int32 SX = X - FMath::RoundToInt(WindDir.X * S);
+                    const int32 SY = Y - FMath::RoundToInt(WindDir.Y * S);
+                    if (SX < 0 || SX >= GridWidth || SY < 0 || SY >= GridHeight) break;
+                    const float SampleElev = WorldTiles[TileIndex(SX, SY)].Elevation;
+                    if (SampleElev > MountainElevThreshold && SampleElev > MaxUpwindElev)
+                    {
+                        MaxUpwindElev = SampleElev;
+                        ClosestMountainDist = FMath::Min(ClosestMountainDist, static_cast<float>(S));
+                    }
+                }
+                if (MaxUpwindElev > MountainElevThreshold)
+                {
+                    const float DistFade = 1.0f - FMath::Clamp(ClosestMountainDist / ShadowReach, 0.0f, 1.0f);
+                    const float BarrierStrength = (MaxUpwindElev - MountainElevThreshold) / (1.0f - MountainElevThreshold);
+                    Tile.Rainfall *= FMath::Clamp(1.0f - ShadowStrength * DistFade * BarrierStrength, 0.0f, 1.0f);
+                }
+            }
+        }
+    }
+
+    // ── PASS 3 & 4: Biome Assignment ──
+    // Pre-cache all tags
     const FGameplayTag DeepOceanTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.DeepOcean")));
     const FGameplayTag OceanTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Ocean")));
     const FGameplayTag SeaTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Sea")));
     const FGameplayTag CoastalTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Coastal")));
-
-    // ── Highland biomes ──
     const FGameplayTag MountainTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Mountain")));
     const FGameplayTag SnowPeakTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.SnowPeak")));
     const FGameplayTag AlpineTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Alpine")));
     const FGameplayTag HillsTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Hills")));
-
-    // ── Temperature-driven land biomes ──
     const FGameplayTag TundraTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Tundra")));
     const FGameplayTag TaigaTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Taiga")));
     const FGameplayTag DesertTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Desert")));
     const FGameplayTag SavannaTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Savanna")));
     const FGameplayTag JungleTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Jungle")));
-
-    // ── Moisture-driven land biomes ──
     const FGameplayTag ForestTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Forest")));
     const FGameplayTag WoodlandTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Woodland")));
     const FGameplayTag GrasslandTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Grassland")));
@@ -739,128 +912,155 @@ void UWorldGenPipeline::Step04_AssignBiomes()
     const FGameplayTag MarshTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Marsh")));
     const FGameplayTag SwampTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Swamp")));
 
-    for (FWorldTileData& Tile : WorldTiles)
+    // New biome tags (v3.1)
+    const FGameplayTag VolcanicTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Volcanic")), false);
+    const FGameplayTag LavaTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Lava")), false);
+    const FGameplayTag RiverTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.River")), false);
+    const FGameplayTag LakeTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Lake")), false);
+    const FGameplayTag CanyonTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Canyon")), false);
+    const FGameplayTag SteppeTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Steppe")), false);
+    const FGameplayTag IceSheetTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.IceSheet")), false);
+    const FGameplayTag ShrublandTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Shrubland")), false);
+
+    // Build lava flow mask from active volcanoes
+    TSet<int32> LavaFlowTiles;
+    TSet<int32> LavaCraterTiles;
+    for (const FVolcanoData& V : Volcanoes)
     {
-        // ==================================================================
-        // ---- Water / coastal biomes ----
-        // Thresholds aligned with the voxel height formula so the biome map
-        // agrees with what the player actually sees in 3D.
-        // ==================================================================
-        if (Tile.Elevation < 0.30f)
-        {
-            Tile.BiomeType = DeepOceanTag;
-        }
-        else if (Tile.Elevation < 0.40f)
-        {
-            Tile.BiomeType = OceanTag;
-        }
-        else if (Tile.Elevation < 0.48f)
-        {
-            Tile.BiomeType = SeaTag;
-        }
-        else if (Tile.Elevation < 0.53f)
-        {
-            Tile.BiomeType = CoastalTag;
-        }
-        // ==================================================================
-        // ---- Highland biomes (elevation-dominant) ----
-        // Split the old single "Mountain" band into three tiers so that the
-        // map shows snow-capped peaks, exposed alpine rock, and forested
-        // mountains as distinct features.
-        // ==================================================================
-        else if (Tile.Elevation > 0.82f && Tile.Temperature < 0.35f)
-        {
-            // Extreme peaks with cold temps → permanent snow cap
-            Tile.BiomeType = SnowPeakTag;
-        }
-        else if (Tile.Elevation > 0.76f)
-        {
-            // Very high but not frozen → bare mountain rock
-            Tile.BiomeType = MountainTag;
-        }
-        else if (Tile.Elevation > 0.68f && Tile.Temperature < 0.40f)
-        {
-            // High + cold → alpine meadow / treeline
-            Tile.BiomeType = AlpineTag;
-        }
-        else if (Tile.Elevation > 0.68f)
-        {
-            // High but warm → still reads as mountain
-            Tile.BiomeType = MountainTag;
-        }
-        else if (Tile.Elevation > 0.58f)
-        {
-            Tile.BiomeType = HillsTag;
-        }
-        // ==================================================================
-        // ---- Lowland biomes (temperature × rainfall matrix) ----
-        // These produce the variety you need: tundra, taiga, desert, savanna,
-        // jungle, forest, woodland, grassland, plains, marsh, swamp.
-        // Extend this section as you add more biome tags.
-        // ==================================================================
+        const int32 CX = FMath::RoundToInt(V.Center.X);
+        const int32 CY = FMath::RoundToInt(V.Center.Y);
 
-        // ── Frozen band (Temperature < 0.25) ──
-        else if (Tile.Temperature < 0.25f)
+        if (V.bActive)
         {
-            Tile.BiomeType = (Tile.Rainfall > 0.40f) ? TaigaTag : TundraTag;
-        }
+            // Lava crater (inner zone)
+            const int32 CraterR = FMath::CeilToInt(V.ConeRadius * V.CraterRadiusFraction) + 1;
+            for (int32 DY = -CraterR; DY <= CraterR; ++DY)
+            {
+                for (int32 DX = -CraterR; DX <= CraterR; ++DX)
+                {
+                    const int32 TX = CX + DX, TY = CY + DY;
+                    if (TX < 0 || TX >= GridWidth || TY < 0 || TY >= GridHeight) continue;
+                    if (FMath::Sqrt(float(DX * DX + DY * DY)) <= V.ConeRadius * V.CraterRadiusFraction)
+                        LavaCraterTiles.Add(TileIndex(TX, TY));
+                }
+            }
 
-        // ── Cold-temperate band (0.25–0.45) ──
-        else if (Tile.Temperature < 0.45f)
-        {
-            if (Tile.Rainfall > 0.65f)
-                Tile.BiomeType = ForestTag;       // dense conifer/mixed forest
-            else if (Tile.Rainfall > 0.40f)
-                Tile.BiomeType = WoodlandTag;     // open canopy
-            else
-                Tile.BiomeType = GrasslandTag;    // cold steppe
+            // Volcanic zone (outer cone)
+            const int32 FlowR = FMath::CeilToInt(V.LavaFlowRadius);
+            for (int32 DY = -FlowR; DY <= FlowR; ++DY)
+            {
+                for (int32 DX = -FlowR; DX <= FlowR; ++DX)
+                {
+                    const int32 TX = CX + DX, TY = CY + DY;
+                    if (TX < 0 || TX >= GridWidth || TY < 0 || TY >= GridHeight) continue;
+                    if (FMath::Sqrt(float(DX * DX + DY * DY)) <= V.LavaFlowRadius)
+                        LavaFlowTiles.Add(TileIndex(TX, TY));
+                }
+            }
         }
-
-        // ── Warm-temperate band (0.45–0.70) ──
-        else if (Tile.Temperature < 0.70f)
-        {
-            if (Tile.Rainfall > 0.70f)
-                Tile.BiomeType = ForestTag;       // deciduous forest
-            else if (Tile.Rainfall > 0.45f)
-                Tile.BiomeType = WoodlandTag;
-            else if (Tile.Rainfall > 0.25f)
-                Tile.BiomeType = PlainsTag;
-            else
-                Tile.BiomeType = DesertTag;       // temperate desert (cold desert)
-        }
-
-        // ── Hot band (Temperature >= 0.70) ──
         else
         {
-            if (Tile.Rainfall > 0.75f)
+            // Inactive volcano — just volcanic terrain
+            const int32 FlowR = FMath::CeilToInt(V.ConeRadius);
+            for (int32 DY = -FlowR; DY <= FlowR; ++DY)
             {
-                // Hot + very wet: jungle or swamp depending on elevation
-                Tile.BiomeType = (Tile.Elevation < 0.57f) ? SwampTag : JungleTag;
-            }
-            else if (Tile.Rainfall > 0.55f)
-            {
-                // Hot + moderately wet: marsh or jungle-edge
-                Tile.BiomeType = (Tile.Elevation < 0.57f) ? MarshTag : JungleTag;
-            }
-            else if (Tile.Rainfall > 0.30f)
-            {
-                Tile.BiomeType = SavannaTag;
-            }
-            else
-            {
-                Tile.BiomeType = DesertTag;
+                for (int32 DX = -FlowR; DX <= FlowR; ++DX)
+                {
+                    const int32 TX = CX + DX, TY = CY + DY;
+                    if (TX < 0 || TX >= GridWidth || TY < 0 || TY >= GridHeight) continue;
+                    if (FMath::Sqrt(float(DX * DX + DY * DY)) <= V.ConeRadius)
+                        LavaFlowTiles.Add(TileIndex(TX, TY));
+                }
             }
         }
+    }
 
-        // ==================================================================
-        // Voxel profile -- bSmoothSDF ALWAYS true
-        // ==================================================================
+    // ── Assign biome to every tile ──
+    int32 RiverCount = 0, LakeCount = 0, CanyonCount = 0, LavaCount = 0;
+
+    for (int32 Idx = 0; Idx < WorldTiles.Num(); ++Idx)
+    {
+        FWorldTileData& Tile = WorldTiles[Idx];
+
+        // ── Ocean biomes ──
+        if (Tile.Elevation < 0.30f)
+            Tile.BiomeType = DeepOceanTag;
+        else if (Tile.Elevation < 0.40f)
+            Tile.BiomeType = OceanTag;
+        else if (Tile.Elevation < 0.48f)
+            Tile.BiomeType = SeaTag;
+
+        // ── Water feature overrides (must check before land biomes) ──
+        else if (LavaCraterTiles.Contains(Idx) && LavaTag.IsValid())
+        {
+            Tile.BiomeType = LavaTag;
+            ++LavaCount;
+        }
+        else if (LavaFlowTiles.Contains(Idx) && VolcanicTag.IsValid())
+            Tile.BiomeType = VolcanicTag;
+        else if (Tile.WaterDepth >= 0.15f && LakeTag.IsValid())
+        {
+            Tile.BiomeType = LakeTag;
+            ++LakeCount;
+        }
+        else if (Tile.WaterDepth >= 0.04f && RiverTag.IsValid())
+        {
+            Tile.BiomeType = RiverTag;
+            ++RiverCount;
+        }
+        else if (Tile.WaterDepth > 0.0f && Tile.WaterDepth < 0.04f && CanyonTag.IsValid())
+        {
+            Tile.BiomeType = CanyonTag;
+            ++CanyonCount;
+        }
+
+        // ── Coastal ──
+        else if (Tile.Elevation < 0.53f)
+            Tile.BiomeType = CoastalTag;
+
+        // ── Highland biomes ──
+        else if (Tile.Elevation > 0.82f && Tile.Temperature < 0.35f)
+            Tile.BiomeType = SnowPeakTag;
+        else if (Tile.Elevation > 0.76f)
+            Tile.BiomeType = MountainTag;
+        else if (Tile.Elevation > 0.68f && Tile.Temperature < 0.40f)
+            Tile.BiomeType = AlpineTag;
+        else if (Tile.Elevation > 0.68f)
+            Tile.BiomeType = MountainTag;
+        else if (Tile.Elevation > 0.58f)
+            Tile.BiomeType = HillsTag;
+
+        // ── Whittaker Diagram ──
+        else if (Tile.Temperature < 0.20f)
+        {
+            if (Tile.Rainfall > 0.50f && IceSheetTag.IsValid()) Tile.BiomeType = IceSheetTag;
+            else if (Tile.Rainfall > 0.40f) Tile.BiomeType = TaigaTag;
+            else Tile.BiomeType = TundraTag;
+        }
+        else if (Tile.Temperature < 0.40f)
+        {
+            if (Tile.Rainfall > 0.65f) Tile.BiomeType = ForestTag;
+            else if (Tile.Rainfall > 0.40f) Tile.BiomeType = TaigaTag;
+            else Tile.BiomeType = SteppeTag.IsValid() ? SteppeTag : GrasslandTag;
+        }
+        else if (Tile.Temperature < 0.65f)
+        {
+            if (Tile.Rainfall > 0.70f) Tile.BiomeType = ForestTag;
+            else if (Tile.Rainfall > 0.45f) Tile.BiomeType = WoodlandTag;
+            else if (Tile.Rainfall > 0.25f) Tile.BiomeType = ShrublandTag.IsValid() ? ShrublandTag : PlainsTag;
+            else Tile.BiomeType = DesertTag;
+        }
+        else
+        {
+            if (Tile.Rainfall > 0.75f) Tile.BiomeType = (Tile.Elevation < 0.57f) ? SwampTag : JungleTag;
+            else if (Tile.Rainfall > 0.55f) Tile.BiomeType = (Tile.Elevation < 0.57f) ? MarshTag : JungleTag;
+            else if (Tile.Rainfall > 0.30f) Tile.BiomeType = SavannaTag;
+            else Tile.BiomeType = DesertTag;
+        }
+
+        // ── Voxel profile assignment ──
         Tile.VoxelProfile.bSmoothSDF = true;
-
-        const bool bIsWaterTile =
-            Tile.BiomeType.MatchesTag(DeepOceanTag) ||
-            Tile.BiomeType.MatchesTag(OceanTag) ||
-            Tile.BiomeType.MatchesTag(SeaTag);
+        const bool bIsWaterTile = Tile.BiomeType.MatchesTag(DeepOceanTag) || Tile.BiomeType.MatchesTag(OceanTag) || Tile.BiomeType.MatchesTag(SeaTag);
 
         if (bIsWaterTile)
         {
@@ -868,132 +1068,188 @@ void UWorldGenPipeline::Step04_AssignBiomes()
             Tile.VoxelProfile.NoiseFrequency = 0.005f;
             Tile.VoxelProfile.OctaveCount = 1;
             Tile.VoxelProfile.bEnableCaves = false;
+            // v4.0: No caves or canyons underwater
+            Tile.VoxelProfile.CaveIntensity = 0.0f;
+            Tile.VoxelProfile.CanyonIntensity = 0.0f;
         }
         else
         {
-            // Land and coastal tiles: scale profile to elevation.
-            const float ElevationAlpha = FMath::Clamp(Tile.Elevation, 0.0f, 1.0f);
-
-            Tile.VoxelProfile.NoiseAmplitude = FMath::Lerp(20.0f, 220.0f, ElevationAlpha);
-            Tile.VoxelProfile.NoiseFrequency = FMath::Lerp(0.008f, 0.028f, ElevationAlpha);
-            Tile.VoxelProfile.OctaveCount = (ElevationAlpha > 0.75f) ? 5 : ((ElevationAlpha > 0.45f) ? 4 : 3);
+            const float EA = FMath::Clamp(Tile.Elevation, 0.0f, 1.0f);
+            Tile.VoxelProfile.NoiseAmplitude = FMath::Lerp(20.0f, 220.0f, EA);
+            Tile.VoxelProfile.NoiseFrequency = FMath::Lerp(0.008f, 0.028f, EA);
+            Tile.VoxelProfile.OctaveCount = (EA > 0.75f) ? 5 : ((EA > 0.45f) ? 4 : 3);
             Tile.VoxelProfile.bEnableCaves = (Tile.Elevation > 0.55f);
 
-            // Mountain / SnowPeak / Alpine override
-            if (Tile.BiomeType.MatchesTag(MountainTag) ||
-                Tile.BiomeType.MatchesTag(SnowPeakTag) ||
-                Tile.BiomeType.MatchesTag(AlpineTag))
+            // v4.0: Default 3D SDF parameters for generic land
+            Tile.VoxelProfile.CaveIntensity = (Tile.Elevation > 0.55f) ? 0.3f : 0.0f;
+            Tile.VoxelProfile.CaveWormFrequency = 0.012f;
+            Tile.VoxelProfile.CaveMinDepth = 8.0f;
+            Tile.VoxelProfile.CaveMaxDepth = 96.0f;
+            Tile.VoxelProfile.CaveZScale = 1.0f;
+            Tile.VoxelProfile.CanyonIntensity = 0.0f;
+            Tile.VoxelProfile.CanyonMaxDepth = 40.0f;
+            Tile.VoxelProfile.CanyonSharpness = 3.0f;
+            Tile.VoxelProfile.UndergroundFloorDepth = 200.0f;
+            Tile.VoxelProfile.DensityBias = 0.0f;
+            Tile.VoxelProfile.SurfaceRoughnessScale = 1.0f;
+
+            if (Tile.BiomeType.MatchesTag(MountainTag) || Tile.BiomeType.MatchesTag(SnowPeakTag) || Tile.BiomeType.MatchesTag(AlpineTag))
             {
                 Tile.VoxelProfile.NoiseAmplitude = FMath::Max(Tile.VoxelProfile.NoiseAmplitude, 520.0f);
                 Tile.VoxelProfile.NoiseFrequency = FMath::Max(Tile.VoxelProfile.NoiseFrequency, 0.045f);
                 Tile.VoxelProfile.OctaveCount = FMath::Max(Tile.VoxelProfile.OctaveCount, 6);
                 Tile.VoxelProfile.bEnableCaves = true;
+                // v4.0: Mountain caves — moderate density, medium depth
+                Tile.VoxelProfile.CaveIntensity = 0.6f;
+                Tile.VoxelProfile.CaveMaxDepth = 96.0f;
+                Tile.VoxelProfile.CanyonIntensity = 0.3f;
+                Tile.VoxelProfile.CanyonMaxDepth = 30.0f;
             }
-            // Coastal band: keep very flat so the shoreline doesn't spike.
+            else if (Tile.BiomeType.MatchesTag(HillsTag))
+            {
+                // v4.0: Hills — light caves
+                Tile.VoxelProfile.CaveIntensity = 0.4f;
+                Tile.VoxelProfile.CaveMaxDepth = 64.0f;
+            }
             else if (Tile.BiomeType.MatchesTag(CoastalTag))
             {
                 Tile.VoxelProfile.NoiseAmplitude = FMath::Min(Tile.VoxelProfile.NoiseAmplitude, 28.0f);
                 Tile.VoxelProfile.NoiseFrequency = FMath::Min(Tile.VoxelProfile.NoiseFrequency, 0.010f);
                 Tile.VoxelProfile.OctaveCount = 2;
                 Tile.VoxelProfile.bEnableCaves = false;
+                // v4.0: No caves or canyons at coast
+                Tile.VoxelProfile.CaveIntensity = 0.0f;
+                Tile.VoxelProfile.CanyonIntensity = 0.0f;
             }
-            // Desert / Savanna: gentle terrain, no caves.
-            else if (Tile.BiomeType.MatchesTag(DesertTag) ||
-                Tile.BiomeType.MatchesTag(SavannaTag))
+            else if (Tile.BiomeType.MatchesTag(DesertTag) || Tile.BiomeType.MatchesTag(SavannaTag))
             {
                 Tile.VoxelProfile.NoiseAmplitude = FMath::Min(Tile.VoxelProfile.NoiseAmplitude, 65.0f);
                 Tile.VoxelProfile.NoiseFrequency = FMath::Min(Tile.VoxelProfile.NoiseFrequency, 0.014f);
                 Tile.VoxelProfile.OctaveCount = 3;
+                // v4.0: Desert — sparse caves, strong canyons
+                Tile.VoxelProfile.CaveIntensity = 0.1f;
+                Tile.VoxelProfile.CaveMaxDepth = 48.0f;
+                Tile.VoxelProfile.CanyonIntensity = 1.0f;
+                Tile.VoxelProfile.CanyonMaxDepth = 50.0f;
+                Tile.VoxelProfile.CanyonSharpness = 4.0f;
             }
-            // Swamp / Marsh: very flat, low noise.
-            else if (Tile.BiomeType.MatchesTag(SwampTag) ||
-                Tile.BiomeType.MatchesTag(MarshTag))
+            else if (Tile.BiomeType.MatchesTag(ForestTag) || Tile.BiomeType.MatchesTag(WoodlandTag))
+            {
+                // v4.0: Forests — light caves, no canyons
+                Tile.VoxelProfile.CaveIntensity = 0.3f;
+                Tile.VoxelProfile.CaveMaxDepth = 64.0f;
+            }
+            else if (Tile.BiomeType.MatchesTag(JungleTag))
+            {
+                // v4.0: Jungle — moderate caves (cenote-like)
+                Tile.VoxelProfile.CaveIntensity = 0.5f;
+                Tile.VoxelProfile.CaveMaxDepth = 80.0f;
+            }
+            else if (Tile.BiomeType.MatchesTag(SwampTag) || Tile.BiomeType.MatchesTag(MarshTag))
             {
                 Tile.VoxelProfile.NoiseAmplitude = FMath::Min(Tile.VoxelProfile.NoiseAmplitude, 18.0f);
                 Tile.VoxelProfile.NoiseFrequency = FMath::Min(Tile.VoxelProfile.NoiseFrequency, 0.008f);
                 Tile.VoxelProfile.OctaveCount = 2;
                 Tile.VoxelProfile.bEnableCaves = false;
+                // v4.0: Swamps — shallow caves only
+                Tile.VoxelProfile.CaveIntensity = 0.2f;
+                Tile.VoxelProfile.CaveMaxDepth = 32.0f;
+                Tile.VoxelProfile.CanyonIntensity = 0.0f;
+            }
+            else if (Tile.BiomeType.MatchesTag(TundraTag) || (IceSheetTag.IsValid() && Tile.BiomeType.MatchesTag(IceSheetTag)))
+            {
+                // v4.0: Frozen — no caves, no canyons
+                Tile.VoxelProfile.CaveIntensity = 0.0f;
+                Tile.VoxelProfile.CanyonIntensity = 0.0f;
+            }
+            else if (VolcanicTag.IsValid() && Tile.BiomeType.MatchesTag(VolcanicTag))
+            {
+                Tile.VoxelProfile.NoiseAmplitude = FMath::Max(Tile.VoxelProfile.NoiseAmplitude, 380.0f);
+                Tile.VoxelProfile.NoiseFrequency = FMath::Max(Tile.VoxelProfile.NoiseFrequency, 0.035f);
+                Tile.VoxelProfile.OctaveCount = FMath::Max(Tile.VoxelProfile.OctaveCount, 5);
+                Tile.VoxelProfile.bEnableCaves = true;
+                // v4.0: Volcanic — dense caves with horizontal bias (lava tubes)
+                Tile.VoxelProfile.CaveIntensity = 0.8f;
+                Tile.VoxelProfile.CaveMaxDepth = 80.0f;
+                Tile.VoxelProfile.CaveZScale = 0.3f;  // horizontal bias
+                Tile.VoxelProfile.CanyonIntensity = 0.2f;
+                Tile.VoxelProfile.CanyonMaxDepth = 20.0f;
+            }
+            else if (CanyonTag.IsValid() && Tile.BiomeType.MatchesTag(CanyonTag))
+            {
+                Tile.VoxelProfile.NoiseAmplitude = FMath::Max(Tile.VoxelProfile.NoiseAmplitude, 300.0f);
+                Tile.VoxelProfile.NoiseFrequency = 0.032f;
+                Tile.VoxelProfile.OctaveCount = 5;
+                Tile.VoxelProfile.bEnableCaves = true;
+                // v4.0: Canyon biome — very strong canyon carving
+                Tile.VoxelProfile.CaveIntensity = 0.4f;
+                Tile.VoxelProfile.CaveMaxDepth = 64.0f;
+                Tile.VoxelProfile.CanyonIntensity = 1.5f;
+                Tile.VoxelProfile.CanyonMaxDepth = 60.0f;
+                Tile.VoxelProfile.CanyonSharpness = 2.5f;
+            }
+            else if (Tile.BiomeType.MatchesTag(TaigaTag))
+            {
+                // v4.0: Taiga — sparse caves
+                Tile.VoxelProfile.CaveIntensity = 0.2f;
+                Tile.VoxelProfile.CaveMaxDepth = 48.0f;
             }
         }
     }
 
-    // ── Diagnostic: count biome distribution ──
-    int32 WaterCount = 0;
-    int32 LandCount = 0;
+    // ── Diagnostic ──
+    int32 WaterCount = 0, LandCount = 0;
     for (const FWorldTileData& Tile : WorldTiles)
     {
-        const bool bWater =
-            Tile.BiomeType.MatchesTag(DeepOceanTag) ||
-            Tile.BiomeType.MatchesTag(OceanTag) ||
-            Tile.BiomeType.MatchesTag(SeaTag);
+        const bool bWater = Tile.BiomeType.MatchesTag(DeepOceanTag) || Tile.BiomeType.MatchesTag(OceanTag) || Tile.BiomeType.MatchesTag(SeaTag);
         if (bWater) ++WaterCount; else ++LandCount;
     }
 
     UE_LOG(LogTemp, Log,
-        TEXT("[WorldGen] Step04 done. Water=%d (%d%%) Land=%d (%d%%)"),
-        WaterCount,
-        (WorldTiles.Num() > 0) ? (WaterCount * 100 / WorldTiles.Num()) : 0,
-        LandCount,
-        (WorldTiles.Num() > 0) ? (LandCount * 100 / WorldTiles.Num()) : 0);
+        TEXT("[WorldGen] Step04 done. Water=%d (%d%%) Land=%d (%d%%) Rivers=%d Lakes=%d Canyons=%d Lava=%d"),
+        WaterCount, WorldTiles.Num() > 0 ? WaterCount * 100 / WorldTiles.Num() : 0,
+        LandCount, WorldTiles.Num() > 0 ? LandCount * 100 / WorldTiles.Num() : 0,
+        RiverCount, LakeCount, CanyonCount, LavaCount);
 }
+
+// ════════════════════════════════════════════════════════════════════
+// STEPS 05–16 (unchanged)
+// ════════════════════════════════════════════════════════════════════
 
 void UWorldGenPipeline::Step05_InitVoxelChunks()
 {
     UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step05: Init voxel chunks..."));
-
-    if (!WorldRef)
-    {
-        UE_LOG(LogTemp, Warning, TEXT("[WorldGen] Step05 failed: WorldRef is null."));
-        return;
-    }
+    if (!WorldRef) { UE_LOG(LogTemp, Warning, TEXT("[WorldGen] Step05 failed: WorldRef is null.")); return; }
 
     UVoxelWorldManager* VoxelMgr = WorldRef->GetSubsystem<UVoxelWorldManager>();
-    if (!VoxelMgr)
-    {
-        UE_LOG(LogTemp, Warning, TEXT("[WorldGen] Step05 failed: UVoxelWorldManager not found."));
-        return;
-    }
+    if (!VoxelMgr) { UE_LOG(LogTemp, Warning, TEXT("[WorldGen] Step05 failed: UVoxelWorldManager not found.")); return; }
 
-    // ── FIX (Issue 1 — Dual Mountain Brain):
-    // Feed Step03's tectonic mountain ranges to the voxel terrain generator
-    // BEFORE terrain generation starts.  This ensures the 3D voxel terrain
-    // places mountains in the same locations as the 2D tile map.
     VoxelMgr->SetPipelineMountainRanges(MountainRanges);
+    VoxelMgr->SetPipelineVolcanoes(Volcanoes);
 
     const bool bAccepted = VoxelMgr->GenerateTerrainFromTiles(
-        WorldTiles,
-        GridWidth,
-        GridHeight,
-        CurrentConfig.TerrainMode,
-        CurrentConfig.BlockHeightStep);
+        WorldTiles, GridWidth, GridHeight, CurrentConfig.TerrainMode, CurrentConfig.BlockHeightStep);
 
-    if (!bAccepted)
-    {
-        UE_LOG(LogTemp, Warning, TEXT("[WorldGen] Step05: terrain request was not accepted."));
-        return;
-    }
+    if (!bAccepted) { UE_LOG(LogTemp, Warning, TEXT("[WorldGen] Step05: terrain request was not accepted.")); return; }
 
-    UE_LOG(
-        LogTemp,
-        Log,
-        TEXT("[WorldGen] Step05 done. TerrainMode=%s BlockHeightStep=%d"),
-        CurrentConfig.TerrainMode == ETerrainMode::Blocky ? TEXT("Blocky") : TEXT("Smooth"),
-        CurrentConfig.BlockHeightStep
-    );
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step05 done. TerrainMode=%s BlockHeightStep=%d"),
+        CurrentConfig.TerrainMode == ETerrainMode::Blocky ? TEXT("Blocky") : TEXT("Smooth"), CurrentConfig.BlockHeightStep);
 }
 
 void UWorldGenPipeline::Step06_PCGDecorationPass()
 {
     UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step06: Decoration hook..."));
-
     HandlePCGDecorationPass(WorldTiles, GridWidth, GridHeight);
-
     UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step06 done"));
 }
 
 void UWorldGenPipeline::Step07_ApplyWorldDriver()
 {
-    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step07 -- TODO"));
+    // IWorldDriver is a Phase 4 extension point.  When implemented, this step
+    // will apply an IWorldDriver to post-process the tile grid (e.g. a Pangaea
+    // driver could consolidate landmasses, a Water World driver could flood
+    // low elevations).  No default driver is applied — tiles pass through as-is.
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step07: No IWorldDriver applied (Phase 4 extension point)."));
 }
 
 void UWorldGenPipeline::Step08_SeedResources()
@@ -1018,124 +1274,298 @@ void UWorldGenPipeline::Step08_SeedResources()
     for (FWorldTileData& Tile : WorldTiles)
     {
         Tile.ResourceTags.Reset();
-
-        // -----------------------------
-        // Mountain / SnowPeak / Alpine: Stone + Ore
-        // -----------------------------
-        if (Tile.BiomeType.MatchesTag(MountainTag) ||
-            Tile.BiomeType.MatchesTag(SnowPeakTag) ||
-            Tile.BiomeType.MatchesTag(AlpineTag))
+        if (Tile.BiomeType.MatchesTag(MountainTag) || Tile.BiomeType.MatchesTag(SnowPeakTag) || Tile.BiomeType.MatchesTag(AlpineTag))
         {
             Tile.ResourceTags.Add(StoneTag);
-
-            if (RNGRef->NextFloat(UWorldForgeRNG::BRANCH_RESOURCES) > 0.5f)
-            {
-                Tile.ResourceTags.Add(OreTag);
-            }
+            if (RNGRef->NextFloat(UWorldForgeRNG::BRANCH_RESOURCES) > 0.5f) Tile.ResourceTags.Add(OreTag);
         }
-
-        // -----------------------------
-        // Hills: moderate stone chance
-        // -----------------------------
         else if (Tile.BiomeType.MatchesTag(HillsTag))
         {
-            if (RNGRef->NextFloat(UWorldForgeRNG::BRANCH_RESOURCES) > 0.4f)
-            {
-                Tile.ResourceTags.Add(StoneTag);
-            }
-            if (RNGRef->NextFloat(UWorldForgeRNG::BRANCH_RESOURCES) > 0.75f)
-            {
-                Tile.ResourceTags.Add(OreTag);
-            }
+            if (RNGRef->NextFloat(UWorldForgeRNG::BRANCH_RESOURCES) > 0.4f) Tile.ResourceTags.Add(StoneTag);
+            if (RNGRef->NextFloat(UWorldForgeRNG::BRANCH_RESOURCES) > 0.75f) Tile.ResourceTags.Add(OreTag);
         }
-
-        // -----------------------------
-        // Forest / Woodland / Jungle: Wood (+ small stone chance)
-        // -----------------------------
-        else if (Tile.BiomeType.MatchesTag(ForestTag) ||
-            Tile.BiomeType.MatchesTag(WoodlandTag) ||
-            Tile.BiomeType.MatchesTag(JungleTag))
+        else if (Tile.BiomeType.MatchesTag(ForestTag) || Tile.BiomeType.MatchesTag(WoodlandTag) || Tile.BiomeType.MatchesTag(JungleTag))
         {
             Tile.ResourceTags.Add(WoodTag);
-
-            if (RNGRef->NextFloat(UWorldForgeRNG::BRANCH_RESOURCES) > 0.8f)
-            {
-                Tile.ResourceTags.Add(StoneTag);
-            }
+            if (RNGRef->NextFloat(UWorldForgeRNG::BRANCH_RESOURCES) > 0.8f) Tile.ResourceTags.Add(StoneTag);
         }
-
-        // -----------------------------
-        // Swamp / Marsh: Wood at lower rate
-        // -----------------------------
-        else if (Tile.BiomeType.MatchesTag(SwampTag) ||
-            Tile.BiomeType.MatchesTag(MarshTag))
+        else if (Tile.BiomeType.MatchesTag(SwampTag) || Tile.BiomeType.MatchesTag(MarshTag))
         {
-            if (RNGRef->NextFloat(UWorldForgeRNG::BRANCH_RESOURCES) > 0.5f)
-            {
-                Tile.ResourceTags.Add(WoodTag);
-            }
+            if (RNGRef->NextFloat(UWorldForgeRNG::BRANCH_RESOURCES) > 0.5f) Tile.ResourceTags.Add(WoodTag);
         }
-
-        // -----------------------------
-        // Desert: mostly empty
-        // -----------------------------
         else if (Tile.BiomeType.MatchesTag(DesertTag))
         {
-            if (RNGRef->NextFloat(UWorldForgeRNG::BRANCH_RESOURCES) > 0.9f)
-            {
-                Tile.ResourceTags.Add(StoneTag);
-            }
+            if (RNGRef->NextFloat(UWorldForgeRNG::BRANCH_RESOURCES) > 0.9f) Tile.ResourceTags.Add(StoneTag);
         }
-
-        // -----------------------------
-        // General fallback (mid terrain)
-        // -----------------------------
         else
         {
-            if (Tile.Elevation > 0.4f &&
-                RNGRef->NextFloat(UWorldForgeRNG::BRANCH_RESOURCES) > 0.7f)
-            {
+            if (Tile.Elevation > 0.4f && RNGRef->NextFloat(UWorldForgeRNG::BRANCH_RESOURCES) > 0.7f)
                 Tile.ResourceTags.Add(StoneTag);
-            }
         }
     }
-
     UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step08 done"));
 }
 
-// Steps 12, 14, 15, 16 remain stubs for now
 void UWorldGenPipeline::Step12_GenerateCosmicRoster()
 {
-    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step12 -- TODO"));
-}
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step12: Generating cosmic roster..."));
 
+    if (!WorldRef)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[WorldGen] Step12: WorldRef null."));
+        return;
+    }
+
+    UCosmicSimulationSubsystem* CosmicSim = WorldRef->GetSubsystem<UCosmicSimulationSubsystem>();
+    if (!CosmicSim)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[WorldGen] Step12: CosmicSimulationSubsystem not found."));
+        return;
+    }
+
+    // Seed a base pantheon of cosmic entities across key domains.
+    // Emergence thresholds are staggered so entities awaken at different
+    // stages of colony development.  Power comes from anchors (shrines),
+    // colonist PurposeNeed, and narrative events.
+    struct FEntitySeed
+    {
+        const TCHAR* TagName;
+        const TCHAR* DomainTagName;
+        float EmergenceThreshold;
+    };
+
+    static const FEntitySeed Seeds[] =
+    {
+        { TEXT("WorldForge.Cosmic.Entity.War"),       TEXT("WorldForge.Domain.War"),       8.0f  },
+        { TEXT("WorldForge.Cosmic.Entity.Nature"),     TEXT("WorldForge.Domain.Nature"),    6.0f  },
+        { TEXT("WorldForge.Cosmic.Entity.Commerce"),   TEXT("WorldForge.Domain.Commerce"),  10.0f },
+        { TEXT("WorldForge.Cosmic.Entity.Knowledge"),  TEXT("WorldForge.Domain.Knowledge"), 12.0f },
+        { TEXT("WorldForge.Cosmic.Entity.Death"),      TEXT("WorldForge.Domain.Death"),     15.0f },
+        { TEXT("WorldForge.Cosmic.Entity.Creation"),   TEXT("WorldForge.Domain.Creation"),  7.0f  },
+    };
+
+    int32 RegisteredCount = 0;
+    for (const FEntitySeed& Seed : Seeds)
+    {
+        const FGameplayTag EntityTag = FGameplayTag::RequestGameplayTag(FName(Seed.TagName), false);
+        const FGameplayTag DomainTag = FGameplayTag::RequestGameplayTag(FName(Seed.DomainTagName), false);
+
+        if (!EntityTag.IsValid())
+        {
+            continue;
+        }
+
+        TArray<FGameplayTag> Domains;
+        if (DomainTag.IsValid())
+        {
+            Domains.Add(DomainTag);
+        }
+
+        CosmicSim->RegisterEntity(EntityTag, Domains, Seed.EmergenceThreshold);
+        ++RegisteredCount;
+    }
+
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step12: %d cosmic entities registered."), RegisteredCount);
+}
 void UWorldGenPipeline::Step14_AssignWorldTraits()
 {
-    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step14 -- TODO"));
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step14: Assigning world traits..."));
+
+    WorldTraits.Reset();
+
+    // ── Analyze generated world data and assign descriptive trait tags ──
+    // These traits can be queried by gameplay systems to adapt behavior.
+
+    // Count biome distribution
+    int32 WaterTiles = 0;
+    int32 LandTiles = 0;
+    int32 MountainTiles = 0;
+    int32 VolcanicTiles = 0;
+
+    const FGameplayTag OceanTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Ocean")), false);
+    const FGameplayTag SeaTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Sea")), false);
+    const FGameplayTag DeepOceanTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.DeepOcean")), false);
+    const FGameplayTag MountainTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Mountain")), false);
+    const FGameplayTag VolcanicTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Volcanic")), false);
+
+    for (const FWorldTileData& Tile : WorldTiles)
+    {
+        if (Tile.BiomeType.MatchesTag(OceanTag) ||
+            Tile.BiomeType.MatchesTag(SeaTag) ||
+            Tile.BiomeType.MatchesTag(DeepOceanTag))
+        {
+            ++WaterTiles;
+        }
+        else
+        {
+            ++LandTiles;
+        }
+
+        if (Tile.BiomeType.MatchesTag(MountainTag))
+        {
+            ++MountainTiles;
+        }
+        if (Tile.BiomeType.MatchesTag(VolcanicTag))
+        {
+            ++VolcanicTiles;
+        }
+    }
+
+    const float WaterRatio = (WorldTiles.Num() > 0)
+        ? static_cast<float>(WaterTiles) / static_cast<float>(WorldTiles.Num())
+        : 0.0f;
+
+    // Maritime world: >70% water
+    if (WaterRatio > 0.70f)
+    {
+        const FGameplayTag Tag = FGameplayTag::RequestGameplayTag(
+            FName(TEXT("WorldForge.WorldTrait.Maritime")), false);
+        if (Tag.IsValid()) WorldTraits.Add(Tag);
+    }
+
+    // Continental world: <50% water
+    if (WaterRatio < 0.50f)
+    {
+        const FGameplayTag Tag = FGameplayTag::RequestGameplayTag(
+            FName(TEXT("WorldForge.WorldTrait.Continental")), false);
+        if (Tag.IsValid()) WorldTraits.Add(Tag);
+    }
+
+    // Mountainous: >3% mountain tiles
+    if (LandTiles > 0 && static_cast<float>(MountainTiles) / static_cast<float>(LandTiles) > 0.03f)
+    {
+        const FGameplayTag Tag = FGameplayTag::RequestGameplayTag(
+            FName(TEXT("WorldForge.WorldTrait.Mountainous")), false);
+        if (Tag.IsValid()) WorldTraits.Add(Tag);
+    }
+
+    // Volcanic: any volcanic tiles present
+    if (VolcanicTiles > 0)
+    {
+        const FGameplayTag Tag = FGameplayTag::RequestGameplayTag(
+            FName(TEXT("WorldForge.WorldTrait.Volcanic")), false);
+        if (Tag.IsValid()) WorldTraits.Add(Tag);
+    }
+
+    // Diverse: 3+ civilizations
+    if (Civilizations.Num() >= 3)
+    {
+        const FGameplayTag Tag = FGameplayTag::RequestGameplayTag(
+            FName(TEXT("WorldForge.WorldTrait.Diverse")), false);
+        if (Tag.IsValid()) WorldTraits.Add(Tag);
+    }
+
+    // Warlike: check if history has war events
+    int32 WarEvents = 0;
+    for (const FHistoryEventData& Evt : HistoryLog)
+    {
+        if (Evt.EventType.IsValid() &&
+            Evt.EventType.ToString().Contains(TEXT("War")))
+        {
+            ++WarEvents;
+        }
+    }
+
+    if (WarEvents >= 3)
+    {
+        const FGameplayTag Tag = FGameplayTag::RequestGameplayTag(
+            FName(TEXT("WorldForge.WorldTrait.Warlike")), false);
+        if (Tag.IsValid()) WorldTraits.Add(Tag);
+    }
+
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step14: %d world traits assigned."), WorldTraits.Num());
 }
 
 void UWorldGenPipeline::Step15_RecordFinalState()
 {
-    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step15 -- TODO"));
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step15: Recording final state..."));
+
+    // Record a generation summary for debug and save purposes.
+    // When FWorldLoreState is implemented, this step will populate it
+    // with the complete world generation output for persistence.
+
+    int32 LandTiles = 0;
+    for (const FWorldTileData& Tile : WorldTiles)
+    {
+        if (Tile.Elevation > 0.0f && Tile.WaterDepth <= KINDA_SMALL_NUMBER)
+        {
+            ++LandTiles;
+        }
+    }
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[WorldGen] Step15: Final state — Tiles=%d Land=%d Civs=%d Events=%d Currencies=%d Traits=%d MountainRanges=%d Volcanoes=%d"),
+        WorldTiles.Num(),
+        LandTiles,
+        Civilizations.Num(),
+        HistoryLog.Num(),
+        Currencies.Num(),
+        WorldTraits.Num(),
+        MountainRanges.Num(),
+        Volcanoes.Num());
 }
 
 void UWorldGenPipeline::Step16_FinalizeWorldMap()
 {
-    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step16 -- TODO"));
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step16: Finalizing world map..."));
+
+    if (!WorldRef)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[WorldGen] Step16: WorldRef null."));
+        return;
+    }
+
+    // Initialize fog of war: all tiles start Unexplored.
+    // Tiles owned by civilizations get Surveyed status.
+    for (FWorldTileData& Tile : WorldTiles)
+    {
+        if (Tile.ControllingCivID >= 0)
+        {
+            Tile.KnowledgeState.KnowledgeLevel = EKnowledgeLevel::Surveyed;
+            Tile.KnowledgeState.DataAccuracy = 1.0f;
+        }
+    }
+
+    // Notify WorldMapSubsystem to finalize (if available at this point).
+    // Note: the bootstrap also calls InitializeFromPipeline after GenerateWorld
+    // completes.  This early call ensures fog-of-war state is baked into the
+    // tiles before the bootstrap picks them up.
+
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step16: World map finalized. Fog-of-war initialized for %d civ-controlled tiles."),
+        [&]() { int32 N = 0; for (const FWorldTileData& T : WorldTiles) { if (T.ControllingCivID >= 0) ++N; } return N; }());
 }
 
 void UWorldGenPipeline::Step09_PlaceCivilizations()
 {
     UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step09: Placing civilizations..."));
 
-    if (!RNGRef)
-    {
-        return;
-    }
+    if (!RNGRef) return;
 
     UCivilizationGenerator* CivGen = NewObject<UCivilizationGenerator>(this);
+
     Civilizations = CivGen->GenerateCivilizations(
-        CurrentConfig.StartingCivCount, WorldTiles, GridWidth, RNGRef);
+        CurrentConfig.StartingCivCount,
+        WorldTiles,
+        GridWidth,
+        RNGRef
+    );
+
+    // Territory claim (CRITICAL FIX)
+    UCivilizationGenerator::ClaimTerritories(
+        Civilizations,
+        WorldTiles,
+        GridWidth,
+        GridHeight
+    );
+
+    // DEBUG: verify territory assignment actually worked
+    int32 TotalControlledTiles = 0;
+    for (const FCivilizationData& Civ : Civilizations)
+    {
+        TotalControlledTiles += Civ.ControlledTileIDs.Num();
+    }
+
+    UE_LOG(LogTemp, Log, TEXT("[CivGen] Total controlled tiles: %d"), TotalControlledTiles);
 
     UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step09: %d civs placed"), Civilizations.Num());
 }
@@ -1143,37 +1573,20 @@ void UWorldGenPipeline::Step09_PlaceCivilizations()
 void UWorldGenPipeline::Step10_GenerateCulturalDNA()
 {
     UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step10: Cultural DNA..."));
-
-    if (!RNGRef)
-    {
-        return;
-    }
-
+    if (!RNGRef) return;
     UCivilizationGenerator* CivGen = NewObject<UCivilizationGenerator>(this);
     CivGen->GenerateCulturalDNA(Civilizations, WorldTiles, RNGRef);
-
     UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step10: Cultural DNA done for %d civs"), Civilizations.Num());
 }
 
 void UWorldGenPipeline::Step11_GenerateEconomyLayer()
 {
     UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step11: Economy layer..."));
-
-    if (!WorldRef)
-    {
-        UE_LOG(LogTemp, Warning, TEXT("[WorldGen] Step11: WorldRef null"));
-        return;
-    }
-
+    if (!WorldRef) { UE_LOG(LogTemp, Warning, TEXT("[WorldGen] Step11: WorldRef null")); return; }
     if (UWorldEconomySimulation* Econ = WorldRef->GetSubsystem<UWorldEconomySimulation>())
-    {
         Econ->GenerateWorldEconomy(Civilizations, WorldTiles, Currencies, RNGRef);
-    }
     else
-    {
         UE_LOG(LogTemp, Warning, TEXT("[WorldGen] Step11: UWorldEconomySimulation not found"));
-    }
-
     UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step11: %d currencies"), Currencies.Num());
 }
 
@@ -1206,14 +1619,11 @@ void UWorldGenPipeline::Step13_RunPreHistory()
         Generator.Run(Context);
 
         const int32 NameCount = FMath::Min(Civilizations.Num(), Context.GeneratedNames.Num());
-
         TSet<FString> UsedNames;
 
         for (int32 Index = 0; Index < NameCount; ++Index)
         {
-            FString RawName = Context.GeneratedNames[Index];
-
-            RawName = CleanNameArtifacts(RawName);
+            FString RawName = CleanNameArtifacts(Context.GeneratedNames[Index]);
 
             if (RawName.Len() > 0)
             {
@@ -1221,8 +1631,8 @@ void UWorldGenPipeline::Step13_RunPreHistory()
             }
 
             FString FinalName = RawName;
-
             int32 Suffix = 1;
+
             while (UsedNames.Contains(FinalName))
             {
                 FinalName = FString::Printf(TEXT("%s %d"), *RawName, Suffix);
@@ -1230,14 +1640,9 @@ void UWorldGenPipeline::Step13_RunPreHistory()
             }
 
             UsedNames.Add(FinalName);
+            Civilizations[Index].Name = FText::FromString(FinalName).ToString();
 
-            FText NameText = FText::FromString(FinalName);
-            Civilizations[Index].Name = NameText.ToString();
-
-            UE_LOG(
-                LogTemp,
-                Log,
-                TEXT("[WorldHistory] Assigned Civilization %d Name: %s"),
+            UE_LOG(LogTemp, Log, TEXT("[WorldHistory] Assigned Civilization %d Name: %s"),
                 Civilizations[Index].CivID,
                 *Civilizations[Index].Name);
         }
@@ -1248,10 +1653,7 @@ void UWorldGenPipeline::Step13_RunPreHistory()
             {
                 Civilizations[Index].LegendaryFigure = Context.GeneratedFigures[Index];
 
-                UE_LOG(
-                    LogTemp,
-                    Log,
-                    TEXT("[WorldHistory] Civilization %d Figure Stored As: %s"),
+                UE_LOG(LogTemp, Log, TEXT("[WorldHistory] Civilization %d Figure Stored As: %s"),
                     Civilizations[Index].CivID,
                     *Civilizations[Index].LegendaryFigure);
             }
@@ -1263,13 +1665,87 @@ void UWorldGenPipeline::Step13_RunPreHistory()
             {
                 Civilizations[Index].RaceOrigin = Context.RaceOrigins[Index];
 
-                UE_LOG(
-                    LogTemp,
-                    Log,
-                    TEXT("[WorldHistory] Civilization %d Origin Stored As: %s"),
+                UE_LOG(LogTemp, Log, TEXT("[WorldHistory] Civilization %d Origin Stored As: %s"),
                     Civilizations[Index].CivID,
                     *Civilizations[Index].RaceOrigin);
             }
         }
+    }
+
+    // Step13.5: Lore generation.
+    // Uses finalized civ names/origins from the block above.
+    {
+        FWorldLoreState LoreState;
+        LoreState.LoreSeed = static_cast<int32>(WorldSeed);
+
+        TArray<FHistoricalFigure> EmptyFigures;
+
+        FLoreGenerationContext LoreContext
+        {
+            LoreState,
+            *RNGRef,
+            Civilizations,
+            EmptyFigures,
+            nullptr,
+            WorldTiles,
+            GridWidth,
+            GridHeight,
+            static_cast<int32>(WorldSeed)
+        };
+
+        GenerateWorldLore(LoreContext);
+
+        
+        UE_LOG(LogTemp, Log,
+            TEXT("[WorldGen] Step13.5: Lore generated | %s"),
+            *LoreState.GetSummaryString());
+
+        // Dump full generated lore to log and to Saved/WorldLoreDump.txt
+        LoreState.LogFullLore();
+
+        const FString LoreDumpPath = FPaths::ProjectSavedDir() / TEXT("WorldLoreDump.txt");
+
+        FString LoreText;
+        LoreText += TEXT("========== WORLD LORE DUMP ==========\n");
+        LoreText += LoreState.GetSummaryString() + TEXT("\n\n");
+
+        LoreText += TEXT("---- ARTIFACTS ----\n");
+        for (const FLoreArtifact& Artifact : LoreState.Artifacts)
+        {
+            LoreText += FString::Printf(TEXT("%s | %s\n"),
+                *Artifact.DisplayName.ToString(),
+                *Artifact.Description.ToString());
+        }
+
+        LoreText += TEXT("\n---- FALLEN CITIES ----\n");
+        for (const FLoreFallenCity& City : LoreState.FallenCities)
+        {
+            LoreText += FString::Printf(TEXT("%s | %s\n"),
+                *City.DisplayName.ToString(),
+                *City.LoreSnippet.ToString());
+        }
+
+        LoreText += TEXT("\n---- LEGENDS ----\n");
+        for (const FLoreLegend& Legend : LoreState.Legends)
+        {
+            LoreText += FString::Printf(TEXT("%s | %s\n"),
+                *Legend.Title.ToString(),
+                *Legend.NarrativeText.ToString());
+        }
+
+        LoreText += TEXT("\n---- COLONIST BACKSTORIES ----\n");
+        for (const FColonistBackstory& Colonist : LoreState.ColonistBackstories)
+        {
+            LoreText += FString::Printf(TEXT("%s | %s\n"),
+                *Colonist.DisplayName.ToString(),
+                *Colonist.BackstoryText.ToString());
+        }
+
+        LoreText += TEXT("\n========== END WORLD LORE DUMP ==========\n");
+
+        FFileHelper::SaveStringToFile(LoreText, *LoreDumpPath);
+
+        UE_LOG(LogTemp, Log, TEXT("[WorldLore] Full lore written to: %s"), *LoreDumpPath);
+
     }
 }

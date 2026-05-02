@@ -10,6 +10,9 @@
 #include "EngineUtils.h"
 #include "GameFramework/Actor.h"
 #include "Components/PrimitiveComponent.h"
+#include "Player/DigGhostActor.h"
+#include "Voxel/DigSubsystem.h"
+
 
 namespace
 {
@@ -74,13 +77,10 @@ void UBuildModeManager::Initialize(FSubsystemCollectionBase& Collection)
 
 void UBuildModeManager::Deinitialize()
 {
+    ExitDigMode();
     DestroyGhost();
     Super::Deinitialize();
 }
-
-// ================================
-// Subsystem Helpers
-// ================================
 
 UPlayerBuildContext* UBuildModeManager::GetBuildContext() const
 {
@@ -106,14 +106,22 @@ USettlementManager* UBuildModeManager::GetSettlementManager() const
     return W ? W->GetSubsystem<USettlementManager>() : nullptr;
 }
 
-int32 UBuildModeManager::GetEffectiveSettlementID() const
+UDigSubsystem* UBuildModeManager::GetDigSubsystem()
 {
-    if (ActiveSettlementID >= 0)
+    if (!CachedDigSubsystem)
     {
-        return ActiveSettlementID;
+        if (UWorld* W = GetWorld())
+        {
+            CachedDigSubsystem = W->GetSubsystem<UDigSubsystem>();
+        }
     }
 
-    return 0;
+    return CachedDigSubsystem;
+}
+
+int32 UBuildModeManager::GetEffectiveSettlementID() const
+{
+    return ActiveSettlementID >= 0 ? ActiveSettlementID : 0;
 }
 
 float UBuildModeManager::GetMaxGroundBuildSlopeDegrees() const
@@ -130,8 +138,6 @@ bool UBuildModeManager::IsBuildableTerrainType(EWorldForgeTerrainType TerrainTyp
     case EWorldForgeTerrainType::Rock:
         return true;
 
-    case EWorldForgeTerrainType::Sand:
-    case EWorldForgeTerrainType::Snow:
     default:
         return false;
     }
@@ -153,8 +159,6 @@ bool UBuildModeManager::ValidateGroundTerrainPlacement(const FIntVector& Voxel, 
     int32 SurfaceVoxelZ = 0;
     if (VM->TryGetTerrainSurfaceVoxelZ(VoxelXY, SurfaceVoxelZ))
     {
-        // Preserve stacking / face-attachment behavior.
-        // Terrain restrictions only apply to the ground surface cell.
         if (Voxel.Z > SurfaceVoxelZ)
         {
             return true;
@@ -192,10 +196,6 @@ bool UBuildModeManager::ValidateGroundTerrainPlacement(const FIntVector& Voxel, 
 
     return true;
 }
-
-// ================================
-// Live Cost / Availability Queries
-// ================================
 
 FGameplayTag UBuildModeManager::GetCurrentRequiredItemTag() const
 {
@@ -283,10 +283,6 @@ bool UBuildModeManager::CanAffordCurrentSelection() const
     return false;
 }
 
-// ================================
-// Mode Entry / Exit
-// ================================
-
 void UBuildModeManager::EnterPrefabMode(FGameplayTag BuildingTag)
 {
     if (!BuildingTag.IsValid())
@@ -295,6 +291,9 @@ void UBuildModeManager::EnterPrefabMode(FGameplayTag BuildingTag)
         BroadcastFeedback(TEXT("Invalid building selection."));
         return;
     }
+
+    ExitDigMode();
+    CurrentToolMode = EBuildToolMode::Place;
 
     CurrentMode = EBuildMode::Prefab;
     SelectedBuildingTag = BuildingTag;
@@ -330,6 +329,9 @@ void UBuildModeManager::EnterCustomDrawMode(FGameplayTag MaterialTag)
         return;
     }
 
+    ExitDigMode();
+    CurrentToolMode = EBuildToolMode::Place;
+
     CurrentMode = EBuildMode::CustomDraw;
     SelectedMaterialTag = MaterialTag;
     SelectedBuildingTag = FGameplayTag::EmptyTag;
@@ -364,7 +366,10 @@ void UBuildModeManager::EnterCustomDrawMode(FGameplayTag MaterialTag)
 
 void UBuildModeManager::ExitBuildMode()
 {
-    if (CurrentMode == EBuildMode::None) return;
+    if (CurrentMode == EBuildMode::None)
+    {
+        return;
+    }
 
     if (UPlayerBuildContext* Ctx = GetBuildContext())
     {
@@ -372,6 +377,7 @@ void UBuildModeManager::ExitBuildMode()
     }
 
     CurrentMode = EBuildMode::None;
+    CurrentToolMode = EBuildToolMode::None;
     SelectedBuildingTag = FGameplayTag::EmptyTag;
     SelectedMaterialTag = FGameplayTag::EmptyTag;
     SelectedCells.Empty();
@@ -398,10 +404,6 @@ void UBuildModeManager::ExitBuildMode()
     BroadcastSelectionChanged();
     BroadcastFeedback(TEXT("Build mode exited."));
 }
-
-// ================================
-// Configuration
-// ================================
 
 void UBuildModeManager::SetActiveSettlement(int32 SettlementID)
 {
@@ -431,12 +433,14 @@ void UBuildModeManager::SetDragBuildActive(bool bActive)
     }
 }
 
-// ================================
-// Input Handlers
-// ================================
-
 void UBuildModeManager::HandlePrimaryClick()
 {
+    if (CurrentToolMode == EBuildToolMode::Dig)
+    {
+        ExecuteDig();
+        return;
+    }
+
     bJustCommitted = false;
 
     UE_LOG(
@@ -532,15 +536,12 @@ void UBuildModeManager::HandlePrimaryClick()
             }
         }
 
-        SelectedCells3D.Empty();
-        SelectedCells.Empty();
         SelectedCells3D.Add(CurrentHoveredVoxel);
         SelectedCells.Add(CurrentHoveredCell);
         LastPlacedDragVoxel = CurrentHoveredVoxel;
 
         if (UPlayerBuildContext* Ctx = GetBuildContext())
         {
-            Ctx->ClearSelection();
             Ctx->AddCell(CurrentHoveredCell);
         }
 
@@ -576,6 +577,12 @@ void UBuildModeManager::HandleSecondaryClick()
 
 void UBuildModeManager::HandleUndo()
 {
+    if (CurrentToolMode == EBuildToolMode::Dig)
+    {
+        UndoLastDig();
+        return;
+    }
+
     bJustCommitted = false;
     bIsDraggingBuild = false;
     LastPlacedDragVoxel = FIntVector(INT32_MIN);
@@ -630,7 +637,10 @@ void UBuildModeManager::HandleRotate(bool bClockwise)
     DragStartVoxel = FIntVector::ZeroValue;
     bDragStartedFromBlock = false;
 
-    if (CurrentMode != EBuildMode::Prefab) return;
+    if (CurrentMode != EBuildMode::Prefab)
+    {
+        return;
+    }
 
     RotationIndex = bClockwise
         ? (RotationIndex + 1) % 4
@@ -671,15 +681,308 @@ void UBuildModeManager::HandleConfirm()
 
 void UBuildModeManager::HandleCancel()
 {
+    if (CurrentToolMode == EBuildToolMode::Dig)
+    {
+        ExitDigMode();
+        return;
+    }
+
     ExitBuildMode();
 }
 
-// ================================
-// Mouse Update (call each frame while in build mode)
-// ================================
+void UBuildModeManager::EnterDigMode()
+{
+    if (CurrentToolMode == EBuildToolMode::Dig)
+    {
+        ExitDigMode();
+        return;
+    }
+
+    ExitBuildMode();
+    DestroyGhost();
+
+    UWorld* W = GetWorld();
+    if (!W)
+    {
+        CurrentToolMode = EBuildToolMode::None;
+        CurrentMode = EBuildMode::None;
+        BroadcastFeedback(TEXT("Dig mode failed: world unavailable."));
+        return;
+    }
+
+    CurrentToolMode = EBuildToolMode::Dig;
+    CurrentMode = EBuildMode::None;
+
+    FActorSpawnParameters Params;
+    Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+    TSubclassOf<ADigGhostActor> ClassToSpawn = DigGhostClass;
+    if (!ClassToSpawn)
+    {
+        ClassToSpawn = ADigGhostActor::StaticClass();
+        UE_LOG(LogTemp, Warning, TEXT("[BuildMode] DigGhostClass not set. Falling back to ADigGhostActor::StaticClass()."));
+    }
+
+    ActiveDigGhost = W->SpawnActor<ADigGhostActor>(
+        ClassToSpawn,
+        FTransform::Identity,
+        Params
+    );
+
+    if (ActiveDigGhost)
+    {
+        ActiveDigGhost->SetGhostState(EDigGhostState::Valid);
+        UE_LOG(LogTemp, Log, TEXT("[BuildMode] Dig ghost spawned."));
+    }
+    else
+    {
+        UE_LOG(LogTemp, Error, TEXT("[BuildMode] Failed to spawn dig ghost."));
+    }
+
+    bHoveredCellValid = false;
+    bHasLastValidVoxel = false;
+
+    UE_LOG(LogTemp, Log, TEXT("[BuildMode] Entered Dig mode."));
+    OnBuildModeChanged.Broadcast(CurrentMode);
+    BroadcastSelectionChanged();
+    BroadcastFeedback(TEXT("Dig mode enabled."));
+}
+
+void UBuildModeManager::ExitDigMode()
+{
+    if (ActiveDigGhost)
+    {
+        ActiveDigGhost->SetGhostState(EDigGhostState::Hidden);
+        ActiveDigGhost->Destroy();
+        ActiveDigGhost = nullptr;
+    }
+
+    if (CurrentToolMode == EBuildToolMode::Dig)
+    {
+        CurrentToolMode = EBuildToolMode::None;
+    }
+}
+
+void UBuildModeManager::ExecuteDig()
+{
+    if (CurrentToolMode != EBuildToolMode::Dig)
+    {
+        return;
+    }
+
+    UPlayerBuildContext* Ctx = GetBuildContext();
+    if (!Ctx)
+    {
+        BroadcastFeedback(TEXT("Dig failed: build context unavailable."));
+        return;
+    }
+
+    if (!Ctx->bDigTargetValid)
+    {
+        BroadcastFeedback(TEXT("No valid dig target."));
+        return;
+    }
+
+    if (!Ctx->CanDigNow())
+    {
+        BroadcastFeedback(TEXT("Dig is on cooldown."));
+        return;
+    }
+
+    UDigSubsystem* DigSub = GetDigSubsystem();
+    if (!DigSub)
+    {
+        BroadcastFeedback(TEXT("Dig system unavailable."));
+        return;
+    }
+
+    FDigParams Params;
+    Params.TargetGridPos = Ctx->CurrentDigTarget;
+    Params.Radius = Ctx->DigSettings.Radius;
+    Params.DepthPerAction = Ctx->DigSettings.DepthPerAction;
+
+    if (Ctx->DigSettings.MaxDigDepth > 0)
+    {
+        const int32 CurrentDepth = DigSub->GetRelativeDepth(Ctx->CurrentDigTarget);
+        if (CurrentDepth >= Ctx->DigSettings.MaxDigDepth)
+        {
+            BroadcastFeedback(TEXT("Maximum dig depth reached."));
+            return;
+        }
+    }
+
+    FDigResult Result = DigSub->DigAt(Params);
+
+    if (!Result.WasEffective())
+    {
+        BroadcastFeedback(TEXT("Dig had no effect."));
+        return;
+    }
+
+    // TODO: Replace with real sim tick when exposed here.
+    const int64 SimTick = 0;
+
+    Ctx->PushDigUndo(Result, SimTick);
+    Ctx->StartDigCooldown();
+
+    UE_LOG(LogTemp, Warning,
+        TEXT("[DigTrace][BuildMode] RequestedTarget=%s RemovedBlocks=%d"),
+        *Params.TargetGridPos.ToString(),
+        Result.RemovedBlocks.Num());
+
+    BroadcastFeedback(FString::Printf(
+        TEXT("Dug %d block(s)."),
+        Result.RemovedBlocks.Num()
+    ));
+
+    if (ActiveDigGhost && Result.RevealedAnyNodes())
+    {
+        ActiveDigGhost->SetGhostState(EDigGhostState::ResourceDetected);
+    }
+}
+
+void UBuildModeManager::UndoLastDig()
+{
+    if (CurrentToolMode != EBuildToolMode::Dig)
+    {
+        return;
+    }
+
+    UPlayerBuildContext* Ctx = GetBuildContext();
+    UDigSubsystem* DigSub = GetDigSubsystem();
+
+    if (!Ctx || !DigSub)
+    {
+        return;
+    }
+
+    FDigUndoEntry UndoEntry;
+    if (!Ctx->PopDigUndo(UndoEntry))
+    {
+        BroadcastFeedback(TEXT("Nothing to undo."));
+        return;
+    }
+
+    const bool bSuccess = DigSub->UndoDig(UndoEntry.DigResult);
+
+    BroadcastFeedback(
+        bSuccess
+        ? TEXT("Dig undone.")
+        : TEXT("Dig undo partially failed.")
+    );
+}
+
+void UBuildModeManager::TickDigMode(float DeltaTime)
+{
+    UPlayerBuildContext* Ctx = GetBuildContext();
+    if (!Ctx)
+    {
+        return;
+    }
+
+    Ctx->TickDigCooldown(DeltaTime);
+
+    FIntVector GridPos;
+    FVector WorldPos;
+    const bool bHit = RaycastDigTarget(GridPos, WorldPos);
+
+    if (bHit)
+    {
+        Ctx->CurrentDigTarget = GridPos;
+        Ctx->CurrentDigWorldPosition = WorldPos;
+
+        UDigSubsystem* DigSub = GetDigSubsystem();
+        Ctx->bDigTargetValid = DigSub && DigSub->CanDigAt(GridPos);
+
+        if (Ctx->bDigTargetValid && Ctx->DigSettings.MaxDigDepth > 0 && DigSub)
+        {
+            const int32 Depth = DigSub->GetRelativeDepth(GridPos);
+            if (Depth >= Ctx->DigSettings.MaxDigDepth)
+            {
+                Ctx->bDigTargetValid = false;
+            }
+        }
+    }
+    else
+    {
+        Ctx->bDigTargetValid = false;
+    }
+
+    if (ActiveDigGhost)
+    {
+        if (bHit)
+        {
+            ActiveDigGhost->UpdateGhost(
+                WorldPos,
+                GridPos,
+                Ctx->DigSettings.Radius,
+                Ctx->DigSettings.DepthPerAction
+            );
+
+            ActiveDigGhost->SetGhostState(
+                Ctx->bDigTargetValid ? EDigGhostState::Valid : EDigGhostState::Invalid
+            );
+        }
+        else
+        {
+            ActiveDigGhost->SetGhostState(EDigGhostState::Invalid);
+        }
+    }
+}
+
+bool UBuildModeManager::RaycastDigTarget(FIntVector& OutGridPos, FVector& OutWorldPos) const
+{
+    APlayerController* PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr;
+    if (!PC)
+    {
+        return false;
+    }
+
+    FVector HitLocation = FVector::ZeroVector;
+    bool bHitPlacedBlock = false;
+    FIntVector SupportVoxel = FIntVector::ZeroValue;
+    FVector HitNormal = FVector::UpVector;
+
+    if (!RaycastToTerrain(PC, HitLocation, bHitPlacedBlock, SupportVoxel, HitNormal))
+    {
+        return false;
+    }
+
+    UVoxelWorldManager* VM = GetVoxelManager();
+    if (!VM)
+    {
+        return false;
+    }
+
+    if (bHitPlacedBlock)
+    {
+        OutGridPos = SupportVoxel;
+    }
+    else
+    {
+        FIntVector SurfaceVoxel = VM->WorldToGrid3D(HitLocation);
+
+        int32 SurfaceZ = SurfaceVoxel.Z;
+        VM->TryGetTerrainSurfaceVoxelZ(
+            FIntPoint(SurfaceVoxel.X, SurfaceVoxel.Y),
+            SurfaceZ
+        );
+
+        OutGridPos = FIntVector(SurfaceVoxel.X, SurfaceVoxel.Y, SurfaceZ);
+    }
+
+    OutWorldPos = VM->GridToWorld(FIntPoint(OutGridPos.X, OutGridPos.Y), OutGridPos.Z);
+    return true;
+}
 
 void UBuildModeManager::UpdateFromMouse(APlayerController* PC)
 {
+    if (CurrentToolMode == EBuildToolMode::Dig)
+    {
+        TickDigMode(GetWorld() ? GetWorld()->GetDeltaSeconds() : 0.0f);
+        return;
+    }
+
     if (CurrentMode == EBuildMode::None || !PC)
     {
         return;
@@ -829,11 +1132,7 @@ void UBuildModeManager::UpdateFromMouse(APlayerController* PC)
         const int32 Dy = EndVoxel.Y - DragStartVoxel.Y;
         const int32 Dz = EndVoxel.Z - DragStartVoxel.Z;
 
-        const int32 Steps = FMath::Max3(
-            FMath::Abs(Dx),
-            FMath::Abs(Dy),
-            FMath::Abs(Dz)
-        );
+        const int32 Steps = FMath::Max3(FMath::Abs(Dx), FMath::Abs(Dy), FMath::Abs(Dz));
 
         for (int32 Index = 0; Index <= Steps; ++Index)
         {
@@ -844,12 +1143,7 @@ void UBuildModeManager::UpdateFromMouse(APlayerController* PC)
             LineVoxel.Y = FMath::RoundToInt(FMath::Lerp(static_cast<float>(DragStartVoxel.Y), static_cast<float>(EndVoxel.Y), Alpha));
             LineVoxel.Z = FMath::RoundToInt(FMath::Lerp(static_cast<float>(DragStartVoxel.Z), static_cast<float>(EndVoxel.Z), Alpha));
 
-            if (LineCells3D.Contains(LineVoxel))
-            {
-                continue;
-            }
-
-            if (HasPlacedBlockAtVoxel(World, VM, LineVoxel))
+            if (LineCells3D.Contains(LineVoxel) || HasPlacedBlockAtVoxel(World, VM, LineVoxel))
             {
                 continue;
             }
@@ -862,11 +1156,7 @@ void UBuildModeManager::UpdateFromMouse(APlayerController* PC)
     {
         const int32 Dx = EndVoxel.X - DragStartVoxel.X;
         const int32 Dy = EndVoxel.Y - DragStartVoxel.Y;
-
-        const int32 Steps = FMath::Max(
-            FMath::Abs(Dx),
-            FMath::Abs(Dy)
-        );
+        const int32 Steps = FMath::Max(FMath::Abs(Dx), FMath::Abs(Dy));
 
         bool bHasPreviousTerrainPoint = false;
         int32 PreviousX = 0;
@@ -894,8 +1184,7 @@ void UBuildModeManager::UpdateFromMouse(APlayerController* PC)
             {
                 const FIntVector FirstVoxel(LineX, LineY, SurfaceVoxelZ);
 
-                if (!LineCells3D.Contains(FirstVoxel) &&
-                    !HasPlacedBlockAtVoxel(World, VM, FirstVoxel))
+                if (!LineCells3D.Contains(FirstVoxel) && !HasPlacedBlockAtVoxel(World, VM, FirstVoxel))
                 {
                     LineCells3D.Add(FirstVoxel);
                     LineCells2D.Add(FIntPoint(FirstVoxel.X, FirstVoxel.Y));
@@ -917,12 +1206,7 @@ void UBuildModeManager::UpdateFromMouse(APlayerController* PC)
                 {
                     const FIntVector BridgeVoxel(PreviousX, PreviousY, BridgeZ);
 
-                    if (LineCells3D.Contains(BridgeVoxel))
-                    {
-                        continue;
-                    }
-
-                    if (HasPlacedBlockAtVoxel(World, VM, BridgeVoxel))
+                    if (LineCells3D.Contains(BridgeVoxel) || HasPlacedBlockAtVoxel(World, VM, BridgeVoxel))
                     {
                         continue;
                     }
@@ -940,8 +1224,7 @@ void UBuildModeManager::UpdateFromMouse(APlayerController* PC)
 
             const FIntVector CurrentVoxel(LineX, LineY, SurfaceVoxelZ);
 
-            if (!LineCells3D.Contains(CurrentVoxel) &&
-                !HasPlacedBlockAtVoxel(World, VM, CurrentVoxel))
+            if (!LineCells3D.Contains(CurrentVoxel) && !HasPlacedBlockAtVoxel(World, VM, CurrentVoxel))
             {
                 LineCells3D.Add(CurrentVoxel);
                 LineCells2D.Add(FIntPoint(CurrentVoxel.X, CurrentVoxel.Y));
@@ -969,10 +1252,6 @@ void UBuildModeManager::UpdateFromMouse(APlayerController* PC)
     OnCellCountChanged.Broadcast(SelectedCells.Num());
     UpdateGhost();
 }
-
-// ================================
-// Raycast
-// ================================
 
 bool UBuildModeManager::RaycastToTerrain(
     APlayerController* PC,
@@ -1010,7 +1289,7 @@ bool UBuildModeManager::RaycastToTerrain(
     }
 
     const FVector TraceStart = WorldLocation;
-    const FVector TraceEnd = WorldLocation + (WorldDirection * 50000.0f);
+    const FVector TraceEnd = WorldLocation + (WorldDirection * 5000000.0f);
 
     FCollisionQueryParams TerrainParams(SCENE_QUERY_STAT(BuildModeTerrainTrace), false);
     TerrainParams.bTraceComplex = false;
@@ -1018,6 +1297,11 @@ bool UBuildModeManager::RaycastToTerrain(
     if (GhostActor)
     {
         TerrainParams.AddIgnoredActor(GhostActor);
+    }
+
+    if (ActiveDigGhost)
+    {
+        TerrainParams.AddIgnoredActor(ActiveDigGhost);
     }
 
     for (TActorIterator<AActor> It(W); It; ++It)
@@ -1040,6 +1324,16 @@ bool UBuildModeManager::RaycastToTerrain(
 
     FCollisionQueryParams FullParams(SCENE_QUERY_STAT(BuildModeFullTrace), false);
     FullParams.bTraceComplex = false;
+
+    if (GhostActor)
+    {
+        FullParams.AddIgnoredActor(GhostActor);
+    }
+
+    if (ActiveDigGhost)
+    {
+        FullParams.AddIgnoredActor(ActiveDigGhost);
+    }
 
     FHitResult FullHit;
     const bool bHitFull = W->LineTraceSingleByChannel(
@@ -1081,37 +1375,18 @@ bool UBuildModeManager::RaycastToTerrain(
     return false;
 }
 
-// ================================
-// Commit
-// ================================
-
 bool UBuildModeManager::CommitPrefabBuild()
 {
     const int32 EffectiveSettlementID = GetEffectiveSettlementID();
 
     if (!bHoveredCellValid || EffectiveSettlementID < 0)
     {
-        UE_LOG(
-            LogTemp,
-            Warning,
-            TEXT("[BuildMode] CommitPrefab: invalid state. HoverValid=%s SettlementID=%d Cell=(%d,%d) Voxel=(%d,%d,%d) BuildingTag=%s"),
-            bHoveredCellValid ? TEXT("true") : TEXT("false"),
-            EffectiveSettlementID,
-            CurrentHoveredCell.X,
-            CurrentHoveredCell.Y,
-            CurrentHoveredVoxel.X,
-            CurrentHoveredVoxel.Y,
-            CurrentHoveredVoxel.Z,
-            SelectedBuildingTag.IsValid() ? *SelectedBuildingTag.ToString() : TEXT("Invalid")
-        );
-
         BroadcastFeedback(TEXT("Cannot place building here."));
         return false;
     }
 
     if (!SelectedBuildingTag.IsValid())
     {
-        UE_LOG(LogTemp, Warning, TEXT("[BuildMode] CommitPrefab: SelectedBuildingTag invalid."));
         BroadcastFeedback(TEXT("No building selected."));
         return false;
     }
@@ -1119,15 +1394,6 @@ bool UBuildModeManager::CommitPrefabBuild()
     FString TerrainFailure;
     if (!ValidateGroundTerrainPlacement(CurrentHoveredVoxel, TerrainFailure))
     {
-        UE_LOG(
-            LogTemp,
-            Warning,
-            TEXT("[BuildMode] CommitPrefab blocked by terrain validation at (%d,%d,%d): %s"),
-            CurrentHoveredVoxel.X,
-            CurrentHoveredVoxel.Y,
-            CurrentHoveredVoxel.Z,
-            *TerrainFailure
-        );
         BroadcastFeedback(TerrainFailure);
         return false;
     }
@@ -1135,27 +1401,11 @@ bool UBuildModeManager::CommitPrefabBuild()
     UPlayerBuildContext* Ctx = GetBuildContext();
     if (!Ctx)
     {
-        UE_LOG(LogTemp, Warning, TEXT("[BuildMode] CommitPrefab: PlayerBuildContext is null."));
         BroadcastFeedback(TEXT("Build context unavailable."));
         return false;
     }
 
     Ctx->SetActiveSettlement(EffectiveSettlementID);
-
-    UE_LOG(
-        LogTemp,
-        Warning,
-        TEXT("[BuildMode] CommitPrefab: calling PlayerBuildContext::CommitPrefabBuildByTagWithRotation3D at Cell=(%d,%d), HoveredVoxel=(%d,%d,%d), SettlementID=%d, AgentID=%d, Rotation=%d, BuildingTag=%s"),
-        CurrentHoveredCell.X,
-        CurrentHoveredCell.Y,
-        CurrentHoveredVoxel.X,
-        CurrentHoveredVoxel.Y,
-        CurrentHoveredVoxel.Z,
-        EffectiveSettlementID,
-        BuildAgentID,
-        RotationIndex,
-        *SelectedBuildingTag.ToString()
-    );
 
     const bool bSuccess = Ctx->CommitPrefabBuildByTagWithRotation3D(
         SelectedBuildingTag,
@@ -1164,30 +1414,7 @@ bool UBuildModeManager::CommitPrefabBuild()
         BuildAgentID
     );
 
-    if (bSuccess)
-    {
-        UE_LOG(
-            LogTemp,
-            Log,
-            TEXT("[BuildMode] Prefab committed at (%d, %d, %d)"),
-            CurrentHoveredVoxel.X,
-            CurrentHoveredVoxel.Y,
-            CurrentHoveredVoxel.Z
-        );
-
-        BroadcastFeedback(Ctx->GetLastCommitResultMessage());
-    }
-    else
-    {
-        UE_LOG(
-            LogTemp,
-            Warning,
-            TEXT("[BuildMode] CommitPrefab: PlayerBuildContext::CommitPrefabBuildByTagWithRotation3D returned false.")
-        );
-
-        BroadcastFeedback(Ctx->GetLastCommitResultMessage());
-    }
-
+    BroadcastFeedback(Ctx->GetLastCommitResultMessage());
     return bSuccess;
 }
 
@@ -1195,7 +1422,6 @@ bool UBuildModeManager::CommitCustomBuild()
 {
     if (SelectedCells3D.Num() == 0)
     {
-        UE_LOG(LogTemp, Warning, TEXT("[BuildMode] CommitCustom: no cells selected."));
         BroadcastFeedback(TEXT("Select at least one cell first."));
         return false;
     }
@@ -1204,7 +1430,6 @@ bool UBuildModeManager::CommitCustomBuild()
 
     if (EffectiveSettlementID < 0)
     {
-        UE_LOG(LogTemp, Warning, TEXT("[BuildMode] CommitCustom: no settlement."));
         BroadcastFeedback(TEXT("No active settlement selected."));
         return false;
     }
@@ -1214,15 +1439,6 @@ bool UBuildModeManager::CommitCustomBuild()
         FString TerrainFailure;
         if (!ValidateGroundTerrainPlacement(Cell, TerrainFailure))
         {
-            UE_LOG(
-                LogTemp,
-                Warning,
-                TEXT("[BuildMode] CommitCustom blocked by terrain validation at (%d,%d,%d): %s"),
-                Cell.X,
-                Cell.Y,
-                Cell.Z,
-                *TerrainFailure
-            );
             BroadcastFeedback(TerrainFailure);
             return false;
         }
@@ -1241,31 +1457,24 @@ bool UBuildModeManager::CommitCustomBuild()
 
     if (bSuccess)
     {
-        UE_LOG(LogTemp, Log, TEXT("[BuildMode] Custom build committed: %d cells"), SelectedCells3D.Num());
-
         SelectedCells.Empty();
         SelectedCells3D.Empty();
         OnCellCountChanged.Broadcast(0);
-        BroadcastFeedback(Ctx->GetLastCommitResultMessage());
-    }
-    else
-    {
-        BroadcastFeedback(Ctx->GetLastCommitResultMessage());
     }
 
+    BroadcastFeedback(Ctx->GetLastCommitResultMessage());
     return bSuccess;
 }
-
-// ================================
-// Ghost Management
-// ================================
 
 void UBuildModeManager::SpawnGhost()
 {
     DestroyGhost();
 
     UWorld* W = GetWorld();
-    if (!W) return;
+    if (!W)
+    {
+        return;
+    }
 
     FActorSpawnParameters Params;
     Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
@@ -1308,6 +1517,8 @@ void UBuildModeManager::UpdateGhost()
 
     if (!bHoveredCellValid)
     {
+        GhostActor->SetGhostState(EBuildGhostState::Invalid);
+
         if (CurrentMode == EBuildMode::CustomDraw)
         {
             GhostActor->UpdateCustomDrawCells3D(SelectedCells3D, CurrentHoveredVoxel, VM);
@@ -1341,10 +1552,6 @@ void UBuildModeManager::UpdateGhost()
         GhostActor->SetGhostState(EBuildGhostState::Valid);
     }
 }
-
-// ================================
-// UI Broadcast Helpers
-// ================================
 
 void UBuildModeManager::BroadcastSelectionChanged()
 {

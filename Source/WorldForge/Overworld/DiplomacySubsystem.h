@@ -69,7 +69,7 @@ private:
 
     static int64 MakePairKey(int32 CivA, int32 CivB);
     void SetEmbargo(int32 CivA, int32 CivB, bool bActive, UWorld* World);
-    void SetTradeRouteFlowMod(int32 CivA, int32 CivB, float Mod, UWorld* World) const;
+    void SetTradeRouteFlowMod(int32 CivA, int32 CivB, float Mod, UWorld* World);
     FGameplayTag GetCivCurrencyTag(int32 CivID, UWorld* World) const;
     void CheckAndExpireTreaties(int32 StepNumber, UWorld* World);
 };

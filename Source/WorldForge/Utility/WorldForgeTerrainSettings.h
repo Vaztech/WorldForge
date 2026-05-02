@@ -168,6 +168,22 @@ public:
     UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Mountains", meta = (ClampMin = "0.1"))
     float MountainFalloffPower = 1.6f;      // was 2.2 — gentler falloff = broader ridges, not needles
 
+    // ── v2.1 Mountain Ridge Detail ──
+    // Controls the localized ridge displacement from Step03 tectonic ranges.
+    // Additive on top of the macro tile-elevation height.
+
+    UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Mountains", meta = (ClampMin = "0.0"))
+    float MountainRidgeHeightScale = 40.0f;   // overall ridge height multiplier (voxels). 0 = no ridges.
+
+    UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Mountains", meta = (ClampMin = "0.1"))
+    float MountainRidgeWidthScale = 0.8f;     // ridge width multiplier. Lower = narrower/sharper spines.
+
+    UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Mountains", meta = (ClampMin = "0.001"))
+    float MountainCragFrequency = 0.06f;      // high-frequency noise for jagged peaks.
+
+    UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Mountains", meta = (ClampMin = "0.0"))
+    float MountainCragAmplitude = 6.0f;       // crag noise intensity in voxels.
+
     // ============================================================
     // 8. Rivers
     // ============================================================
@@ -205,6 +221,51 @@ public:
 
     UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Caves", meta = (ClampMin = "0.0", ClampMax = "1.0"))
     float CaveSecondaryWeight = 0.3f;
+
+    // ============================================================
+    // 9A. v4.0 — 3D SDF Worm Caves
+    // ============================================================
+
+    UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Caves|WormCaves", meta = (ClampMin = "0.001"))
+    float CaveWormFrequency = 0.012f;
+
+    UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Caves|WormCaves", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float CaveWormThreshold = 0.55f;
+
+    UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Caves|WormCaves", meta = (ClampMin = "0.0"))
+    float CaveCarveStrength = 12.0f;
+
+    UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Caves|WormCaves", meta = (ClampMin = "0.0"))
+    float CaveDepthFadeStart = 8.0f;
+
+    UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Caves|WormCaves", meta = (ClampMin = "0.0"))
+    float CaveDepthFadeEnd = 128.0f;
+
+    // ============================================================
+    // 9B. v4.0 — 3D SDF Canyons
+    // ============================================================
+
+    UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Canyons", meta = (ClampMin = "0.001"))
+    float CanyonRidgeFrequency = 0.004f;
+
+    UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Canyons", meta = (ClampMin = "0.0"))
+    float CanyonDomainWarpStrength = 200.0f;
+
+    UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Canyons", meta = (ClampMin = "0.001"))
+    float CanyonDomainWarpFrequency = 0.003f;
+
+    UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Canyons", meta = (ClampMin = "0.0"))
+    float CanyonMaxDepthVoxels = 40.0f;
+
+    // ============================================================
+    // 9C. v4.0 — Lava Tubes
+    // ============================================================
+
+    UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Caves|LavaTubes")
+    bool bEnableLavaTubes = true;
+
+    UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Caves|LavaTubes", meta = (ClampMin = "0.05", ClampMax = "1.0"))
+    float LavaTubeZCompress = 0.3f;
 
     // ============================================================
     // 10. Performance

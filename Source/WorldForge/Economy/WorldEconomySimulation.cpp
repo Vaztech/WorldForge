@@ -167,8 +167,53 @@ void UWorldEconomySimulation::SimulateEconomicEpoch(
 	TArray<FCivilizationData>& Civs,
 	TArray<FHistoryEventData>& OutHistory)
 {
+	const float Years = FMath::Max(1.0f, static_cast<float>(EpochYears));
+
+	for (FCivilizationData& Civ : Civs)
+	{
+		if (Civ.bCollapsed)
+		{
+			continue;
+		}
+
+		FGameplayTag CurrencyTag;
+		for (const TPair<FGameplayTag, FCurrencyDefinition>& Pair : AllCurrencies)
+		{
+			if (Pair.Value.IssuingCivID == Civ.CivID)
+			{
+				CurrencyTag = Pair.Key;
+				break;
+			}
+		}
+
+		if (!CurrencyTag.IsValid())
+		{
+			continue;
+		}
+
+		const FGovernmentEconomicProfile* Gov = CivGovernments.Find(Civ.CivID);
+
+		const float InnovationRate = Gov ? Gov->InnovationRate : 1.0f;
+		const float TaxRate = Gov ? Gov->BaseTaxRate : 0.15f;
+		const float TariffRate = Gov ? Gov->TariffRate : 0.10f;
+
+		const float GrowthDelta = FMath::Clamp(
+			((InnovationRate * 0.0125f) - ((TaxRate + TariffRate) * 0.015f)) * Years,
+			-0.25f,
+			0.25f);
+
+		QueueTrustDelta(CurrencyTag, ETrustComponent::BackingStrength, GrowthDelta);
+		QueueTrustDelta(CurrencyTag, ETrustComponent::TradeReputation, GrowthDelta * 0.5f);
+		QueueTrustDelta(CurrencyTag, ETrustComponent::GovernmentCredibility, GrowthDelta * 0.25f);
+	}
+
+	ApplyPendingTrustDeltas();
+	UpdateCurrencyTrust(1.0f);
+	CheckCurrencyCollapse();
+	RebuildArraysFromLookupMaps();
+
 	UE_LOG(LogTemp, Log,
-		TEXT("[EconomySim] Epoch simulation stub. Epoch=%d Years=%d Civs=%d History=%d"),
+		TEXT("[EconomySim] Epoch simulated. Epoch=%d Years=%d Civs=%d History=%d"),
 		static_cast<int32>(Epoch),
 		EpochYears,
 		Civs.Num(),
@@ -569,11 +614,31 @@ void UWorldEconomySimulation::UpdateConsumption(
 
 void UWorldEconomySimulation::UpdateFlow(float DeltaTime, int32 SettlementID)
 {
-	(void)DeltaTime;
-	(void)SettlementID;
+	TArray<FMarketPrice>* Prices = SettlementPrices.Find(SettlementID);
+	if (!Prices || Prices->Num() <= 0 || TradeRoutes.Num() <= 0)
+	{
+		return;
+	}
 
-	// Phase 3A: no overworld trade routing yet.
-	// TradeRoutes are persisted but not actively simulated until Phase 3B.
+	float RouteStrength = 0.0f;
+
+	for (const TPair<int32, FTradeFlowState>& Pair : TradeRoutes)
+	{
+		RouteStrength += FMath::Clamp(Pair.Value.DiplomaticMod, 0.0f, 2.0f);
+	}
+
+	RouteStrength /= static_cast<float>(TradeRoutes.Num());
+
+	const float FlowAlpha = FMath::Clamp(
+		DeltaTime * 0.02f * RouteStrength,
+		0.0f,
+		0.25f);
+
+	for (FMarketPrice& Price : *Prices)
+	{
+		Price.SupplyPressure = FMath::Lerp(Price.SupplyPressure, 1.0f, FlowAlpha);
+		Price.DemandPressure = FMath::Lerp(Price.DemandPressure, 1.0f, FlowAlpha * 0.5f);
+	}
 }
 
 // ── Force 4: Price discovery ────────────────────────────────────────
@@ -1189,52 +1254,214 @@ void UWorldEconomySimulation::ProcessCaravanTransaction(
 	RebuildArraysFromLookupMaps();
 }
 
-// ── Phase 3B notification stubs ────────────────────────────────────
+// ── Phase 3B notification handlers ─────────────────────────────────
 
 void UWorldEconomySimulation::NotifyWarStarted(int32 AttackerCivID, int32 DefenderCivID)
 {
-	UE_LOG(LogTemp, Log, TEXT("[EconomySim] War stub (Phase 3B). Attacker=%d Defender=%d"),
-		AttackerCivID, DefenderCivID);
+	auto ApplyWarShock = [this](int32 CivID)
+		{
+			for (const TPair<FGameplayTag, FCurrencyDefinition>& Pair : AllCurrencies)
+			{
+				if (Pair.Value.IssuingCivID == CivID)
+				{
+					QueueTrustDelta(Pair.Key, ETrustComponent::MilitaryStability, -0.20f);
+					QueueTrustDelta(Pair.Key, ETrustComponent::TradeReputation, -0.15f);
+					QueueTrustDelta(Pair.Key, ETrustComponent::PoliticalCohesion, -0.08f);
+					break;
+				}
+			}
+		};
+
+	ApplyWarShock(AttackerCivID);
+	ApplyWarShock(DefenderCivID);
+
+	for (TPair<int32, FTradeFlowState>& Pair : TradeRoutes)
+	{
+		Pair.Value.DiplomaticMod = FMath::Clamp(
+			Pair.Value.DiplomaticMod - 0.25f,
+			0.0f,
+			2.0f);
+	}
+
+	UE_LOG(LogTemp, Log,
+		TEXT("[EconomySim] War started. Attacker=%d Defender=%d"),
+		AttackerCivID,
+		DefenderCivID);
 }
 
 void UWorldEconomySimulation::NotifyWarEnded(int32 WinnerCivID, int32 LoserCivID)
 {
-	UE_LOG(LogTemp, Log, TEXT("[EconomySim] Peace stub (Phase 3B). Winner=%d Loser=%d"),
-		WinnerCivID, LoserCivID);
+	for (const TPair<FGameplayTag, FCurrencyDefinition>& Pair : AllCurrencies)
+	{
+		if (Pair.Value.IssuingCivID == WinnerCivID)
+		{
+			QueueTrustDelta(Pair.Key, ETrustComponent::MilitaryStability, 0.12f);
+			QueueTrustDelta(Pair.Key, ETrustComponent::GovernmentCredibility, 0.08f);
+		}
+		else if (Pair.Value.IssuingCivID == LoserCivID)
+		{
+			QueueTrustDelta(Pair.Key, ETrustComponent::MilitaryStability, -0.12f);
+			QueueTrustDelta(Pair.Key, ETrustComponent::PoliticalCohesion, -0.10f);
+		}
+	}
+
+	for (TPair<int32, FTradeFlowState>& Pair : TradeRoutes)
+	{
+		Pair.Value.DiplomaticMod = FMath::Clamp(
+			Pair.Value.DiplomaticMod + 0.10f,
+			0.0f,
+			2.0f);
+	}
+
+	UE_LOG(LogTemp, Log,
+		TEXT("[EconomySim] War ended. Winner=%d Loser=%d"),
+		WinnerCivID,
+		LoserCivID);
 }
 
 void UWorldEconomySimulation::NotifyPlagueEvent(int32 AffectedSettlementID, float Severity)
 {
-	UE_LOG(LogTemp, Log, TEXT("[EconomySim] Plague stub (Phase 3B). Settlement=%d Severity=%.2f"),
-		AffectedSettlementID, Severity);
+	const float ClampedSeverity = FMath::Clamp(Severity, 0.0f, 1.0f);
+
+	if (TArray<FMarketPrice>* Prices = SettlementPrices.Find(AffectedSettlementID))
+	{
+		for (FMarketPrice& Price : *Prices)
+		{
+			Price.SupplyPressure = FMath::Clamp(
+				Price.SupplyPressure - (0.35f * ClampedSeverity),
+				0.0f,
+				3.0f);
+
+			Price.DemandPressure = FMath::Clamp(
+				Price.DemandPressure + (0.25f * ClampedSeverity),
+				0.0f,
+				3.0f);
+		}
+	}
+
+	UE_LOG(LogTemp, Log,
+		TEXT("[EconomySim] Plague event applied. Settlement=%d Severity=%.2f"),
+		AffectedSettlementID,
+		ClampedSeverity);
 }
 
 void UWorldEconomySimulation::NotifyDisasterEvent(int32 TileID, FGameplayTag DisasterType)
 {
-	UE_LOG(LogTemp, Log, TEXT("[EconomySim] Disaster stub (Phase 3B). Tile=%d Type=%s"),
-		TileID, *DisasterType.ToString());
+	for (TPair<int32, TArray<FMarketPrice>>& SettlementPair : SettlementPrices)
+	{
+		for (FMarketPrice& Price : SettlementPair.Value)
+		{
+			if (Price.ItemTag == TAG_Item_Food || Price.ItemTag == TAG_Item_Wood)
+			{
+				Price.SupplyPressure = FMath::Clamp(
+					Price.SupplyPressure - 0.10f,
+					0.0f,
+					3.0f);
+
+				Price.DemandPressure = FMath::Clamp(
+					Price.DemandPressure + 0.08f,
+					0.0f,
+					3.0f);
+			}
+		}
+	}
+
+	for (const TPair<FGameplayTag, FCurrencyDefinition>& Pair : AllCurrencies)
+	{
+		QueueTrustDelta(Pair.Key, ETrustComponent::BackingStrength, -0.03f);
+	}
+
+	UE_LOG(LogTemp, Log,
+		TEXT("[EconomySim] Disaster event applied. Tile=%d Type=%s"),
+		TileID,
+		*DisasterType.ToString());
 }
 
 void UWorldEconomySimulation::NotifyGovernmentChange(int32 CivID, FGameplayTag NewGovernmentType)
 {
-	UE_LOG(LogTemp, Log, TEXT("[EconomySim] GovChange stub (Phase 3B). Civ=%d Gov=%s"),
-		CivID, *NewGovernmentType.ToString());
+	FGovernmentEconomicProfile NewProfile = CreateGovernmentProfile(NewGovernmentType, nullptr);
+	CivGovernments.Add(CivID, NewProfile);
+
+	for (TPair<FGameplayTag, FCurrencyDefinition>& Pair : AllCurrencies)
+	{
+		if (Pair.Value.IssuingCivID == CivID)
+		{
+			Pair.Value.GovernmentType = NewGovernmentType;
+
+			QueueTrustDelta(Pair.Key, ETrustComponent::PoliticalCohesion, -0.08f);
+			QueueTrustDelta(Pair.Key, ETrustComponent::GovernmentCredibility, 0.05f);
+			break;
+		}
+	}
+
+	RebuildArraysFromLookupMaps();
+
+	UE_LOG(LogTemp, Log,
+		TEXT("[EconomySim] Government changed. Civ=%d Gov=%s"),
+		CivID,
+		*NewGovernmentType.ToString());
 }
 
 void UWorldEconomySimulation::NotifyRouteOpened(int32 RouteID)
 {
-	UE_LOG(LogTemp, Log, TEXT("[EconomySim] RouteOpen stub (Phase 3B). Route=%d"), RouteID);
+	FTradeFlowState& Route = TradeRoutes.FindOrAdd(RouteID);
+	Route.DiplomaticMod = FMath::Max(Route.DiplomaticMod, 1.0f);
+
+	for (const TPair<FGameplayTag, FCurrencyDefinition>& Pair : AllCurrencies)
+	{
+		QueueTrustDelta(Pair.Key, ETrustComponent::TradeReputation, 0.02f);
+	}
+
+	UE_LOG(LogTemp, Log,
+		TEXT("[EconomySim] Trade route opened. Route=%d"),
+		RouteID);
 }
 
 void UWorldEconomySimulation::NotifyRouteClosed(int32 RouteID, const FString& Reason)
 {
-	UE_LOG(LogTemp, Log, TEXT("[EconomySim] RouteClose stub (Phase 3B). Route=%d Reason=%s"),
-		RouteID, *Reason);
+	if (FTradeFlowState* Route = TradeRoutes.Find(RouteID))
+	{
+		Route->DiplomaticMod = 0.0f;
+	}
+
+	for (const TPair<FGameplayTag, FCurrencyDefinition>& Pair : AllCurrencies)
+	{
+		QueueTrustDelta(Pair.Key, ETrustComponent::TradeReputation, -0.04f);
+	}
+
+	UE_LOG(LogTemp, Log,
+		TEXT("[EconomySim] Trade route closed. Route=%d Reason=%s"),
+		RouteID,
+		*Reason);
 }
 
 void UWorldEconomySimulation::NotifyCivCollapse(int32 CollapsingCivID)
 {
-	UE_LOG(LogTemp, Log, TEXT("[EconomySim] CivCollapse stub (Phase 3B). Civ=%d"),
+	for (TPair<FGameplayTag, FCurrencyDefinition>& Pair : AllCurrencies)
+	{
+		if (Pair.Value.IssuingCivID == CollapsingCivID)
+		{
+			QueueTrustDelta(Pair.Key, ETrustComponent::MilitaryStability, -1.0f);
+			QueueTrustDelta(Pair.Key, ETrustComponent::BackingStrength, -1.0f);
+			QueueTrustDelta(Pair.Key, ETrustComponent::TradeReputation, -1.0f);
+			QueueTrustDelta(Pair.Key, ETrustComponent::PoliticalCohesion, -1.0f);
+			QueueTrustDelta(Pair.Key, ETrustComponent::GovernmentCredibility, -1.0f);
+
+			Pair.Value.bInCrisis = true;
+			break;
+		}
+	}
+
+	for (TPair<int32, FTradeFlowState>& Pair : TradeRoutes)
+	{
+		Pair.Value.DiplomaticMod = FMath::Clamp(
+			Pair.Value.DiplomaticMod - 0.20f,
+			0.0f,
+			2.0f);
+	}
+
+	UE_LOG(LogTemp, Log,
+		TEXT("[EconomySim] Civ collapse applied. Civ=%d"),
 		CollapsingCivID);
 }
 
@@ -1305,4 +1532,30 @@ void UWorldEconomySimulation::RestoreEconomyFromSave(const FEconomySaveState& Sa
 	RebuildArraysFromLookupMaps();
 
 	UE_LOG(LogTemp, Log, TEXT("[EconomySim] Economy state restored."));
+}
+
+int32 UWorldEconomySimulation::SetDiplomaticModForSettlementPairs(
+	const TSet<int32>& FromSettlementIDs,
+	const TSet<int32>& ToSettlementIDs,
+	float DiplomaticMod
+)
+{
+	int32 ModifiedCount = 0;
+
+	for (TPair<int32, FTradeFlowState>& Pair : TradeRoutes)
+	{
+		FTradeFlowState& Flow = Pair.Value;
+
+		Flow.DiplomaticMod = DiplomaticMod;
+		++ModifiedCount;
+	}
+
+	UE_LOG(LogTemp, Log,
+		TEXT("[EconomySim] SetDiplomaticModForSettlementPairs applied Mod=%.2f Count=%d From=%d To=%d"),
+		DiplomaticMod,
+		ModifiedCount,
+		FromSettlementIDs.Num(),
+		ToSettlementIDs.Num());
+
+	return ModifiedCount;
 }

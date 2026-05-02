@@ -7,6 +7,8 @@
 #include "Engine/World.h"
 #include "Engine/GameInstance.h"
 #include "Voxel/VoxelWorldManager.h"
+#include "Blueprint/UserWidget.h"
+#include "GameFramework/PlayerController.h"
 
 AWorldGenBootstrapActor::AWorldGenBootstrapActor()
 {
@@ -162,6 +164,32 @@ void AWorldGenBootstrapActor::RunBootstrap()
     {
         UE_LOG(LogTemp, Error, TEXT("[WorldGenBootstrap] VoxelWorldManager not found."));
         return;
+    }
+
+    if (FullMapWidgetClass)
+    {
+        if (APlayerController* PC = World->GetFirstPlayerController())
+        {
+            UUserWidget* FullMapWidget = CreateWidget<UUserWidget>(PC, FullMapWidgetClass);
+
+            if (FullMapWidget)
+            {
+                FullMapWidget->AddToViewport(50);
+
+                PC->bShowMouseCursor = true;
+
+                FInputModeUIOnly InputMode;
+                InputMode.SetWidgetToFocus(FullMapWidget->TakeWidget());
+                InputMode.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock);
+                PC->SetInputMode(InputMode);
+
+                UE_LOG(LogTemp, Log, TEXT("[WorldGenBootstrap] Full map widget created."));
+            }
+        }
+    }
+    else
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[WorldGenBootstrap] FullMapWidgetClass is not set."));
     }
 
     UE_LOG(LogTemp, Log, TEXT("[WorldGenBootstrap] World generation and map initialization complete."));

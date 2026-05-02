@@ -149,12 +149,43 @@ float UNavalSystem::ComputeShipSpeed(
 
 FVector2D UNavalSystem::GetRouteDirection(int32 OriginID, int32 DestID) const
 {
-    (void)OriginID; // ADDED
-    (void)DestID;   // ADDED
+    // ── BF-09 IMPLEMENTATION ─────────────────────────────────────────────
+    // Derive the 2D direction vector from origin to destination settlement
+    // using their world grid positions (FSettlementState::WorldOrigin).
+    // Falls back to (1,0) if settlement data is unavailable.
+    // ─────────────────────────────────────────────────────────────────────
+    UWorld* World = GetWorld();
+    USettlementManager* SM = World ? World->GetSubsystem<USettlementManager>() : nullptr;
 
-    // Phase 3B: derive from world tile positions via UWorldMapSubsystem.
-    // Stub: return a default direction.
-    return FVector2D(1.0f, 0.0f);
+    if (!SM)
+    {
+        return FVector2D(1.0f, 0.0f);
+    }
+
+    const FSettlementState Origin = SM->GetSettlementState(OriginID);
+    const FSettlementState Dest = SM->GetSettlementState(DestID);
+
+    if (Origin.SettlementID < 0 || Dest.SettlementID < 0)
+    {
+        return FVector2D(1.0f, 0.0f);
+    }
+
+    const FVector2D OriginPos(
+        static_cast<float>(Origin.WorldOrigin.X),
+        static_cast<float>(Origin.WorldOrigin.Y));
+    const FVector2D DestPos(
+        static_cast<float>(Dest.WorldOrigin.X),
+        static_cast<float>(Dest.WorldOrigin.Y));
+
+    const FVector2D Direction = DestPos - OriginPos;
+
+    // Guard against zero-length direction (same-tile settlements)
+    if (Direction.SizeSquared() < KINDA_SMALL_NUMBER)
+    {
+        return FVector2D(1.0f, 0.0f);
+    }
+
+    return Direction.GetSafeNormal();
 }
 
 // ── Blockade ───────────────────────────────────────────────────────────────

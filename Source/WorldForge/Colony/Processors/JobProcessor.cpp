@@ -8,6 +8,7 @@
 #include "WorldForgeDataTypes.h"
 #include "WorldForgeTags.h"
 
+
 // ====================================================================
 // MAIN PROCESS STEP
 // Runs once per simulation step per settlement.
@@ -93,6 +94,7 @@ void UJobProcessor::ProcessStep(
             continue;
         }
 
+        
         // ------------------------------------------------------------
         // FALLBACK: no suitable job found
         //
@@ -170,6 +172,7 @@ void UJobProcessor::OnAgentArrived(
 {
     const FGameplayTag JobTag = Agent.CurrentJobTag;
 
+   
     // ------------------------------------------------------------
     // Eat Job
     // ------------------------------------------------------------
@@ -392,6 +395,7 @@ bool UJobProcessor::TryAssignQueuedJob(
     AssignJobToAgent(Agent, *Job, ReservationID, StepNumber, World);
     return true;
 }
+
 
 // ====================================================================
 // JOB ASSIGNMENT IMPLEMENTATION

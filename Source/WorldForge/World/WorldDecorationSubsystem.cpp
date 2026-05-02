@@ -20,6 +20,47 @@ namespace
         return FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Coastal")), false);
     }
 
+    // ── Biome tags that the Step04 Whittaker pass actually produces.
+    static FGameplayTag GetWoodlandBiomeTag()
+    {
+        return FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Woodland")), false);
+    }
+
+    static FGameplayTag GetTaigaBiomeTag()
+    {
+        return FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Taiga")), false);
+    }
+
+    static FGameplayTag GetShrublandBiomeTag()
+    {
+        return FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Shrubland")), false);
+    }
+
+    static FGameplayTag GetHillsBiomeTag()
+    {
+        return FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Hills")), false);
+    }
+
+    static FGameplayTag GetMountainBiomeTag()
+    {
+        return FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Mountain")), false);
+    }
+
+    static FGameplayTag GetAlpineBiomeTag()
+    {
+        return FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Alpine")), false);
+    }
+
+    static FGameplayTag GetCanyonBiomeTag()
+    {
+        return FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Canyon")), false);
+    }
+
+    static FGameplayTag GetSteppeBiomeTag()
+    {
+        return FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Steppe")), false);
+    }
+
     static FGameplayTag GetWoodResourceTag()
     {
         return FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Resource.Wood")), false);
@@ -144,13 +185,18 @@ void UWorldDecorationSubsystem::RegisterDefaultEntries()
     bDefaultsRegistered = true;
     DefaultEntries.Reset();
 
+    // ── Helper lambdas to reduce boilerplate. Each decoration type is
+    // duplicated per biome because FWorldDecorationEntry takes a single
+    // AllowedBiomeTag.  Unique SeedOffsets prevent correlated clustering.
+
+    // ── Trees (2x2, Wood resource) ── Woodland + Taiga
     {
         FWorldDecorationEntry Entry;
-        Entry.EntryName = TEXT("Tree_2x2");
+        Entry.EntryName = TEXT("Tree_Woodland");
         Entry.MeshAsset = TSoftObjectPtr<UStaticMesh>(
             FSoftObjectPath(TEXT("/Script/Engine.StaticMesh'/Game/MedCastle/Mesh/Foliage_Rocks/SM_TreeOakFix.SM_TreeOakFix'"))
         );
-        Entry.AllowedBiomeTag = GetForestBiomeTag();
+        Entry.AllowedBiomeTag = GetWoodlandBiomeTag();
         Entry.ResourceTag = GetWoodResourceTag();
         Entry.Footprint = EWorldDecorationFootprint::TwoByTwo;
         Entry.MaxHeightDeltaVoxels = 1;
@@ -167,11 +213,54 @@ void UWorldDecorationSubsystem::RegisterDefaultEntries()
 
     {
         FWorldDecorationEntry Entry;
-        Entry.EntryName = TEXT("Bush_1x1");
+        Entry.EntryName = TEXT("Tree_Taiga");
+        Entry.MeshAsset = TSoftObjectPtr<UStaticMesh>(
+            FSoftObjectPath(TEXT("/Script/Engine.StaticMesh'/Game/MedCastle/Mesh/Foliage_Rocks/SM_TreeOakFix.SM_TreeOakFix'"))
+        );
+        Entry.AllowedBiomeTag = GetTaigaBiomeTag();
+        Entry.ResourceTag = GetWoodResourceTag();
+        Entry.Footprint = EWorldDecorationFootprint::TwoByTwo;
+        Entry.MaxHeightDeltaVoxels = 1;
+        Entry.BiomeTransitionAllowanceCells = 2;
+        Entry.bRejectWaterOrCoastAtAnchor = true;
+        Entry.bBlocksNavigation = true;
+        Entry.bChoppable = true;
+        Entry.ClusterCellSize = 14;
+        Entry.ClusterChance = 0.35f;
+        Entry.Density = 0.015f;
+        Entry.SeedOffset = 102;
+        DefaultEntries.Add(Entry);
+    }
+
+    // ── Bushes (1x1, Wood resource) ── Woodland + Shrubland + Hills + Steppe
+    {
+        FWorldDecorationEntry Entry;
+        Entry.EntryName = TEXT("Bush_Woodland");
         Entry.MeshAsset = TSoftObjectPtr<UStaticMesh>(
             FSoftObjectPath(TEXT("/Script/Engine.StaticMesh'/Game/A_Surface_Footstep/Geometry/SM_Bush.SM_Bush'"))
         );
-        Entry.AllowedBiomeTag = GetForestBiomeTag();
+        Entry.AllowedBiomeTag = GetWoodlandBiomeTag();
+        Entry.ResourceTag = GetWoodResourceTag();
+        Entry.Footprint = EWorldDecorationFootprint::OneByOne;
+        Entry.MaxHeightDeltaVoxels = 1;
+        Entry.BiomeTransitionAllowanceCells = 2;
+        Entry.bRejectWaterOrCoastAtAnchor = true;
+        Entry.bBlocksNavigation = true;
+        Entry.bChoppable = true;
+        Entry.ClusterCellSize = 12;
+        Entry.ClusterChance = 0.35f;
+        Entry.Density = 0.025f;
+        Entry.SeedOffset = 201;
+        DefaultEntries.Add(Entry);
+    }
+
+    {
+        FWorldDecorationEntry Entry;
+        Entry.EntryName = TEXT("Bush_Shrubland");
+        Entry.MeshAsset = TSoftObjectPtr<UStaticMesh>(
+            FSoftObjectPath(TEXT("/Script/Engine.StaticMesh'/Game/A_Surface_Footstep/Geometry/SM_Bush.SM_Bush'"))
+        );
+        Entry.AllowedBiomeTag = GetShrublandBiomeTag();
         Entry.ResourceTag = GetWoodResourceTag();
         Entry.Footprint = EWorldDecorationFootprint::OneByOne;
         Entry.MaxHeightDeltaVoxels = 1;
@@ -188,11 +277,54 @@ void UWorldDecorationSubsystem::RegisterDefaultEntries()
 
     {
         FWorldDecorationEntry Entry;
-        Entry.EntryName = TEXT("Rock_3x3");
+        Entry.EntryName = TEXT("Bush_Hills");
+        Entry.MeshAsset = TSoftObjectPtr<UStaticMesh>(
+            FSoftObjectPath(TEXT("/Script/Engine.StaticMesh'/Game/A_Surface_Footstep/Geometry/SM_Bush.SM_Bush'"))
+        );
+        Entry.AllowedBiomeTag = GetHillsBiomeTag();
+        Entry.ResourceTag = GetWoodResourceTag();
+        Entry.Footprint = EWorldDecorationFootprint::OneByOne;
+        Entry.MaxHeightDeltaVoxels = 1;
+        Entry.BiomeTransitionAllowanceCells = 2;
+        Entry.bRejectWaterOrCoastAtAnchor = true;
+        Entry.bBlocksNavigation = true;
+        Entry.bChoppable = true;
+        Entry.ClusterCellSize = 12;
+        Entry.ClusterChance = 0.30f;
+        Entry.Density = 0.020f;
+        Entry.SeedOffset = 203;
+        DefaultEntries.Add(Entry);
+    }
+
+    {
+        FWorldDecorationEntry Entry;
+        Entry.EntryName = TEXT("Bush_Steppe");
+        Entry.MeshAsset = TSoftObjectPtr<UStaticMesh>(
+            FSoftObjectPath(TEXT("/Script/Engine.StaticMesh'/Game/A_Surface_Footstep/Geometry/SM_Bush.SM_Bush'"))
+        );
+        Entry.AllowedBiomeTag = GetSteppeBiomeTag();
+        Entry.ResourceTag = GetWoodResourceTag();
+        Entry.Footprint = EWorldDecorationFootprint::OneByOne;
+        Entry.MaxHeightDeltaVoxels = 1;
+        Entry.BiomeTransitionAllowanceCells = 2;
+        Entry.bRejectWaterOrCoastAtAnchor = true;
+        Entry.bBlocksNavigation = true;
+        Entry.bChoppable = true;
+        Entry.ClusterCellSize = 12;
+        Entry.ClusterChance = 0.25f;
+        Entry.Density = 0.015f;
+        Entry.SeedOffset = 204;
+        DefaultEntries.Add(Entry);
+    }
+
+    // ── Rocks (3x3, Stone resource) ── Hills + Mountain + Alpine + Canyon
+    {
+        FWorldDecorationEntry Entry;
+        Entry.EntryName = TEXT("Rock_Hills");
         Entry.MeshAsset = TSoftObjectPtr<UStaticMesh>(
             FSoftObjectPath(TEXT("/Script/Engine.StaticMesh'/Game/MedCastle/Mesh/Foliage_Rocks/SM_Boulder6.SM_Boulder6'"))
         );
-        Entry.AllowedBiomeTag = GetForestBiomeTag();
+        Entry.AllowedBiomeTag = GetHillsBiomeTag();
         Entry.ResourceTag = GetStoneResourceTag();
         Entry.Footprint = EWorldDecorationFootprint::ThreeByThree;
         Entry.MaxHeightDeltaVoxels = 1;
@@ -203,7 +335,70 @@ void UWorldDecorationSubsystem::RegisterDefaultEntries()
         Entry.ClusterCellSize = 16;
         Entry.ClusterChance = 0.30f;
         Entry.Density = 0.008f;
+        Entry.SeedOffset = 301;
+        DefaultEntries.Add(Entry);
+    }
+
+    {
+        FWorldDecorationEntry Entry;
+        Entry.EntryName = TEXT("Rock_Mountain");
+        Entry.MeshAsset = TSoftObjectPtr<UStaticMesh>(
+            FSoftObjectPath(TEXT("/Script/Engine.StaticMesh'/Game/MedCastle/Mesh/Foliage_Rocks/SM_Boulder6.SM_Boulder6'"))
+        );
+        Entry.AllowedBiomeTag = GetMountainBiomeTag();
+        Entry.ResourceTag = GetStoneResourceTag();
+        Entry.Footprint = EWorldDecorationFootprint::ThreeByThree;
+        Entry.MaxHeightDeltaVoxels = 2;
+        Entry.BiomeTransitionAllowanceCells = 2;
+        Entry.bRejectWaterOrCoastAtAnchor = true;
+        Entry.bBlocksNavigation = true;
+        Entry.bChoppable = true;
+        Entry.ClusterCellSize = 16;
+        Entry.ClusterChance = 0.35f;
+        Entry.Density = 0.010f;
+        Entry.SeedOffset = 302;
+        DefaultEntries.Add(Entry);
+    }
+
+    {
+        FWorldDecorationEntry Entry;
+        Entry.EntryName = TEXT("Rock_Alpine");
+        Entry.MeshAsset = TSoftObjectPtr<UStaticMesh>(
+            FSoftObjectPath(TEXT("/Script/Engine.StaticMesh'/Game/MedCastle/Mesh/Foliage_Rocks/SM_Boulder6.SM_Boulder6'"))
+        );
+        Entry.AllowedBiomeTag = GetAlpineBiomeTag();
+        Entry.ResourceTag = GetStoneResourceTag();
+        Entry.Footprint = EWorldDecorationFootprint::ThreeByThree;
+        Entry.MaxHeightDeltaVoxels = 2;
+        Entry.BiomeTransitionAllowanceCells = 2;
+        Entry.bRejectWaterOrCoastAtAnchor = true;
+        Entry.bBlocksNavigation = true;
+        Entry.bChoppable = true;
+        Entry.ClusterCellSize = 16;
+        Entry.ClusterChance = 0.30f;
+        Entry.Density = 0.008f;
         Entry.SeedOffset = 303;
+        DefaultEntries.Add(Entry);
+    }
+
+    {
+        FWorldDecorationEntry Entry;
+        Entry.EntryName = TEXT("Rock_Canyon");
+        Entry.MeshAsset = TSoftObjectPtr<UStaticMesh>(
+            FSoftObjectPath(TEXT("/Script/Engine.StaticMesh'/Game/MedCastle/Mesh/Foliage_Rocks/SM_Boulder6.SM_Boulder6'"))
+        );
+        Entry.AllowedBiomeTag = GetCanyonBiomeTag();
+        Entry.ResourceTag = GetStoneResourceTag();
+        Entry.Footprint = EWorldDecorationFootprint::ThreeByThree;
+        Entry.MaxHeightDeltaVoxels = 2;
+        Entry.BiomeTransitionAllowanceCells = 2;
+        Entry.bRejectWaterOrCoastAtAnchor = true;
+        Entry.bBlocksNavigation = true;
+        Entry.bChoppable = true;
+        Entry.ClusterCellSize = 16;
+        Entry.ClusterChance = 0.30f;
+        Entry.Density = 0.008f;
+        Entry.SeedOffset = 304;
         DefaultEntries.Add(Entry);
     }
 }
@@ -364,6 +559,13 @@ bool UWorldDecorationSubsystem::TryEvaluatePlacement(
     float MinZ = TNumericLimits<float>::Max();
     float MaxZ = TNumericLimits<float>::Lowest();
 
+    // ── FIX: Use TryGetSurfaceWorldLocation (terrain-cell-aware) instead of
+    // GridToWorld (voxel-grid-aware).  GridToWorld multiplies by VoxelSize
+    // (cell * 100), but the input here is a terrain grid cell (0–255) that
+    // must be converted via TerrainCellToWorld (cell * ChunkWorldSize=3200
+    // centered around the grid midpoint).  Using GridToWorld placed every
+    // candidate at the wrong world position, causing all round-trip checks
+    // to fail and generating 0 decoration actors.
     for (const FIntPoint& Offset : Offsets)
     {
         const FIntPoint WorldCell = AnchorCell + Offset;
@@ -373,14 +575,9 @@ bool UWorldDecorationSubsystem::TryEvaluatePlacement(
             return false;
         }
 
-        const FVector BaseWorldLocation = VoxelManager->GridToWorld(WorldCell, 0);
-
+        // Terrain-cell → world with surface height included.
         FVector CellWorldLocation = FVector::ZeroVector;
-        if (!UWorldForgeTerrainSnapUtility::TryGetTerrainSnapLocation(
-            World,
-            BaseWorldLocation,
-            CellWorldLocation,
-            0.0f))
+        if (!VoxelManager->TryGetSurfaceWorldLocation(WorldCell, CellWorldLocation, 0.0f))
         {
             return false;
         }
@@ -417,14 +614,9 @@ bool UWorldDecorationSubsystem::TryEvaluatePlacement(
         return false;
     }
 
-    const FVector AnchorBaseWorldLocation = VoxelManager->GridToWorld(AnchorCell, 0);
-
+    // ── FIX: Use TryGetSurfaceWorldLocation for the anchor too.
     FVector AnchorWorldLocation = FVector::ZeroVector;
-    if (!UWorldForgeTerrainSnapUtility::TryGetTerrainSnapLocation(
-        World,
-        AnchorBaseWorldLocation,
-        AnchorWorldLocation,
-        0.0f))
+    if (!VoxelManager->TryGetSurfaceWorldLocation(AnchorCell, AnchorWorldLocation, 0.0f))
     {
         return false;
     }
@@ -506,6 +698,31 @@ bool UWorldDecorationSubsystem::GenerateDecorations(
 
     UNavigationContext* NavigationContext = World->GetSubsystem<UNavigationContext>();
 
+    // ── Diagnostic: log biome tag distribution so we can see what tags
+    // the pipeline actually assigned.  If ForestCount is 0 here, no
+    // Forest-gated decoration entries will ever pass.
+    {
+        TMap<FString, int32> BiomeCounts;
+        int32 InvalidBiomeCount = 0;
+        for (const FWorldTileData& Tile : WorldTiles)
+        {
+            if (Tile.BiomeType.IsValid())
+            {
+                BiomeCounts.FindOrAdd(Tile.BiomeType.ToString()) += 1;
+            }
+            else
+            {
+                ++InvalidBiomeCount;
+            }
+        }
+
+        UE_LOG(LogTemp, Log, TEXT("[WorldDecoration] Biome distribution across %d tiles (%d have no biome tag):"), WorldTiles.Num(), InvalidBiomeCount);
+        for (const auto& Pair : BiomeCounts)
+        {
+            UE_LOG(LogTemp, Log, TEXT("[WorldDecoration]   %s = %d"), *Pair.Key, Pair.Value);
+        }
+    }
+
     TSet<FIntPoint> OccupiedCells;
 
     for (const FWorldDecorationEntry& Entry : DefaultEntries)
@@ -532,6 +749,13 @@ bool UWorldDecorationSubsystem::GenerateDecorations(
             continue;
         }
 
+        // ── Diagnostic counters: pinpoint which filter stage is killing candidates.
+        int32 DiagPassedTerrain = 0;
+        int32 DiagPassedDistribution = 0;
+        int32 DiagPassedPlacement = 0;
+        int32 DiagPassedConflict = 0;
+        int32 DiagSpawned = 0;
+
         for (int32 Index = 0; Index < WorldTiles.Num(); ++Index)
         {
             const FIntPoint AnchorCell(Index % GridWidth, Index / GridWidth);
@@ -540,11 +764,13 @@ bool UWorldDecorationSubsystem::GenerateDecorations(
             {
                 continue;
             }
+            ++DiagPassedTerrain;
 
             if (!PassesDistributionRules(AnchorCell, WorldSeed, Entry))
             {
                 continue;
             }
+            ++DiagPassedDistribution;
 
             FVector SpawnWorldLocation = FVector::ZeroVector;
             TArray<FIntPoint> FootprintCells;
@@ -552,6 +778,7 @@ bool UWorldDecorationSubsystem::GenerateDecorations(
             {
                 continue;
             }
+            ++DiagPassedPlacement;
 
             bool bConflicts = false;
             for (const FIntPoint& Cell : FootprintCells)
@@ -567,6 +794,7 @@ bool UWorldDecorationSubsystem::GenerateDecorations(
             {
                 continue;
             }
+            ++DiagPassedConflict;
 
             FActorSpawnParameters SpawnParams;
             SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
@@ -636,6 +864,7 @@ bool UWorldDecorationSubsystem::GenerateDecorations(
             GeneratedRecords.Add(Record);
 
             SpawnedActors.Add(SpawnedActor);
+            ++DiagSpawned;
 
             for (const FIntPoint& Cell : FootprintCells)
             {
@@ -647,6 +876,22 @@ bool UWorldDecorationSubsystem::GenerateDecorations(
                 ApplyNavigationBlocking(NavigationContext, FootprintCells);
             }
         }
+
+        // ── Diagnostic summary per decoration entry. If DiagPassedTerrain is 0,
+        // the biome tag on your tiles does not match Entry.AllowedBiomeTag.
+        UE_LOG(
+            LogTemp,
+            Log,
+            TEXT("[WorldDecoration] Entry='%s' Biome=%s | Candidates=%d PassedTerrain=%d PassedDistrib=%d PassedPlacement=%d PassedConflict=%d Spawned=%d"),
+            *Entry.EntryName,
+            Entry.AllowedBiomeTag.IsValid() ? *Entry.AllowedBiomeTag.ToString() : TEXT("None"),
+            WorldTiles.Num(),
+            DiagPassedTerrain,
+            DiagPassedDistribution,
+            DiagPassedPlacement,
+            DiagPassedConflict,
+            DiagSpawned
+        );
     }
 
     UE_LOG(LogTemp, Log, TEXT("[WorldDecoration] Generated %d world decoration actors."), SpawnedActors.Num());

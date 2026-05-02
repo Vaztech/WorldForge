@@ -1,4 +1,4 @@
-// WorldHistoryTypes.h
+﻿// WorldHistoryTypes.h
 
 #pragma once
 
@@ -20,6 +20,7 @@ enum class EHistoricalRole : uint8
     Rebel
 };
 
+// Safe to keep this now because WorldLoreTypes uses EWorldForgeLoreLegendType
 UENUM(BlueprintType)
 enum class ELegendType : uint8
 {

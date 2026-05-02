@@ -1,4 +1,4 @@
-#include "BuildModeWidget.h"
+﻿#include "BuildModeWidget.h"
 #include "Player/BuildModeManager.h"
 #include "WorldForgeDataRegistry.h"
 #include "Engine/GameInstance.h"
@@ -6,7 +6,10 @@
 
 UBuildModeManager* UBuildModeWidget::GetManager()
 {
-	if (CachedManager) return CachedManager;
+	if (CachedManager)
+	{
+		return CachedManager;
+	}
 
 	UWorld* W = GetWorld();
 	if (W)
@@ -32,7 +35,10 @@ void UBuildModeWidget::NativeConstruct()
 	Super::NativeConstruct();
 
 	UBuildModeManager* Mgr = GetManager();
-	if (!Mgr) return;
+	if (!Mgr)
+	{
+		return;
+	}
 
 	Mgr->OnBuildModeChanged.AddDynamic(this, &UBuildModeWidget::OnBuildModeChanged);
 	Mgr->OnCellCountChanged.AddDynamic(this, &UBuildModeWidget::OnCellCountChanged);
@@ -43,7 +49,11 @@ void UBuildModeWidget::NativeConstruct()
 	// Push initial state so the widget has valid data immediately on show.
 	OnBuildModeChanged(Mgr->GetCurrentMode());
 	OnCellCountChanged(Mgr->GetSelectedCellCount());
-	OnSelectionChanged(Mgr->GetCurrentMode(), Mgr->GetSelectedBuildingTag(), Mgr->GetSelectedMaterialTag());
+	OnSelectionChanged(
+		Mgr->GetCurrentMode(),
+		Mgr->GetSelectedBuildingTag(),
+		Mgr->GetSelectedMaterialTag()
+	);
 
 	if (Mgr->HasValidHoveredCell())
 	{
@@ -69,6 +79,7 @@ void UBuildModeWidget::NativeDestruct()
 	}
 
 	CachedManager = nullptr;
+
 	Super::NativeDestruct();
 }
 
@@ -79,7 +90,10 @@ void UBuildModeWidget::NativeDestruct()
 void UBuildModeWidget::SelectPrefabBuilding(FGameplayTag BuildingTag)
 {
 	UBuildModeManager* Mgr = GetManager();
-	if (!Mgr) return;
+	if (!Mgr)
+	{
+		return;
+	}
 
 	Mgr->EnterPrefabMode(BuildingTag);
 
@@ -91,7 +105,10 @@ void UBuildModeWidget::SelectPrefabBuilding(FGameplayTag BuildingTag)
 void UBuildModeWidget::SelectMaterial(FGameplayTag MaterialTag)
 {
 	UBuildModeManager* Mgr = GetManager();
-	if (!Mgr) return;
+	if (!Mgr)
+	{
+		return;
+	}
 
 	if (Mgr->GetCurrentMode() == EBuildMode::CustomDraw)
 	{
@@ -120,10 +137,30 @@ void UBuildModeWidget::SwitchToCustomDrawMode()
 	UE_LOG(LogTemp, Log, TEXT("[BuildModeWidget] Switched to custom draw mode."));
 }
 
+
+void UBuildModeWidget::SwitchToDigMode()
+{
+	UBuildModeManager* Mgr = GetManager();
+	if (!Mgr)
+	{
+		return;
+	}
+
+	Mgr->EnterDigMode();
+
+	// Dig has no material/building cost in Phase 1.
+	OnStockpileChanged(FGameplayTag::EmptyTag, 0);
+
+	UE_LOG(LogTemp, Log, TEXT("[BuildModeWidget] Switched to dig mode."));
+}
+
 void UBuildModeWidget::CancelBuild()
 {
 	UBuildModeManager* Mgr = GetManager();
-	if (!Mgr) return;
+	if (!Mgr)
+	{
+		return;
+	}
 
 	Mgr->HandleCancel();
 }
@@ -131,7 +168,10 @@ void UBuildModeWidget::CancelBuild()
 void UBuildModeWidget::ConfirmBuild()
 {
 	UBuildModeManager* Mgr = GetManager();
-	if (!Mgr) return;
+	if (!Mgr)
+	{
+		return;
+	}
 
 	Mgr->HandleConfirm();
 }
@@ -226,13 +266,17 @@ FText UBuildModeWidget::GetMaterialDisplayName(FGameplayTag MaterialTag) const
 FText UBuildModeWidget::GetSelectedBuildingDisplayName() const
 {
 	const UBuildModeManager* Mgr = const_cast<UBuildModeWidget*>(this)->GetManager();
-	return Mgr ? GetBuildingDisplayName(Mgr->GetSelectedBuildingTag()) : FText::FromString(TEXT("None"));
+	return Mgr
+		? GetBuildingDisplayName(Mgr->GetSelectedBuildingTag())
+		: FText::FromString(TEXT("None"));
 }
 
 FText UBuildModeWidget::GetSelectedMaterialDisplayName() const
 {
 	const UBuildModeManager* Mgr = const_cast<UBuildModeWidget*>(this)->GetManager();
-	return Mgr ? GetMaterialDisplayName(Mgr->GetSelectedMaterialTag()) : FText::FromString(TEXT("None"));
+	return Mgr
+		? GetMaterialDisplayName(Mgr->GetSelectedMaterialTag())
+		: FText::FromString(TEXT("None"));
 }
 
 FText UBuildModeWidget::GetCurrentCostLabel() const
@@ -241,6 +285,11 @@ FText UBuildModeWidget::GetCurrentCostLabel() const
 	if (!Mgr)
 	{
 		return FText::FromString(TEXT("Cost: N/A"));
+	}
+
+	if (Mgr->GetCurrentToolMode() == EBuildToolMode::Dig)
+	{
+		return FText::FromString(TEXT("Cost: None"));
 	}
 
 	const int32 RequiredUnits = Mgr->GetCurrentRequiredUnits();
@@ -268,6 +317,11 @@ FText UBuildModeWidget::GetCurrentAvailabilityLabel() const
 		return FText::FromString(TEXT("Available: N/A"));
 	}
 
+	if (Mgr->GetCurrentToolMode() == EBuildToolMode::Dig)
+	{
+		return FText::FromString(TEXT("Available: N/A"));
+	}
+
 	const int32 AvailableUnits = Mgr->GetCurrentAvailableUnits();
 	const int32 RequiredUnits = Mgr->GetCurrentRequiredUnits();
 
@@ -281,11 +335,69 @@ FText UBuildModeWidget::GetCurrentAvailabilityLabel() const
 bool UBuildModeWidget::GetCanAffordCurrentSelection() const
 {
 	const UBuildModeManager* Mgr = const_cast<UBuildModeWidget*>(this)->GetManager();
-	return Mgr ? Mgr->CanAffordCurrentSelection() : false;
+	if (!Mgr)
+	{
+		return false;
+	}
+
+	if (Mgr->GetCurrentToolMode() == EBuildToolMode::Dig)
+	{
+		return true;
+	}
+
+	return Mgr->CanAffordCurrentSelection();
 }
 
 int32 UBuildModeWidget::GetCurrentCellCount() const
 {
 	const UBuildModeManager* Mgr = const_cast<UBuildModeWidget*>(this)->GetManager();
 	return Mgr ? Mgr->GetSelectedCellCount() : 0;
+}
+
+EBuildToolMode UBuildModeWidget::GetCurrentToolMode() const
+{
+	const UBuildModeManager* Mgr = const_cast<UBuildModeWidget*>(this)->GetManager();
+	return Mgr ? Mgr->GetCurrentToolMode() : EBuildToolMode::None;
+}
+
+FText UBuildModeWidget::GetCurrentToolModeLabel() const
+{
+	const UBuildModeManager* Mgr = const_cast<UBuildModeWidget*>(this)->GetManager();
+	if (!Mgr)
+	{
+		return FText::FromString(TEXT("Mode: None"));
+	}
+
+	switch (Mgr->GetCurrentToolMode())
+	{
+	case EBuildToolMode::Place:
+		switch (Mgr->GetCurrentMode())
+		{
+		case EBuildMode::Prefab:
+			return FText::FromString(TEXT("Mode: Prefab"));
+		case EBuildMode::CustomDraw:
+			return FText::FromString(TEXT("Mode: Free Build"));
+		default:
+			return FText::FromString(TEXT("Mode: Place"));
+		}
+
+	case EBuildToolMode::Remove:
+		return FText::FromString(TEXT("Mode: Remove"));
+
+	case EBuildToolMode::Dig:
+		return FText::FromString(TEXT("Mode: Dig"));
+
+	case EBuildToolMode::Mine:
+		return FText::FromString(TEXT("Mode: Mine"));
+
+	case EBuildToolMode::None:
+	default:
+		return FText::FromString(TEXT("Mode: None"));
+	}
+}
+
+bool UBuildModeWidget::IsDigModeActive() const
+{
+	const UBuildModeManager* Mgr = const_cast<UBuildModeWidget*>(this)->GetManager();
+	return Mgr && Mgr->GetCurrentToolMode() == EBuildToolMode::Dig;
 }

@@ -86,11 +86,24 @@ protected:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|MiniMap|Debug")
     bool bShowDebugStats = true;
 
+    // v4.0: Show camera Z altitude and terrain info
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|MiniMap")
+    bool bShowZLevel = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|MiniMap")
+    bool bShowTerrainInfo = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|MiniMap")
+    FLinearColor ZLevelColor = FLinearColor(0.9f, 0.9f, 0.2f, 1.0f);
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|MiniMap")
+    FLinearColor TerrainInfoColor = FLinearColor(0.7f, 0.8f, 1.0f, 1.0f);
+
 private:
     FVector2D WorldCellToMiniMap(const FIntPoint& WorldCell) const;
     bool IsWorldCellInBounds(const FIntPoint& WorldCell) const;
 
-    // 🔥 NEW: Clamp to minimap bounds (for edge indicators)
+    // Clamp to minimap bounds (for edge indicators)
     FVector2D ClampToMiniMapBounds(const FVector2D& Point) const;
 
     void DrawMiniMapBackground();
@@ -99,6 +112,8 @@ private:
     void DrawPawnDots(const USettlementManager* SettlementManager, const UProcessorManager* ProcessorManager);
     void DrawCameraLocation(const UVoxelWorldManager* VoxelWorldManager);
     void DrawDebugStats(const UProcessorManager* ProcessorManager, const UVoxelWorldManager* VoxelWorldManager);
+    void DrawZLevelIndicator(const UVoxelWorldManager* VoxelWorldManager);
+    void DrawTerrainInfo(const UVoxelWorldManager* VoxelWorldManager);
 
     FLinearColor GetDotColorForSettlement(int32 SettlementID) const;
 };

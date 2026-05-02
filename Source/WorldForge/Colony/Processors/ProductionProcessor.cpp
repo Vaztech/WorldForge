@@ -8,8 +8,6 @@
 
 // ====================================================================
 // INTERNAL FAILURE HANDLER
-// Safely releases an agent and clears any stale assigned job if a
-// production task cannot start or cannot proceed.
 // ====================================================================
 void UProductionProcessor::FailTaskAndReleaseAgent(
     FActiveProductionTask& Task,
@@ -34,13 +32,6 @@ void UProductionProcessor::FailTaskAndReleaseAgent(
 
 // ====================================================================
 // MAIN PROCESS STEP
-// Runs once per simulation step per settlement.
-// Responsible for:
-// 1. Advancing active production tasks for working agents
-// 2. Consuming required inputs once at task start
-// 3. Applying skill-scaled progress
-// 4. Completing tasks and depositing outputs
-// 5. Pruning finished tasks
 // ====================================================================
 void UProductionProcessor::ProcessStep(
     int32 StepNumber,
@@ -63,22 +54,16 @@ void UProductionProcessor::ProcessStep(
 
     for (FAgentData& Agent : Agents)
     {
-        // Only process agents in this settlement
         if (Agent.SettlementID != SettlementID)
         {
             continue;
         }
 
-        // Skip dead / incapacitated agents
         if (Agent.State == EAgentState::Dead || Agent.State == EAgentState::Incapacitated)
         {
             continue;
         }
 
-        // CHANGE MADE:
-        // Allow Carrying to persist for one full simulation step so the visual system
-        // has time to read Agent.State == Carrying and play the Carry animation.
-        // On the next production tick, we safely return the agent to Idle.
         if (Agent.State == EAgentState::Carrying)
         {
             Agent.State = EAgentState::Idle;
@@ -92,13 +77,11 @@ void UProductionProcessor::ProcessStep(
             continue;
         }
 
-        // Only process agents who are actively working
         if (Agent.State != EAgentState::Working)
         {
             continue;
         }
 
-        // Find this agent's active production task
         FActiveProductionTask* Task = nullptr;
         for (FActiveProductionTask& T : ActiveTasks)
         {
@@ -114,9 +97,6 @@ void UProductionProcessor::ProcessStep(
             continue;
         }
 
-        // ------------------------------------------------------------
-        // Initialize recipe / consume inputs only once
-        // ------------------------------------------------------------
         if (!Task->bInputsReserved && Task->Progress <= 0.f)
         {
             TMap<FGameplayTag, int32> Inputs;
@@ -138,7 +118,6 @@ void UProductionProcessor::ProcessStep(
             Task->RequiredProgress = RequiredProgress;
             Task->OutputItems = Outputs;
 
-            // Check stockpile availability before consuming
             bool bAllAvailable = true;
             for (const TPair<FGameplayTag, int32>& Input : Inputs)
             {
@@ -162,7 +141,6 @@ void UProductionProcessor::ProcessStep(
                 continue;
             }
 
-            // Consume all required inputs atomically
             for (const TPair<FGameplayTag, int32>& Input : Inputs)
             {
                 SM->ConsumeFromStockpile(SettlementID, Input.Key, Input.Value);
@@ -172,25 +150,24 @@ void UProductionProcessor::ProcessStep(
             Task->bInputsReserved = true;
         }
 
-        // ------------------------------------------------------------
-        // Advance task progress using skill modifier
-        // ------------------------------------------------------------
+        // Health/injury now directly affects work speed.
         const float SkillMod = GetSkillModifier(Agent, Task->JobTag);
-        Task->Progress += BaseProgressPerStep * SkillMod;
+        const float EfficiencyMod = FMath::Clamp(Agent.CurrentEfficiency, 0.0f, 1.5f);
+        const float FinalWorkMod = SkillMod * EfficiencyMod;
 
-        // ------------------------------------------------------------
-        // Complete task when enough work has been accumulated
-        // ------------------------------------------------------------
+        if (FinalWorkMod <= 0.0f)
+        {
+            continue;
+        }
+
+        Task->Progress += BaseProgressPerStep * FinalWorkMod;
+
         if (Task->Progress >= Task->RequiredProgress)
         {
             CompleteTask(*Task, Agent, StepNumber, World);
         }
     }
 
-    // ------------------------------------------------------------
-    // Cleanup finished tasks
-    // Phase 2 default: prune immediately
-    // ------------------------------------------------------------
     if (CompletedTaskRetentionSteps == 0)
     {
         ActiveTasks.RemoveAll([](const FActiveProductionTask& T)
@@ -202,8 +179,6 @@ void UProductionProcessor::ProcessStep(
 
 // ====================================================================
 // START PRODUCTION TASK
-// Creates a new production task for the given agent/job/building context.
-// Returns TaskID on success or -1 if the agent already has an active task.
 // ====================================================================
 int32 UProductionProcessor::StartProductionTask(
     int32 AgentID,
@@ -239,7 +214,6 @@ int32 UProductionProcessor::StartProductionTask(
 
 // ====================================================================
 // HAS ACTIVE TASK
-// Returns true if the given agent already owns an unfinished task.
 // ====================================================================
 bool UProductionProcessor::HasActiveTask(int32 AgentID) const
 {
@@ -256,7 +230,6 @@ bool UProductionProcessor::HasActiveTask(int32 AgentID) const
 
 // ====================================================================
 // GET TASK
-// Returns the agent's current unfinished task, or nullptr if none exists.
 // ====================================================================
 const FActiveProductionTask* UProductionProcessor::GetTask(int32 AgentID) const
 {
@@ -273,8 +246,6 @@ const FActiveProductionTask* UProductionProcessor::GetTask(int32 AgentID) const
 
 // ====================================================================
 // GET RECIPE
-// Maps job tags to required inputs, outputs, and work duration.
-// Phase 2 uses a simple hardcoded recipe table.
 // ====================================================================
 bool UProductionProcessor::GetRecipe(
     FGameplayTag JobTag,
@@ -304,8 +275,6 @@ bool UProductionProcessor::GetRecipe(
 
     if (JobTag == TAG_Job_Harvest_Food)
     {
-        // Reduced from 5 to 1 to avoid runaway food stockpiles and allow
-        // demand pressure to affect market prices.
         OutOutputs.Add(TAG_Item_Food, 1);
         OutRequiredProgress = 16.f;
         return true;
@@ -313,7 +282,6 @@ bool UProductionProcessor::GetRecipe(
 
     if (JobTag == TAG_Job_Harvest_Wood)
     {
-        // Reduced from 4 to 1 to slow raw material flooding.
         OutOutputs.Add(TAG_Item_Wood, 1);
         OutRequiredProgress = 14.f;
         return true;
@@ -321,7 +289,6 @@ bool UProductionProcessor::GetRecipe(
 
     if (JobTag == TAG_Job_Harvest_Stone)
     {
-        // Reduced from 4 to 1 and kept slightly slower than wood.
         OutOutputs.Add(TAG_Item_Stone, 1);
         OutRequiredProgress = 18.f;
         return true;
@@ -329,8 +296,6 @@ bool UProductionProcessor::GetRecipe(
 
     if (JobTag == TAG_Job_Build)
     {
-        // Build is included for pipeline completeness.
-        // ConstructionProcessor may own the deeper building logic later.
         OutRequiredProgress = 10.f;
         return true;
     }
@@ -340,10 +305,6 @@ bool UProductionProcessor::GetRecipe(
 
 // ====================================================================
 // GET SKILL MODIFIER
-// Converts the agent's relevant skill into a production speed multiplier.
-// Default range:
-// - no skill tag: 1.0x
-// - known skill: 0.5x to 2.0x
 // ====================================================================
 float UProductionProcessor::GetSkillModifier(
     const FAgentData& Agent,
@@ -389,10 +350,6 @@ float UProductionProcessor::GetSkillModifier(
 
 // ====================================================================
 // COMPLETE TASK
-// Finalizes a production task:
-// - deposits outputs to stockpile
-// - dispatches completion event
-// - sets Carrying state briefly so visuals can play Carry
 // ====================================================================
 void UProductionProcessor::CompleteTask(
     FActiveProductionTask& Task,
@@ -403,7 +360,6 @@ void UProductionProcessor::CompleteTask(
     USettlementManager* SM = World ? World->GetSubsystem<USettlementManager>() : nullptr;
     UEventBus* Bus = World ? World->GetSubsystem<UEventBus>() : nullptr;
 
-    // Deposit outputs into settlement stockpile
     if (SM)
     {
         for (const TPair<FGameplayTag, int32>& Output : Task.OutputItems)
@@ -420,7 +376,6 @@ void UProductionProcessor::CompleteTask(
         }
     }
 
-    // Dispatch production complete event
     if (Bus)
     {
         FSimulationEvent Event;
@@ -432,23 +387,13 @@ void UProductionProcessor::CompleteTask(
         Bus->Dispatch(Event);
     }
 
-    // Mark task complete
     Task.bComplete = true;
 
-    // CHANGE MADE:
-    // Previously the agent went straight to Idle here, which meant the visual
-    // system never saw EAgentState::Carrying and could never play the Carry
-    // animation. We now enter Carrying for one simulation step, and ProcessStep()
-    // will return the agent to Idle on the next production tick.
     Agent.State = EAgentState::Carrying;
-
-    // Clear stale job/task context so the agent is free to resume normal flow
-    // after the brief Carrying visual state.
     Agent.CurrentJobTag = FGameplayTag();
     Agent.CurrentJobBuildingTag = FGameplayTag();
     Agent.ActiveReservationID = -1;
 
-    // Debug log to confirm the Carrying state is actually being entered.
     UE_LOG(
         LogTemp,
         Warning,
@@ -465,8 +410,6 @@ void UProductionProcessor::CompleteTask(
 
 // ====================================================================
 // RESTORE FROM SAVE
-// Restores the task list and rebuilds NextTaskID so future tasks get
-// unique IDs after load.
 // ====================================================================
 void UProductionProcessor::RestoreFromSave(const TArray<FActiveProductionTask>& Saved)
 {
