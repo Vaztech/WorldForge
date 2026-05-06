@@ -87,6 +87,22 @@ struct FFarmTileRecord
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
     float WaterLevel = 0.0f;
 
+    /** True once a colonist has prepared/tilled this soil tile. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    bool bSoilPrepared = false;
+
+    /** True while a Prep Soil job is already queued/assigned/in progress. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    bool bPrepSoilJobPending = false;
+
+    /** Last sim step a Prep Soil job was posted for this tile. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    int32 LastPrepSoilJobStep = INDEX_NONE;
+
+    /** Sim step when this tile became prepared soil. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    int32 SoilPreparedStep = INDEX_NONE;
+
     /** True once a colonist has planted a crop BP on this tile. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
     bool bPlanted = false;
@@ -240,6 +256,10 @@ struct FWorldForgeFarmZone
                 Tile.TilePos = Origin + FIntPoint(X, Y);
                 Tile.GrowthStage = ECropGrowthStage::None;
                 Tile.WaterLevel = 0.0f;
+                Tile.bSoilPrepared = false;
+                Tile.bPrepSoilJobPending = false;
+                Tile.LastPrepSoilJobStep = INDEX_NONE;
+                Tile.SoilPreparedStep = INDEX_NONE;
                 Tile.bPlanted = false;
                 Tile.bPlantJobPending = false;
                 Tile.bWaterJobPending = false;

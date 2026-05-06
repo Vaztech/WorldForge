@@ -153,6 +153,15 @@ void UProductionProcessor::ProcessStep(
             }
 
             Task->bInputsReserved = true;
+
+            UE_LOG(
+                LogTemp,
+                Verbose,
+                TEXT("[ProductionProcessor] Task initialized. TaskID=%d Agent=%d Job=%s RequiredProgress=%.2f"),
+                Task->TaskID,
+                Agent.AgentID,
+                *Task->JobTag.ToString(),
+                Task->RequiredProgress);
         }
 
         const float SkillMod = GetSkillModifier(Agent, Task->JobTag);
@@ -340,34 +349,44 @@ bool UProductionProcessor::GetRecipe(
     }
 
     // Farming jobs are completed through FarmingSubsystem.
-    // These recipes only define work time.
+    // These recipes only define work time. Skill/tool modifiers apply in ProcessStep().
+    if (JobTag == TAG_Job_Farm_PrepSoil)
+    {
+        // Soil prep should feel like real labor per tile.
+        OutRequiredProgress = 24.0f;
+        return true;
+    }
+
     if (JobTag == TAG_Job_Farm_Plant)
     {
-        OutRequiredProgress = 8.0f;
+        // Planting is shorter than soil prep but still not instant.
+        OutRequiredProgress = 14.0f;
         return true;
     }
 
     if (JobTag == TAG_Job_Farm_Water)
     {
-        OutRequiredProgress = 4.0f;
+        // Watering is quick but still a work action.
+        OutRequiredProgress = 8.0f;
         return true;
     }
 
     if (JobTag == TAG_Job_Farm_Harvest)
     {
-        OutRequiredProgress = 12.0f;
+        // Harvesting should take meaningful time per crop tile.
+        OutRequiredProgress = 22.0f;
         return true;
     }
 
     if (JobTag == TAG_Job_Farm_Clear)
     {
-        OutRequiredProgress = 6.0f;
+        OutRequiredProgress = 12.0f;
         return true;
     }
 
     if (JobTag == TAG_Job_Farm_Fertilize)
     {
-        OutRequiredProgress = 6.0f;
+        OutRequiredProgress = 10.0f;
         return true;
     }
 
@@ -408,7 +427,8 @@ float UProductionProcessor::GetSkillModifier(
     {
         SkillTag = TAG_Skill_Building;
     }
-    else if (JobTag == TAG_Job_Farm_Plant ||
+    else if (JobTag == TAG_Job_Farm_PrepSoil ||
+        JobTag == TAG_Job_Farm_Plant ||
         JobTag == TAG_Job_Farm_Water ||
         JobTag == TAG_Job_Farm_Harvest ||
         JobTag == TAG_Job_Farm_Clear ||
@@ -441,6 +461,7 @@ void UProductionProcessor::CompleteTask(
     UEventBus* Bus = World ? World->GetSubsystem<UEventBus>() : nullptr;
 
     const bool bIsFarmJob =
+        Task.JobTag == TAG_Job_Farm_PrepSoil ||
         Task.JobTag == TAG_Job_Farm_Plant ||
         Task.JobTag == TAG_Job_Farm_Water ||
         Task.JobTag == TAG_Job_Farm_Harvest ||
@@ -475,17 +496,49 @@ void UProductionProcessor::CompleteTask(
         const int32 ZoneID = Task.TargetID;
         const FIntPoint TilePos = Task.TargetGridPos;
 
-        if (Task.JobTag == TAG_Job_Farm_Plant)
+        if (Task.JobTag == TAG_Job_Farm_PrepSoil)
+        {
+            FarmSub->OnPrepSoilCompleted(ZoneID, TilePos);
+
+            UE_LOG(
+                LogTemp,
+                Log,
+                TEXT("[ProductionProcessor] Farm prep soil complete. Settlement=%d Zone=%d Tile=(%d,%d)"),
+                Task.SettlementID,
+                ZoneID,
+                TilePos.X,
+                TilePos.Y);
+        }
+        else if (Task.JobTag == TAG_Job_Farm_Plant)
         {
             FarmSub->OnPlantCompleted(ZoneID, TilePos);
+
+            UE_LOG(
+                LogTemp,
+                Log,
+                TEXT("[ProductionProcessor] Farm plant complete. Settlement=%d Zone=%d Tile=(%d,%d)"),
+                Task.SettlementID,
+                ZoneID,
+                TilePos.X,
+                TilePos.Y);
         }
         else if (Task.JobTag == TAG_Job_Farm_Water)
         {
             FarmSub->OnWaterCompleted(ZoneID, TilePos);
+
+            UE_LOG(
+                LogTemp,
+                Log,
+                TEXT("[ProductionProcessor] Farm water complete. Settlement=%d Zone=%d Tile=(%d,%d)"),
+                Task.SettlementID,
+                ZoneID,
+                TilePos.X,
+                TilePos.Y);
         }
         else if (Task.JobTag == TAG_Job_Farm_Harvest)
         {
             int32 Yield = 5;
+            FGameplayTag ItemTag = TAG_Item_Food;
 
             FWorldForgeFarmZone ZoneData;
             if (FarmSub->GetZoneByID(ZoneID, ZoneData))
@@ -496,30 +549,32 @@ void UProductionProcessor::CompleteTask(
                         ZoneData.CropRowName,
                         false,
                         false);
+
+                    const FGameplayTag ResolvedTag =
+                        Adapter->GetItemTagForCategory(ZoneData.CropCategory);
+
+                    if (ResolvedTag.IsValid())
+                    {
+                        ItemTag = ResolvedTag;
+                    }
                 }
 
                 FarmSub->OnHarvestCompleted(ZoneID, TilePos, Yield);
 
-                if (SM && Adapter)
+                if (SM && ItemTag.IsValid())
                 {
-                    const FGameplayTag ItemTag =
-                        Adapter->GetItemTagForCategory(ZoneData.CropCategory);
+                    SM->AddToStockpile(Task.SettlementID, ItemTag, Yield);
 
-                    if (ItemTag.IsValid())
-                    {
-                        SM->AddToStockpile(Task.SettlementID, ItemTag, Yield);
-
-                        UE_LOG(
-                            LogTemp,
-                            Log,
-                            TEXT("[ProductionProcessor] Farm harvest: +%d %s Settlement=%d Zone=%d Tile=(%d,%d)"),
-                            Yield,
-                            *ItemTag.ToString(),
-                            Task.SettlementID,
-                            ZoneID,
-                            TilePos.X,
-                            TilePos.Y);
-                    }
+                    UE_LOG(
+                        LogTemp,
+                        Log,
+                        TEXT("[ProductionProcessor] Farm harvest: +%d %s Settlement=%d Zone=%d Tile=(%d,%d)"),
+                        Yield,
+                        *ItemTag.ToString(),
+                        Task.SettlementID,
+                        ZoneID,
+                        TilePos.X,
+                        TilePos.Y);
                 }
             }
             else
@@ -533,10 +588,28 @@ void UProductionProcessor::CompleteTask(
         }
         else if (Task.JobTag == TAG_Job_Farm_Clear)
         {
+            UE_LOG(
+                LogTemp,
+                Log,
+                TEXT("[ProductionProcessor] Farm clear completed. Settlement=%d Zone=%d Tile=(%d,%d)"),
+                Task.SettlementID,
+                ZoneID,
+                TilePos.X,
+                TilePos.Y);
+
             // Clear/dead-crop cleanup is currently handled by FarmingSubsystem.
         }
         else if (Task.JobTag == TAG_Job_Farm_Fertilize)
         {
+            UE_LOG(
+                LogTemp,
+                Log,
+                TEXT("[ProductionProcessor] Farm fertilize completed. Settlement=%d Zone=%d Tile=(%d,%d)"),
+                Task.SettlementID,
+                ZoneID,
+                TilePos.X,
+                TilePos.Y);
+
             // Fertilize support can be wired once farm inventory/tools exist.
         }
     }

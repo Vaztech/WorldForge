@@ -32,10 +32,15 @@ namespace
     // These are intentionally based on simulation steps, not real seconds.
     // That makes them safe to later connect to day/night, seasons, weather,
     // sleep/rest speedups, and time-skip systems.
-    constexpr int32 WF_FarmGrowthAdvanceSteps = 20;
+    constexpr int32 WF_FarmGrowthAdvanceSteps = 50;
     constexpr int32 WF_FarmReadyGrowthStageIndex = 4;
     constexpr int32 WF_FarmHarvestedVisualHoldSteps = 25;
     constexpr int32 WF_FarmSummaryLogIntervalSteps = 25;
+
+    constexpr int32 WF_FarmPrepSoilJobCooldownSteps = 10;
+    constexpr int32 WF_FarmPlantJobCooldownSteps = 10;
+    constexpr int32 WF_FarmWaterJobCooldownSteps = 10;
+    constexpr int32 WF_FarmHarvestJobCooldownSteps = 10;
 
     constexpr float WF_FarmWaterDrainPerStep = 0.025f;
     constexpr float WF_FarmReadyWaterFloor = 0.90f;
@@ -51,12 +56,16 @@ namespace
     {
         Tile.CropActor = nullptr;
         Tile.bPlanted = false;
+        Tile.bSoilPrepared = false;
+        Tile.bPrepSoilJobPending = false;
         Tile.bPlantJobPending = false;
         Tile.bWaterJobPending = false;
         Tile.bHarvestJobPending = false;
+        Tile.LastPrepSoilJobStep = INDEX_NONE;
         Tile.LastPlantJobStep = INDEX_NONE;
         Tile.LastWaterJobStep = INDEX_NONE;
         Tile.LastHarvestJobStep = INDEX_NONE;
+        Tile.SoilPreparedStep = INDEX_NONE;
         Tile.SimGrowthStageIndex = INDEX_NONE;
         Tile.LastGrowthAdvanceStep = INDEX_NONE;
         Tile.PlantedStep = INDEX_NONE;
@@ -415,6 +424,7 @@ void UFarmingSubsystem::TickFarmZones(int32 StepNumber)
     int32 TotalGrowingCount = 0;
     int32 TotalReadyCount = 0;
     int32 TotalHarvestedCount = 0;
+    int32 TotalPrepPendingCount = 0;
     int32 TotalPlantPendingCount = 0;
     int32 TotalWaterPendingCount = 0;
     int32 TotalHarvestPendingCount = 0;
@@ -564,19 +574,50 @@ void UFarmingSubsystem::TickFarmZones(int32 StepNumber)
             }
             else
             {
+                // No crop actor is expected for:
+                // - empty unprepared soil
+                // - prepared bare soil waiting for Plant
+                // - harvested tiles during visual hold
+                //
+                // Only reset if we previously believed a live crop existed.
                 if (Tile.bPlanted || Tile.CropActor.IsValid())
                 {
                     UE_LOG(LogTemp, Warning,
-                        TEXT("[FarmingSubsystem] Tile crop actor invalid; resetting tile. Zone=%d Tile=(%d,%d)"),
+                        TEXT("[FarmingSubsystem] Tile crop actor invalid; resetting planted crop state. Zone=%d Tile=(%d,%d)"),
                         Zone.ZoneID,
                         Tile.TilePos.X,
                         Tile.TilePos.Y);
-                }
 
-                if (Tile.GrowthStage != ECropGrowthStage::Dead &&
+                    const bool bWasPrepared = Tile.bSoilPrepared;
+                    const int32 PreviousSoilPreparedStep = Tile.SoilPreparedStep;
+                    const bool bWasPrepPending = Tile.bPrepSoilJobPending;
+                    const int32 PreviousPrepStep = Tile.LastPrepSoilJobStep;
+
+                    WF_ResetFarmTileRuntimeState(Tile);
+
+                    // Preserve soil prep if this was already prepared soil and only the crop actor failed.
+                    Tile.bSoilPrepared = bWasPrepared;
+                    Tile.SoilPreparedStep = PreviousSoilPreparedStep;
+                    Tile.bPrepSoilJobPending = bWasPrepPending;
+                    Tile.LastPrepSoilJobStep = PreviousPrepStep;
+
+                    if (Tile.bSoilPrepared)
+                    {
+                        Tile.GrowthStage = ECropGrowthStage::BareSoil;
+                    }
+                }
+                else if (Tile.bSoilPrepared)
+                {
+                    // This is the normal state after PrepSoil completes:
+                    // prepared soil, no crop actor yet, waiting for Plant.
+                    Tile.GrowthStage = ECropGrowthStage::BareSoil;
+                }
+                else if (Tile.GrowthStage != ECropGrowthStage::Dead &&
                     Tile.GrowthStage != ECropGrowthStage::Harvested)
                 {
-                    WF_ResetFarmTileRuntimeState(Tile);
+                    // Empty, unprepared tile. Leave it as None so PrepSoil can post.
+                    Tile.GrowthStage = ECropGrowthStage::None;
+                    Tile.WaterLevel = 0.0f;
                 }
             }
 
@@ -585,14 +626,41 @@ void UFarmingSubsystem::TickFarmZones(int32 StepNumber)
             case ECropGrowthStage::None:
             case ECropGrowthStage::BareSoil:
             {
+                if (Tile.CropActor.IsValid() || Tile.bPlanted)
+                {
+                    break;
+                }
+
+                if (!Tile.bSoilPrepared)
+                {
+                    const bool bPrepCooldownExpired =
+                        Tile.LastPrepSoilJobStep == INDEX_NONE ||
+                        (StepNumber - Tile.LastPrepSoilJobStep) >= WF_FarmPrepSoilJobCooldownSteps;
+
+                    if (!Tile.bPrepSoilJobPending && bPrepCooldownExpired)
+                    {
+                        const bool bPosted = PostFarmJob(
+                            Zone.SettlementID,
+                            TAG_Job_Farm_PrepSoil,
+                            Zone.ZoneID,
+                            Tile.TilePos,
+                            EJobPriority::Normal);
+
+                        if (bPosted)
+                        {
+                            Tile.bPrepSoilJobPending = true;
+                            Tile.LastPrepSoilJobStep = StepNumber;
+                        }
+                    }
+
+                    break;
+                }
+
                 const bool bPlantCooldownExpired =
                     Tile.LastPlantJobStep == INDEX_NONE ||
-                    (StepNumber - Tile.LastPlantJobStep) >= PlantJobCooldownSteps;
+                    (StepNumber - Tile.LastPlantJobStep) >= WF_FarmPlantJobCooldownSteps;
 
-                if (!Tile.bPlanted &&
-                    !Tile.bPlantJobPending &&
-                    !Tile.CropActor.IsValid() &&
-                    bPlantCooldownExpired)
+                if (!Tile.bPlantJobPending && bPlantCooldownExpired)
                 {
                     const bool bPosted = PostFarmJob(
                         Zone.SettlementID,
@@ -618,7 +686,7 @@ void UFarmingSubsystem::TickFarmZones(int32 StepNumber)
 
                 const bool bWaterCooldownExpired =
                     Tile.LastWaterJobStep == INDEX_NONE ||
-                    (StepNumber - Tile.LastWaterJobStep) >= WaterJobCooldownSteps;
+                    (StepNumber - Tile.LastWaterJobStep) >= WF_FarmWaterJobCooldownSteps;
 
                 const bool bMayRequestWater =
                     !WF_IsHarvestLocked(Tile) &&
@@ -660,7 +728,7 @@ void UFarmingSubsystem::TickFarmZones(int32 StepNumber)
 
                 const bool bHarvestCooldownExpired =
                     Tile.LastHarvestJobStep == INDEX_NONE ||
-                    (StepNumber - Tile.LastHarvestJobStep) >= HarvestJobCooldownSteps;
+                    (StepNumber - Tile.LastHarvestJobStep) >= WF_FarmHarvestJobCooldownSteps;
 
                 if (Tile.CropActor.IsValid() &&
                     !Tile.bHarvestJobPending &&
@@ -705,6 +773,11 @@ void UFarmingSubsystem::TickFarmZones(int32 StepNumber)
                 break;
             }
 
+            if (Tile.bPrepSoilJobPending)
+            {
+                ++TotalPrepPendingCount;
+            }
+
             if (Tile.bPlantJobPending)
             {
                 ++TotalPlantPendingCount;
@@ -725,13 +798,14 @@ void UFarmingSubsystem::TickFarmZones(int32 StepNumber)
     if (StepNumber > 0 && (StepNumber % WF_FarmSummaryLogIntervalSteps) == 0 && ActiveZoneCount > 0)
     {
         UE_LOG(LogTemp, Log,
-            TEXT("[FarmingSubsystem] Farm summary Step=%d ActiveZones=%d Tiles=%d Growing=%d Ready=%d Harvested=%d PendingPlant=%d PendingWater=%d PendingHarvest=%d"),
+            TEXT("[FarmingSubsystem] Farm summary Step=%d ActiveZones=%d Tiles=%d Growing=%d Ready=%d Harvested=%d PendingPrep=%d PendingPlant=%d PendingWater=%d PendingHarvest=%d"),
             StepNumber,
             ActiveZoneCount,
             TotalTileCount,
             TotalGrowingCount,
             TotalReadyCount,
             TotalHarvestedCount,
+            TotalPrepPendingCount,
             TotalPlantPendingCount,
             TotalWaterPendingCount,
             TotalHarvestPendingCount);
@@ -741,6 +815,47 @@ void UFarmingSubsystem::TickFarmZones(int32 StepNumber)
 // ═══════════════════════════════════════════════════════════════════
 // Job Completion Callbacks
 // ═══════════════════════════════════════════════════════════════════
+
+void UFarmingSubsystem::OnPrepSoilCompleted(int32 ZoneID, FIntPoint TilePos)
+{
+    FWorldForgeFarmZone* Zone = FindZoneMutable(ZoneID);
+    if (!Zone)
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[FarmingSubsystem] OnPrepSoilCompleted ignored: ZoneID=%d not found."),
+            ZoneID);
+
+        return;
+    }
+
+    for (FFarmTileRecord& Tile : Zone->Tiles)
+    {
+        if (Tile.TilePos != TilePos)
+        {
+            continue;
+        }
+
+        Tile.bSoilPrepared = true;
+        Tile.bPrepSoilJobPending = false;
+        Tile.SoilPreparedStep = INDEX_NONE;
+        Tile.GrowthStage = ECropGrowthStage::BareSoil;
+        Tile.WaterLevel = 0.0f;
+
+        UE_LOG(LogTemp, Log,
+            TEXT("[FarmingSubsystem] Soil prep completed. Zone=%d Tile=(%d,%d)"),
+            ZoneID,
+            TilePos.X,
+            TilePos.Y);
+
+        return;
+    }
+
+    UE_LOG(LogTemp, Warning,
+        TEXT("[FarmingSubsystem] OnPrepSoilCompleted ignored: Tile=(%d,%d) not found in Zone=%d."),
+        TilePos.X,
+        TilePos.Y,
+        ZoneID);
+}
 
 void UFarmingSubsystem::OnPlantCompleted(int32 ZoneID, FIntPoint TilePos)
 {
@@ -871,6 +986,8 @@ void UFarmingSubsystem::OnPlantCompleted(int32 ZoneID, FIntPoint TilePos)
         if (Tile.TilePos == TilePos)
         {
             Tile.bPlantJobPending = false;
+            Tile.bPrepSoilJobPending = false;
+            Tile.bSoilPrepared = true;
 
             AActor* ExistingActor = Tile.CropActor.Get();
 

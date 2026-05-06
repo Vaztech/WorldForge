@@ -117,6 +117,7 @@ UE_DEFINE_GAMEPLAY_TAG(TAG_Resource_Fossil, "WorldForge.Resource.Fossil");
 // ════════════════════════════════════════════════════════════════════
 
 // ---- Farming job tags --------------------------------------------------
+UE_DEFINE_GAMEPLAY_TAG(TAG_Job_Farm_PrepSoil,  "WorldForge.Job.Farm.PrepSoil");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Job_Farm_Plant,     "WorldForge.Job.Farm.Plant");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Job_Farm_Water,     "WorldForge.Job.Farm.Water");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Job_Farm_Harvest,   "WorldForge.Job.Farm.Harvest");
@@ -397,6 +398,7 @@ FGameplayTag UWorldForgeTagLibrary::GetResourceFossilTag()
 // Wild Harvest Integration — Farming Tag Accessors
 // ════════════════════════════════════════════════════════════════════
 
+FGameplayTag UWorldForgeTagLibrary::GetJobFarmPrepSoilTag()  { return TAG_Job_Farm_PrepSoil; }
 FGameplayTag UWorldForgeTagLibrary::GetJobFarmPlantTag()     { return TAG_Job_Farm_Plant; }
 FGameplayTag UWorldForgeTagLibrary::GetJobFarmWaterTag()     { return TAG_Job_Farm_Water; }
 FGameplayTag UWorldForgeTagLibrary::GetJobFarmHarvestTag()   { return TAG_Job_Farm_Harvest; }

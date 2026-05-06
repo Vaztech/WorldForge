@@ -133,6 +133,7 @@ UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Resource_Fossil);
 // ════════════════════════════════════════════════════════════════════
 
 // ---- Farming job tags --------------------------------------------------
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Job_Farm_PrepSoil);
 UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Job_Farm_Plant);
 UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Job_Farm_Water);
 UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Job_Farm_Harvest);
@@ -321,6 +322,9 @@ public:
     static FGameplayTag GetResourceFossilTag();
 
     // ════ Wild Harvest Integration ════
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Job")
+    static FGameplayTag GetJobFarmPrepSoilTag();
 
     UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Job")
     static FGameplayTag GetJobFarmPlantTag();

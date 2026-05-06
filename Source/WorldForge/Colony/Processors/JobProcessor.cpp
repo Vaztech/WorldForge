@@ -295,17 +295,23 @@ void UJobProcessor::OnAgentArrived(
         return;
     }
 
-    if (JobTag == TAG_Job_Cook ||
-        JobTag == TAG_Job_Craft ||
-        JobTag == TAG_Job_Build ||
-        JobTag == TAG_Job_Mine ||
-        JobTag.MatchesTag(TAG_Job_Harvest) ||
-        // Wild Harvest Integration
+    const bool bIsFarmJob =
+        JobTag == TAG_Job_Farm_PrepSoil ||
         JobTag == TAG_Job_Farm_Plant ||
         JobTag == TAG_Job_Farm_Water ||
         JobTag == TAG_Job_Farm_Harvest ||
         JobTag == TAG_Job_Farm_Clear ||
-        JobTag == TAG_Job_Farm_Fertilize)
+        JobTag == TAG_Job_Farm_Fertilize;
+
+    const bool bIsProductionJob =
+        JobTag == TAG_Job_Cook ||
+        JobTag == TAG_Job_Craft ||
+        JobTag == TAG_Job_Build ||
+        JobTag == TAG_Job_Mine ||
+        JobTag.MatchesTag(TAG_Job_Harvest) ||
+        bIsFarmJob;
+
+    if (bIsProductionJob)
     {
         Agent.State = EAgentState::Working;
 
@@ -341,7 +347,6 @@ void UJobProcessor::OnAgentArrived(
             StepNumber);
     }
 }
-
 
 // ====================================================================
 // CRITICAL NEEDS HANDLER
@@ -705,7 +710,6 @@ void UJobProcessor::GenerateIdleHarvestJobs(
     }
 }
 
-
 // ====================================================================
 // PUBLIC API
 // ====================================================================
@@ -768,7 +772,8 @@ FGameplayTag UJobProcessor::GetSkillTagForJob(FGameplayTag JobTag) const
 
     // ════ Wild Harvest Integration ════
     // All farming jobs use the Farming skill.
-    if (JobTag == TAG_Job_Farm_Plant ||
+    if (JobTag == TAG_Job_Farm_PrepSoil ||
+        JobTag == TAG_Job_Farm_Plant ||
         JobTag == TAG_Job_Farm_Water ||
         JobTag == TAG_Job_Farm_Harvest ||
         JobTag == TAG_Job_Farm_Clear ||

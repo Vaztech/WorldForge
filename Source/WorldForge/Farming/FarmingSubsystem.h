@@ -100,6 +100,10 @@ public:
     // ─── Job Completion Callbacks ───────────────────────────────
     // Called by ProductionProcessor when a colonist finishes a farming job.
 
+    /** A colonist completed a Prep Soil job at the given tile. */
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Farming")
+    void OnPrepSoilCompleted(int32 ZoneID, FIntPoint TilePos);
+
     /** A colonist completed a Plant job at the given tile. */
     UFUNCTION(BlueprintCallable, Category = "WorldForge|Farming")
     void OnPlantCompleted(int32 ZoneID, FIntPoint TilePos);
@@ -160,15 +164,6 @@ private:
 
     /** Water threshold — tiles below this need Water jobs. */
     float WaterThreshold = 0.3f;
-
-    /** Prevents the same tile from posting water jobs every sim step. */
-    int32 WaterJobCooldownSteps = 50;
-
-    /** Prevents duplicate plant jobs when BP state briefly reports BareSoil/None. */
-    int32 PlantJobCooldownSteps = 10;
-
-    /** Prevents duplicate harvest jobs while harvest is already queued/in progress. */
-    int32 HarvestJobCooldownSteps = 10;
 
     /**
      * Safely resolves WildHarvestAdapter.

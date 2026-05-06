@@ -177,6 +177,18 @@ void UBuildModeWidget::SwitchToFarmMode()
 		return;
 	}
 
+	// Safety guard: if the Farm button is clicked while Farm mode already has
+	// painted cells, commit the farm selection instead of toggling/canceling it.
+	// This protects Blueprint wiring where the same button may be reused as a
+	// confirm-style action after painting.
+	if (Mgr->GetCurrentToolMode() == EBuildToolMode::Farm && Mgr->GetSelectedCellCount() > 0)
+	{
+		Mgr->HandleConfirm();
+		OnStockpileChanged(FGameplayTag::EmptyTag, 0);
+		UE_LOG(LogTemp, Log, TEXT("[BuildModeWidget] Farm mode already active; confirming farm selection."));
+		return;
+	}
+
 	Mgr->EnterFarmMode();
 
 	OnStockpileChanged(FGameplayTag::EmptyTag, 0);
@@ -202,6 +214,10 @@ void UBuildModeWidget::ConfirmBuild()
 	{
 		return;
 	}
+
+	UE_LOG(LogTemp, Log, TEXT("[BuildModeWidget] ConfirmBuild pressed. ToolMode=%d CellCount=%d"),
+		static_cast<int32>(Mgr->GetCurrentToolMode()),
+		Mgr->GetSelectedCellCount());
 
 	Mgr->HandleConfirm();
 }

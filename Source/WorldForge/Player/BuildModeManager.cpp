@@ -399,6 +399,7 @@ void UBuildModeManager::ExitBuildMode()
     SelectedMaterialTag = FGameplayTag::EmptyTag;
     SelectedCells.Empty();
     SelectedCells3D.Empty();
+    FarmPaintedWorldCells.Empty();
     CurrentHoveredCell = FIntPoint::ZeroValue;
     CurrentHoveredVoxel = FIntVector::ZeroValue;
     RotationIndex = 0;
@@ -720,11 +721,18 @@ void UBuildModeManager::HandleConfirm()
 {
     if (bJustCommitted)
     {
+        UE_LOG(LogTemp, Verbose, TEXT("[BuildMode] HandleConfirm ignored: just committed."));
         return;
     }
 
     if (CurrentToolMode == EBuildToolMode::Farm)
     {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[BuildMode] HandleConfirm -> Farm. FarmPaintedWorldCells=%d SelectedCells=%d SelectedCells3D=%d"),
+            FarmPaintedWorldCells.Num(),
+            SelectedCells.Num(),
+            SelectedCells3D.Num());
+
         if (CommitFarmZone())
         {
             bJustCommitted = true;
@@ -733,6 +741,12 @@ void UBuildModeManager::HandleConfirm()
             bHasDragStart = false;
             DragStartVoxel = FIntVector::ZeroValue;
             bDragStartedFromBlock = false;
+
+            // Farm designations are committed immediately. Leave build mode after a successful
+            // farm commit so the widget/button cannot accidentally toggle farm mode and cancel
+            // the selection on the next click.
+            ExitBuildMode();
+            BroadcastFeedback(TEXT("Farm zone committed."));
         }
 
         return;
@@ -784,7 +798,15 @@ void UBuildModeManager::EnterFarmMode()
 {
     if (CurrentToolMode == EBuildToolMode::Farm)
     {
-        ExitBuildMode();
+        // Do not treat pressing the Farm button twice as Cancel. This was causing
+        // painted farm selections to disappear before Confirm could commit them.
+        UE_LOG(LogTemp, Warning,
+            TEXT("[BuildMode] EnterFarmMode ignored: already in Farm mode. FarmPaintedWorldCells=%d SelectedCells=%d SelectedCells3D=%d"),
+            FarmPaintedWorldCells.Num(),
+            SelectedCells.Num(),
+            SelectedCells3D.Num());
+
+        BroadcastFeedback(TEXT("Farm mode already active. Paint farm tiles, then Confirm."));
         return;
     }
 
