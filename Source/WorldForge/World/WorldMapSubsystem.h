@@ -48,12 +48,13 @@ namespace WorldForgeOverlay
     static constexpr int32 Trade       = 1 << 4;   // Bit 4
     static constexpr int32 Underground = 1 << 5;   // Bit 5
     static constexpr int32 Fog         = 1 << 6;   // Bit 6
+    static constexpr int32 Resource    = 1 << 7;   // Bit 7 — Batch 3: resource heatmap
 
     // Default state: terrain + fog visible.
     static constexpr int32 Default     = Terrain | Fog;
 
     // All overlays enabled at once (useful for debug).
-    static constexpr int32 All         = Terrain | Political | Economy | Cosmic | Trade | Underground | Fog;
+    static constexpr int32 All         = Terrain | Political | Economy | Cosmic | Trade | Underground | Fog | Resource;
 }
 
 UCLASS(BlueprintType, Blueprintable)
@@ -205,6 +206,9 @@ public:
     UPROPERTY(EditAnywhere, Category = "WorldForge|WorldMap|Overlay", meta = (ClampMin = "0.0", ClampMax = "1.0"))
     float FogAlpha = 0.65f;
 
+    UPROPERTY(EditAnywhere, Category = "WorldForge|WorldMap|Overlay", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float ResourceAlpha = 0.55f;
+
     // ------------------------------------------------------------------
     // Overlay layer toggle API.
     // ------------------------------------------------------------------
@@ -308,6 +312,7 @@ private:
     FColor MakeTradeLayerColor(const FWorldTileData& Tile) const;
     FColor MakeUndergroundLayerColor(const FWorldTileData& Tile) const;
     FColor MakeFogLayerColor(const FWorldTileData& Tile) const;
+    FColor MakeResourceLayerColor(const FWorldTileData& Tile) const;
 
     // ------------------------------------------------------------------
     // Central blending pipeline.

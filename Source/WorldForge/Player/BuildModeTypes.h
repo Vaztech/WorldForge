@@ -48,7 +48,10 @@ enum class EBuildToolMode : uint8
 	Dig    UMETA(DisplayName = "Dig"),
 
 	// Phase 4 stub for now
-	Mine   UMETA(DisplayName = "Mine")
+	Mine   UMETA(DisplayName = "Mine"),
+
+	// ════ Wild Harvest Integration ════
+	Farm   UMETA(DisplayName = "Farm")
 };
 
 // ===================================================================

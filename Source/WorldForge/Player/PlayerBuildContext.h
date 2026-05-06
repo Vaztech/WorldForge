@@ -127,6 +127,18 @@ public:
     UPROPERTY(BlueprintReadOnly, Category = "Build|Dig")
     float DigCooldownRemaining = 0.0f;
 
+    // ================================
+    // Phase 2: Resource X-Ray Mode
+    // ================================
+
+    /**
+     * When true, DigGhostActor renders subsurface resource node outlines
+     * through terrain. Toggled by holding Ctrl while in Dig tool mode.
+     * Read by DigGhostActor::Tick() to show/hide X-ray wireframes.
+     */
+    UPROPERTY(BlueprintReadWrite, Category = "Build|Dig")
+    bool bXRayResourcesActive = false;
+
     /** Stack of dig operations for undo. Most recent dig is at the end. */
     UPROPERTY(SaveGame)
     TArray<FDigUndoEntry> DigUndoStack;

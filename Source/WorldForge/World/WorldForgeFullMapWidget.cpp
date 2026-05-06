@@ -144,6 +144,12 @@ void UWorldForgeFullMapWidget::NativeConstruct()
         CHK_Fog->OnCheckStateChanged.AddDynamic(this, &UWorldForgeFullMapWidget::HandleFogToggled);
     }
 
+    if (CHK_Resource)
+    {
+        CHK_Resource->OnCheckStateChanged.RemoveDynamic(this, &UWorldForgeFullMapWidget::HandleResourceToggled);
+        CHK_Resource->OnCheckStateChanged.AddDynamic(this, &UWorldForgeFullMapWidget::HandleResourceToggled);
+    }
+
     // ── Legacy overlay buttons (backwards compat) ────────────────
     if (BTN_Terrain)
     {
@@ -602,6 +608,11 @@ void UWorldForgeFullMapWidget::HandleFogToggled(bool bIsChecked)
     SetOverlayLayerAndRefresh(WorldForgeOverlay::Fog, bIsChecked);
 }
 
+void UWorldForgeFullMapWidget::HandleResourceToggled(bool bIsChecked)
+{
+    SetOverlayLayerAndRefresh(WorldForgeOverlay::Resource, bIsChecked);
+}
+
 // ============================================================
 void UWorldForgeFullMapWidget::SetOverlayLayerAndRefresh(int32 LayerBit, bool bActive)
 {
@@ -704,19 +715,20 @@ void UWorldForgeFullMapWidget::SyncCheckboxesToOverlayState()
     const int32 Layers = MapSubsystem->GetActiveOverlayLayers();
 
     auto SetCheck = [](UCheckBox* Box, bool bOn)
-    {
-        if (Box)
         {
-            Box->SetIsChecked(bOn);
-        }
-    };
+            if (Box)
+            {
+                Box->SetIsChecked(bOn);
+            }
+        };
 
-    SetCheck(CHK_Political,   (Layers & WorldForgeOverlay::Political)   != 0);
-    SetCheck(CHK_Economy,     (Layers & WorldForgeOverlay::Economy)     != 0);
-    SetCheck(CHK_Cosmic,      (Layers & WorldForgeOverlay::Cosmic)      != 0);
-    SetCheck(CHK_Trade,       (Layers & WorldForgeOverlay::Trade)       != 0);
+    SetCheck(CHK_Political, (Layers & WorldForgeOverlay::Political) != 0);
+    SetCheck(CHK_Economy, (Layers & WorldForgeOverlay::Economy) != 0);
+    SetCheck(CHK_Cosmic, (Layers & WorldForgeOverlay::Cosmic) != 0);
+    SetCheck(CHK_Trade, (Layers & WorldForgeOverlay::Trade) != 0);
     SetCheck(CHK_Underground, (Layers & WorldForgeOverlay::Underground) != 0);
-    SetCheck(CHK_Fog,         (Layers & WorldForgeOverlay::Fog)         != 0);
+    SetCheck(CHK_Fog, (Layers & WorldForgeOverlay::Fog) != 0);
+    SetCheck(CHK_Resource, (Layers & WorldForgeOverlay::Resource) != 0);
 }
 
 // ============================================================
@@ -781,6 +793,7 @@ void UWorldForgeFullMapWidget::UpdateSelectionText()
     if (!bHasValidSelection)
     {
         TXT_SelectedCell->SetText(FText::FromString(TEXT("No Tile Selected")));
+        UpdateResourceTooltip();
         return;
     }
 
@@ -792,6 +805,8 @@ void UWorldForgeFullMapWidget::UpdateSelectionText()
         MapSubsystem ? MapSubsystem->GetActiveOverlayLayers() : 0);
 
     TXT_SelectedCell->SetText(FText::FromString(Str));
+
+    UpdateResourceTooltip();
 }
 
 // ============================================================
@@ -1023,4 +1038,75 @@ void UWorldForgeFullMapWidget::EnsureValidInitialSelection()
         SelectedTileY = FinalCell.Y;
         bHasValidSelection = true;
     }
+}
+
+// ============================================================
+// Batch 3: Resource tooltip
+//
+// When the Resource overlay is active and a tile is selected,
+// this populates TXT_ResourceInfo with the per-category breakdown.
+// If TXT_ResourceInfo doesn't exist in the WBP yet, this is a no-op.
+// ============================================================
+void UWorldForgeFullMapWidget::UpdateResourceTooltip()
+{
+    if (!TXT_ResourceInfo)
+    {
+        return;
+    }
+
+    if (!MapSubsystem || !bHasValidSelection ||
+        !MapSubsystem->IsOverlayLayerActive(WorldForgeOverlay::Resource))
+    {
+        TXT_ResourceInfo->SetText(FText::GetEmpty());
+        return;
+    }
+
+    FWorldTileData Tile;
+    if (!MapSubsystem->GetTileData(SelectedTileIndex, Tile))
+    {
+        TXT_ResourceInfo->SetText(FText::GetEmpty());
+        return;
+    }
+
+    const int32 IdxMetal = static_cast<int32>(EResourceCategory::Metal);
+    const int32 IdxCrystal = static_cast<int32>(EResourceCategory::Crystal);
+    const int32 IdxFossil = static_cast<int32>(EResourceCategory::Fossil);
+
+    const auto& Density = Tile.ResourceSurvey.DensityByCategory;
+    const auto& Depth = Tile.ResourceSurvey.PeakDepthByCategory;
+
+    const float MetalPct = Density.IsValidIndex(IdxMetal) ? FMath::Clamp(Density[IdxMetal] * 100.0f, 0.0f, 100.0f) : 0.0f;
+    const float CrystalPct = Density.IsValidIndex(IdxCrystal) ? FMath::Clamp(Density[IdxCrystal] * 100.0f, 0.0f, 100.0f) : 0.0f;
+    const float FossilPct = Density.IsValidIndex(IdxFossil) ? FMath::Clamp(Density[IdxFossil] * 100.0f, 0.0f, 100.0f) : 0.0f;
+    const float RichnessPct = FMath::Clamp(Tile.ResourceSurvey.OverallRichness * 100.0f, 0.0f, 100.0f);
+
+    const bool bHasAny = (MetalPct > 0.1f || CrystalPct > 0.1f || FossilPct > 0.1f);
+
+    if (!bHasAny)
+    {
+        TXT_ResourceInfo->SetText(FText::FromString(TEXT("No resource deposits detected.")));
+        return;
+    }
+
+    FString Info = FString::Printf(TEXT("Resources (Richness: %.0f%%)\n"), RichnessPct);
+
+    if (MetalPct > 0.1f)
+    {
+        const float MetalDepth = Depth.IsValidIndex(IdxMetal) ? Depth[IdxMetal] : 0.0f;
+        Info += FString::Printf(TEXT("  Metal: %.0f%% | Peak depth: %.0f\n"), MetalPct, MetalDepth);
+    }
+
+    if (CrystalPct > 0.1f)
+    {
+        const float CrystalDepth = Depth.IsValidIndex(IdxCrystal) ? Depth[IdxCrystal] : 0.0f;
+        Info += FString::Printf(TEXT("  Crystal: %.0f%% | Peak depth: %.0f\n"), CrystalPct, CrystalDepth);
+    }
+
+    if (FossilPct > 0.1f)
+    {
+        const float FossilDepth = Depth.IsValidIndex(IdxFossil) ? Depth[IdxFossil] : 0.0f;
+        Info += FString::Printf(TEXT("  Fossil: %.0f%% | Peak depth: %.0f"), FossilPct, FossilDepth);
+    }
+
+    TXT_ResourceInfo->SetText(FText::FromString(Info));
 }

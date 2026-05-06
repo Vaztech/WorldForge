@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "CoreMinimal.h"
 #include "GameplayTagContainer.h"
@@ -120,6 +120,36 @@ UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Resource_Mithril);
 UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Resource_Obsidian);
 UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Resource_VoidCrystal);
 UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Resource_Starstone);
+
+// ---- Batch 3: Resource Discovery category tags ---------------------
+// These are the category-level tags used by ResourceSpawnSubsystem's
+// PickResourceTag() and DigSubsystem's CheckForNodeReveals().
+// Crystal maps to EResourceCategory::Crystal; Fossil maps to Fossil.
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Resource_Crystal);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Resource_Fossil);
+
+// ════════════════════════════════════════════════════════════════════
+// Wild Harvest Integration — Farming Tags
+// ════════════════════════════════════════════════════════════════════
+
+// ---- Farming job tags --------------------------------------------------
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Job_Farm_Plant);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Job_Farm_Water);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Job_Farm_Harvest);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Job_Farm_Clear);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Job_Farm_Fertilize);
+
+// ---- Farming item tags -------------------------------------------------
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Item_Grain);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Item_Berries);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Item_RootVeg);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Item_Greens);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Item_Herbs);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Item_Mushrooms);
+
+// ---- Farming sim event tags --------------------------------------------
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Sim_Event_CropHarvested);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Sim_Event_CropDied);
 
 // ====================================================================
 // Blueprint Access Library
@@ -282,4 +312,52 @@ public:
 
     UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Building")
     static FGameplayTag GetBuildingEconomicMarketStallTag();
+
+    // ---- Batch 3: Resource Discovery category tags -----------------
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Resource")
+    static FGameplayTag GetResourceCrystalTag();
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Resource")
+    static FGameplayTag GetResourceFossilTag();
+
+    // ════ Wild Harvest Integration ════
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Job")
+    static FGameplayTag GetJobFarmPlantTag();
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Job")
+    static FGameplayTag GetJobFarmWaterTag();
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Job")
+    static FGameplayTag GetJobFarmHarvestTag();
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Job")
+    static FGameplayTag GetJobFarmClearTag();
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Job")
+    static FGameplayTag GetJobFarmFertilizeTag();
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Item")
+    static FGameplayTag GetItemGrainTag();
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Item")
+    static FGameplayTag GetItemBerriesTag();
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Item")
+    static FGameplayTag GetItemRootVegTag();
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Item")
+    static FGameplayTag GetItemGreensTag();
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Item")
+    static FGameplayTag GetItemHerbsTag();
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Item")
+    static FGameplayTag GetItemMushroomsTag();
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Event")
+    static FGameplayTag GetCropHarvestedEventTag();
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Event")
+    static FGameplayTag GetCropDiedEventTag();
 };

@@ -82,6 +82,15 @@ protected:
     UPROPERTY(meta = (BindWidgetOptional), BlueprintReadOnly)
     UCheckBox* CHK_Fog = nullptr;
 
+    UPROPERTY(meta = (BindWidgetOptional), BlueprintReadOnly)
+    UCheckBox* CHK_Resource = nullptr;
+
+    // Resource tooltip text block — shows per-tile category breakdown
+    // when the player selects a tile while the Resource overlay is active.
+    // Add a UTextBlock named TXT_ResourceInfo in the WBP (optional).
+    UPROPERTY(meta = (BindWidgetOptional), BlueprintReadOnly)
+    UTextBlock* TXT_ResourceInfo = nullptr;
+
     // ------------------------------------------------------------------
     // Legacy overlay buttons (backwards compatibility).
     //
@@ -189,6 +198,9 @@ protected:
     UFUNCTION()
     void HandleFogToggled(bool bIsChecked);
 
+    UFUNCTION()
+    void HandleResourceToggled(bool bIsChecked);
+
     // ── Legacy button handlers (solo-mode backwards compat) ──────
     UFUNCTION()
     void HandleTerrainOverlayClicked();
@@ -221,6 +233,7 @@ protected:
 
     void UpdateSelectionVisual();
     void UpdateSelectionText();
+    void UpdateResourceTooltip();
 
     void EnterMapSelectionInputMode();
     void RestoreGameInputMode();

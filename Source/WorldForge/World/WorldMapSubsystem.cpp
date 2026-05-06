@@ -645,6 +645,10 @@ void UWorldMapSubsystem::RebuildDetailedMapTexture()
                     {
                         PixelColor = BlendLayer(PixelColor, MakeUndergroundLayerColor(OverlayTile), UndergroundAlpha);
                     }
+                    if (IsOverlayLayerActive(WorldForgeOverlay::Resource))
+                    {
+                        PixelColor = BlendLayer(PixelColor, MakeResourceLayerColor(OverlayTile), ResourceAlpha);
+                    }
                     if (IsOverlayLayerActive(WorldForgeOverlay::Fog))
                     {
                         PixelColor = BlendLayer(PixelColor, MakeFogLayerColor(OverlayTile), FogAlpha);
@@ -1049,6 +1053,11 @@ FColor UWorldMapSubsystem::ComputeBlendedTileColor(const FWorldTileData& Tile) c
         Color = BlendLayer(Color, MakeUndergroundLayerColor(Tile), UndergroundAlpha);
     }
 
+    if (IsOverlayLayerActive(WorldForgeOverlay::Resource))
+    {
+        Color = BlendLayer(Color, MakeResourceLayerColor(Tile), ResourceAlpha);
+    }
+
     // 4. Fog is always last — it darkens unknown areas on top of
     //    everything else.
     if (IsOverlayLayerActive(WorldForgeOverlay::Fog))
@@ -1321,4 +1330,55 @@ FColor UWorldMapSubsystem::MakeFogLayerColor(const FWorldTileData& Tile) const
         // "skip this pixel" path in the blender.
         return ApplyKnowledgeToColor(MakeTileMapColor(Tile), Tile);
     }
+}
+
+// ─── Resource layer (Batch 3) ────────────────────────────────────
+// Reads FResourceSurveyData from each tile and renders a category-
+// blended heatmap.  Colors per spec:
+//   Metal  = orange  (#FF8C00)
+//   Crystal = purple (#9B30FF)
+//   Fossil = brown   (#8B4513)
+// Opacity proportional to density; tiles with no resources → dark.
+FColor UWorldMapSubsystem::MakeResourceLayerColor(const FWorldTileData& Tile) const
+{
+    const int32 IdxMetal = static_cast<int32>(EResourceCategory::Metal);
+    const int32 IdxCrystal = static_cast<int32>(EResourceCategory::Crystal);
+    const int32 IdxFossil = static_cast<int32>(EResourceCategory::Fossil);
+
+    const float MetalDensity = (Tile.ResourceSurvey.DensityByCategory.IsValidIndex(IdxMetal))
+        ? FMath::Clamp(Tile.ResourceSurvey.DensityByCategory[IdxMetal], 0.0f, 1.0f) : 0.0f;
+    const float CrystalDensity = (Tile.ResourceSurvey.DensityByCategory.IsValidIndex(IdxCrystal))
+        ? FMath::Clamp(Tile.ResourceSurvey.DensityByCategory[IdxCrystal], 0.0f, 1.0f) : 0.0f;
+    const float FossilDensity = (Tile.ResourceSurvey.DensityByCategory.IsValidIndex(IdxFossil))
+        ? FMath::Clamp(Tile.ResourceSurvey.DensityByCategory[IdxFossil], 0.0f, 1.0f) : 0.0f;
+
+    const float TotalDensity = MetalDensity + CrystalDensity + FossilDensity;
+
+    // No resources at all → dark background.
+    if (TotalDensity <= KINDA_SMALL_NUMBER)
+    {
+        return FColor(20, 18, 15, 255);
+    }
+
+    // Category colors.
+    const FLinearColor MetalColor(1.0f, 0.549f, 0.0f);     // #FF8C00 orange
+    const FLinearColor CrystalColor(0.608f, 0.188f, 1.0f);  // #9B30FF purple
+    const FLinearColor FossilColor(0.545f, 0.271f, 0.075f);  // #8B4513 brown
+
+    // Weighted blend by relative density.
+    const float InvTotal = 1.0f / TotalDensity;
+    const FLinearColor Blended =
+        MetalColor * (MetalDensity * InvTotal) +
+        CrystalColor * (CrystalDensity * InvTotal) +
+        FossilColor * (FossilDensity * InvTotal);
+
+    // Scale brightness by overall richness so dense areas glow brighter.
+    const float Richness = FMath::Clamp(Tile.ResourceSurvey.OverallRichness, 0.0f, 1.0f);
+    const float Brightness = FMath::Lerp(0.3f, 1.0f, Richness);
+
+    return FColor(
+        static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(Blended.R * Brightness * 255.0f), 0, 255)),
+        static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(Blended.G * Brightness * 255.0f), 0, 255)),
+        static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(Blended.B * Brightness * 255.0f), 0, 255)),
+        255);
 }

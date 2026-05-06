@@ -5,6 +5,10 @@
 #include "WorldForgeTags.h"
 #include "ProcessorManager.h"
 #include "JobProcessor.h"
+#include "Modifiers/WorldForgeModifierResolver.h"
+#include "Farming/FarmingSubsystem.h"
+#include "Farming/WildHarvestAdapter.h"
+#include "Mining/MiningSubsystem.h"
 
 // ====================================================================
 // INTERNAL FAILURE HANDLER
@@ -45,7 +49,6 @@ void UProductionProcessor::ProcessStep(
     }
 
     USettlementManager* SM = World->GetSubsystem<USettlementManager>();
-    UEventBus* Bus = World->GetSubsystem<UEventBus>();
 
     if (!SM)
     {
@@ -83,6 +86,7 @@ void UProductionProcessor::ProcessStep(
         }
 
         FActiveProductionTask* Task = nullptr;
+
         for (FActiveProductionTask& T : ActiveTasks)
         {
             if (T.AssignedAgentID == Agent.AgentID && !T.bComplete)
@@ -97,11 +101,11 @@ void UProductionProcessor::ProcessStep(
             continue;
         }
 
-        if (!Task->bInputsReserved && Task->Progress <= 0.f)
+        if (!Task->bInputsReserved && Task->Progress <= 0.0f)
         {
             TMap<FGameplayTag, int32> Inputs;
             TMap<FGameplayTag, int32> Outputs;
-            float RequiredProgress = 10.f;
+            float RequiredProgress = 10.0f;
 
             if (!GetRecipe(Task->JobTag, Inputs, Outputs, RequiredProgress))
             {
@@ -119,6 +123,7 @@ void UProductionProcessor::ProcessStep(
             Task->OutputItems = Outputs;
 
             bool bAllAvailable = true;
+
             for (const TPair<FGameplayTag, int32>& Input : Inputs)
             {
                 if (!SM->HasStockpile(SettlementID, Input.Key, Input.Value))
@@ -150,9 +155,13 @@ void UProductionProcessor::ProcessStep(
             Task->bInputsReserved = true;
         }
 
-        // Health/injury now directly affects work speed.
         const float SkillMod = GetSkillModifier(Agent, Task->JobTag);
-        const float EfficiencyMod = FMath::Clamp(Agent.CurrentEfficiency, 0.0f, 1.5f);
+
+        const float EfficiencyMod = FMath::Clamp(
+            UWorldForgeModifierResolver::ResolveWorkEfficiency(Agent),
+            0.0f,
+            2.0f);
+
         const float FinalWorkMod = SkillMod * EfficiencyMod;
 
         if (FinalWorkMod <= 0.0f)
@@ -184,7 +193,10 @@ int32 UProductionProcessor::StartProductionTask(
     int32 AgentID,
     int32 SettlementID,
     FGameplayTag JobTag,
-    FGameplayTag BuildingTag)
+    FGameplayTag BuildingTag,
+    int32 TargetID,
+    FIntPoint TargetGridPos,
+    FGameplayTag TargetItemTag)
 {
     if (HasActiveTask(AgentID))
     {
@@ -202,13 +214,32 @@ int32 UProductionProcessor::StartProductionTask(
     Task.SettlementID = SettlementID;
     Task.JobTag = JobTag;
     Task.BuildingTag = BuildingTag;
+
+    // Preserve job metadata from FJobRequest so CompleteTask() can route
+    // farm/mining completions back to the correct subsystem record.
+    Task.TargetID = TargetID;
+    Task.TargetGridPos = TargetGridPos;
+    Task.TargetItemTag = TargetItemTag;
+
     Task.AssignedAgentID = AgentID;
-    Task.Progress = 0.f;
-    Task.RequiredProgress = 10.f;
+    Task.Progress = 0.0f;
+    Task.RequiredProgress = 10.0f;
     Task.bInputsReserved = false;
     Task.bComplete = false;
 
     ActiveTasks.Add(Task);
+
+    UE_LOG(
+        LogTemp,
+        Log,
+        TEXT("[ProductionProcessor] Started task ID=%d Agent=%d Job=%s TargetID=%d TargetGrid=(%d,%d)"),
+        Task.TaskID,
+        AgentID,
+        *JobTag.ToString(),
+        TargetID,
+        TargetGridPos.X,
+        TargetGridPos.Y);
+
     return Task.TaskID;
 }
 
@@ -255,13 +286,13 @@ bool UProductionProcessor::GetRecipe(
 {
     OutInputs.Empty();
     OutOutputs.Empty();
-    OutRequiredProgress = 10.f;
+    OutRequiredProgress = 10.0f;
 
     if (JobTag == TAG_Job_Cook)
     {
         OutInputs.Add(TAG_Item_Food, 2);
         OutOutputs.Add(TAG_Item_Meal, 3);
-        OutRequiredProgress = 8.f;
+        OutRequiredProgress = 8.0f;
         return true;
     }
 
@@ -269,34 +300,74 @@ bool UProductionProcessor::GetRecipe(
     {
         OutInputs.Add(TAG_Item_Wood, 2);
         OutOutputs.Add(TAG_Item_Plank, 1);
-        OutRequiredProgress = 10.f;
+        OutRequiredProgress = 10.0f;
         return true;
     }
 
     if (JobTag == TAG_Job_Harvest_Food)
     {
         OutOutputs.Add(TAG_Item_Food, 1);
-        OutRequiredProgress = 16.f;
+        OutRequiredProgress = 16.0f;
         return true;
     }
 
     if (JobTag == TAG_Job_Harvest_Wood)
     {
         OutOutputs.Add(TAG_Item_Wood, 1);
-        OutRequiredProgress = 14.f;
+        OutRequiredProgress = 14.0f;
         return true;
     }
 
     if (JobTag == TAG_Job_Harvest_Stone)
     {
         OutOutputs.Add(TAG_Item_Stone, 1);
-        OutRequiredProgress = 18.f;
+        OutRequiredProgress = 18.0f;
+        return true;
+    }
+
+    // Mining designations are completed through MiningSubsystem.
+    // This recipe only defines work time.
+    if (JobTag == TAG_Job_Mine)
+    {
+        OutRequiredProgress = 18.0f;
         return true;
     }
 
     if (JobTag == TAG_Job_Build)
     {
-        OutRequiredProgress = 10.f;
+        OutRequiredProgress = 10.0f;
+        return true;
+    }
+
+    // Farming jobs are completed through FarmingSubsystem.
+    // These recipes only define work time.
+    if (JobTag == TAG_Job_Farm_Plant)
+    {
+        OutRequiredProgress = 8.0f;
+        return true;
+    }
+
+    if (JobTag == TAG_Job_Farm_Water)
+    {
+        OutRequiredProgress = 4.0f;
+        return true;
+    }
+
+    if (JobTag == TAG_Job_Farm_Harvest)
+    {
+        OutRequiredProgress = 12.0f;
+        return true;
+    }
+
+    if (JobTag == TAG_Job_Farm_Clear)
+    {
+        OutRequiredProgress = 6.0f;
+        return true;
+    }
+
+    if (JobTag == TAG_Job_Farm_Fertilize)
+    {
+        OutRequiredProgress = 6.0f;
         return true;
     }
 
@@ -328,7 +399,8 @@ float UProductionProcessor::GetSkillModifier(
     {
         SkillTag = TAG_Skill_Hauling;
     }
-    else if (JobTag == TAG_Job_Harvest_Stone)
+    else if (JobTag == TAG_Job_Harvest_Stone ||
+        JobTag == TAG_Job_Mine)
     {
         SkillTag = TAG_Skill_Mining;
     }
@@ -336,16 +408,24 @@ float UProductionProcessor::GetSkillModifier(
     {
         SkillTag = TAG_Skill_Building;
     }
+    else if (JobTag == TAG_Job_Farm_Plant ||
+        JobTag == TAG_Job_Farm_Water ||
+        JobTag == TAG_Job_Farm_Harvest ||
+        JobTag == TAG_Job_Farm_Clear ||
+        JobTag == TAG_Job_Farm_Fertilize)
+    {
+        SkillTag = TAG_Skill_Farming;
+    }
 
     if (!SkillTag.IsValid())
     {
         return 1.0f;
     }
 
-    const float* FoundSkill = Agent.Skills.Find(SkillTag);
-    const float SkillValue = FoundSkill ? *FoundSkill : 1.f;
+    const float SkillValue =
+        UWorldForgeModifierResolver::ResolveSkillValue(Agent, SkillTag);
 
-    return 0.5f + (SkillValue / 100.f) * 1.5f;
+    return 0.5f + (SkillValue / 100.0f) * 1.5f;
 }
 
 // ====================================================================
@@ -360,19 +440,176 @@ void UProductionProcessor::CompleteTask(
     USettlementManager* SM = World ? World->GetSubsystem<USettlementManager>() : nullptr;
     UEventBus* Bus = World ? World->GetSubsystem<UEventBus>() : nullptr;
 
-    if (SM)
+    const bool bIsFarmJob =
+        Task.JobTag == TAG_Job_Farm_Plant ||
+        Task.JobTag == TAG_Job_Farm_Water ||
+        Task.JobTag == TAG_Job_Farm_Harvest ||
+        Task.JobTag == TAG_Job_Farm_Clear ||
+        Task.JobTag == TAG_Job_Farm_Fertilize;
+
+    const bool bIsMiningJob =
+        Task.JobTag == TAG_Job_Mine;
+
+    // =====================================================================
+    // FARMING COMPLETION ROUTING
+    // =====================================================================
+    if (bIsFarmJob)
     {
-        for (const TPair<FGameplayTag, int32>& Output : Task.OutputItems)
+        UFarmingSubsystem* FarmSub = World ? World->GetSubsystem<UFarmingSubsystem>() : nullptr;
+        UWildHarvestAdapter* Adapter = World ? World->GetSubsystem<UWildHarvestAdapter>() : nullptr;
+
+        if (!FarmSub)
         {
-            SM->AddToStockpile(Task.SettlementID, Output.Key, Output.Value);
+            UE_LOG(
+                LogTemp,
+                Warning,
+                TEXT("[ProductionProcessor] Farm completion failed: FarmingSubsystem missing. Job=%s Agent=%d TargetID=%d"),
+                *Task.JobTag.ToString(),
+                Agent.AgentID,
+                Task.TargetID);
+
+            FailTaskAndReleaseAgent(Task, Agent, World);
+            return;
+        }
+
+        const int32 ZoneID = Task.TargetID;
+        const FIntPoint TilePos = Task.TargetGridPos;
+
+        if (Task.JobTag == TAG_Job_Farm_Plant)
+        {
+            FarmSub->OnPlantCompleted(ZoneID, TilePos);
+        }
+        else if (Task.JobTag == TAG_Job_Farm_Water)
+        {
+            FarmSub->OnWaterCompleted(ZoneID, TilePos);
+        }
+        else if (Task.JobTag == TAG_Job_Farm_Harvest)
+        {
+            int32 Yield = 5;
+
+            FWorldForgeFarmZone ZoneData;
+            if (FarmSub->GetZoneByID(ZoneID, ZoneData))
+            {
+                if (Adapter)
+                {
+                    Yield = Adapter->CalculateYield(
+                        ZoneData.CropRowName,
+                        false,
+                        false);
+                }
+
+                FarmSub->OnHarvestCompleted(ZoneID, TilePos, Yield);
+
+                if (SM && Adapter)
+                {
+                    const FGameplayTag ItemTag =
+                        Adapter->GetItemTagForCategory(ZoneData.CropCategory);
+
+                    if (ItemTag.IsValid())
+                    {
+                        SM->AddToStockpile(Task.SettlementID, ItemTag, Yield);
+
+                        UE_LOG(
+                            LogTemp,
+                            Log,
+                            TEXT("[ProductionProcessor] Farm harvest: +%d %s Settlement=%d Zone=%d Tile=(%d,%d)"),
+                            Yield,
+                            *ItemTag.ToString(),
+                            Task.SettlementID,
+                            ZoneID,
+                            TilePos.X,
+                            TilePos.Y);
+                    }
+                }
+            }
+            else
+            {
+                UE_LOG(
+                    LogTemp,
+                    Warning,
+                    TEXT("[ProductionProcessor] Farm harvest failed: ZoneID=%d not found."),
+                    ZoneID);
+            }
+        }
+        else if (Task.JobTag == TAG_Job_Farm_Clear)
+        {
+            // Clear/dead-crop cleanup is currently handled by FarmingSubsystem.
+        }
+        else if (Task.JobTag == TAG_Job_Farm_Fertilize)
+        {
+            // Fertilize support can be wired once farm inventory/tools exist.
+        }
+    }
+
+    // =====================================================================
+    // MINING COMPLETION ROUTING
+    // =====================================================================
+    else if (bIsMiningJob)
+    {
+        UMiningSubsystem* MiningSub = World ? World->GetSubsystem<UMiningSubsystem>() : nullptr;
+
+        if (!MiningSub)
+        {
+            UE_LOG(
+                LogTemp,
+                Warning,
+                TEXT("[ProductionProcessor] Mining completion failed: MiningSubsystem missing. Agent=%d TargetID=%d"),
+                Agent.AgentID,
+                Task.TargetID);
+
+            FailTaskAndReleaseAgent(Task, Agent, World);
+            return;
+        }
+
+        const bool bCompleted =
+            MiningSub->CompleteDesignation(Task.TargetID, Agent.AgentID);
+
+        if (!bCompleted)
+        {
+            UE_LOG(
+                LogTemp,
+                Warning,
+                TEXT("[ProductionProcessor] Mining completion failed: DesignationID=%d Agent=%d"),
+                Task.TargetID,
+                Agent.AgentID);
+
+            FailTaskAndReleaseAgent(Task, Agent, World);
+            return;
+        }
+
+        if (SM)
+        {
+            SM->AddToStockpile(Task.SettlementID, TAG_Item_Stone, 1);
 
             UE_LOG(
                 LogTemp,
                 Log,
-                TEXT("[ProductionProcessor] +%d %s in settlement %d"),
-                Output.Value,
-                *Output.Key.ToString(),
-                Task.SettlementID);
+                TEXT("[ProductionProcessor] Mine complete: +1 %s Settlement=%d DesignationID=%d"),
+                *TAG_Item_Stone.GetTag().ToString(),
+                Task.SettlementID,
+                Task.TargetID);
+        }
+    }
+
+    // =====================================================================
+    // GENERIC PRODUCTION COMPLETION
+    // =====================================================================
+    else
+    {
+        if (SM)
+        {
+            for (const TPair<FGameplayTag, int32>& Output : Task.OutputItems)
+            {
+                SM->AddToStockpile(Task.SettlementID, Output.Key, Output.Value);
+
+                UE_LOG(
+                    LogTemp,
+                    Log,
+                    TEXT("[ProductionProcessor] +%d %s in settlement %d"),
+                    Output.Value,
+                    *Output.Key.ToString(),
+                    Task.SettlementID);
+            }
         }
     }
 
@@ -394,6 +631,14 @@ void UProductionProcessor::CompleteTask(
     Agent.CurrentJobBuildingTag = FGameplayTag();
     Agent.ActiveReservationID = -1;
 
+    if (UProcessorManager* PM = World ? World->GetSubsystem<UProcessorManager>() : nullptr)
+    {
+        if (UJobProcessor* JP = PM->GetTypedProcessor<UJobProcessor>())
+        {
+            JP->CancelJobsForAgent(Task.AssignedAgentID, World);
+        }
+    }
+
     UE_LOG(
         LogTemp,
         Warning,
@@ -403,9 +648,12 @@ void UProductionProcessor::CompleteTask(
     UE_LOG(
         LogTemp,
         Log,
-        TEXT("[ProductionProcessor] Complete: %s agent %d"),
+        TEXT("[ProductionProcessor] Complete: %s agent %d TargetID=%d TargetGrid=(%d,%d)"),
         *Task.JobTag.ToString(),
-        Task.AssignedAgentID);
+        Task.AssignedAgentID,
+        Task.TargetID,
+        Task.TargetGridPos.X,
+        Task.TargetGridPos.Y);
 }
 
 // ====================================================================

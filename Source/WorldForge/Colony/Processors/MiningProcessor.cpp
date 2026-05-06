@@ -1,6 +1,7 @@
 #include "Processors/MiningProcessor.h"
 
 #include "Mining/MiningSubsystem.h"
+#include "SettlementManager.h"
 #include "WorldForgeTags.h"
 
 void UMiningProcessor::ProcessStep(
@@ -27,26 +28,40 @@ void UMiningProcessor::ProcessStep(
             continue;
         }
 
-        // Injured / sick agents with no usable efficiency cannot mine.
         if (Agent.CurrentEfficiency <= 0.0f)
         {
             continue;
         }
 
-        // Mining job reached destination / immediate test target.
         if (Agent.CurrentJobTag == TAG_Job_Mine &&
             AgentMiningDesignationIDs.Contains(Agent.AgentID))
         {
-            if (Agent.State == EAgentState::MovingToTarget &&
-                Agent.CurrentGridPos == Agent.CurrentNavTarget)
+            if (Agent.State == EAgentState::MovingToTarget)
             {
-                CompleteMiningDesignation(Agent, StepNumber, World);
+                if (Agent.CurrentGridPos == Agent.CurrentNavTarget)
+                {
+                    Agent.State = EAgentState::Working;
+
+                    UE_LOG(LogTemp, Warning,
+                        TEXT("[MiningProcessor] Agent %d reached mining target. Starting work. Target=(%d,%d) Step=%d"),
+                        Agent.AgentID,
+                        Agent.CurrentNavTarget.X,
+                        Agent.CurrentNavTarget.Y,
+                        StepNumber);
+                }
+
+                continue;
+            }
+
+            if (Agent.State == EAgentState::Working)
+            {
+                TickMiningWork(Agent, StepNumber, World);
+                continue;
             }
 
             continue;
         }
 
-        // Only idle agents can accept mining designations.
         if (Agent.State != EAgentState::Idle)
         {
             continue;
@@ -68,7 +83,6 @@ bool UMiningProcessor::TryAssignMiningDesignation(
         return false;
     }
 
-    // Health/injury efficiency affects whether this agent can take mining work.
     const float EfficiencyMod = FMath::Clamp(Agent.CurrentEfficiency, 0.0f, 1.5f);
     if (EfficiencyMod <= 0.0f)
     {
@@ -87,29 +101,66 @@ bool UMiningProcessor::TryAssignMiningDesignation(
         return false;
     }
 
+    FIntPoint LocalTarget = FIntPoint::ZeroValue;
+    if (!ConvertMineGridToLocalTarget(SettlementID, MineGrid, World, LocalTarget))
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[MiningProcessor] Failed to convert mine grid to local target. Agent=%d Designation=%d Grid=(%d,%d,%d)"),
+            Agent.AgentID,
+            DesignationID,
+            MineGrid.X,
+            MineGrid.Y,
+            MineGrid.Z);
+
+        Mining->FailDesignation(DesignationID, Agent.AgentID);
+        return false;
+    }
+
     AgentMiningDesignationIDs.Add(Agent.AgentID, DesignationID);
+    AgentMiningProgress.Add(Agent.AgentID, 0.0f);
 
     Agent.CurrentJobTag = TAG_Job_Mine;
     Agent.CurrentJobBuildingTag = FGameplayTag();
     Agent.ActiveReservationID = -1;
-
-    // Current temporary behavior:
-    // mining completes immediately instead of walking to far voxel-space coords.
-    Agent.CurrentNavTarget = Agent.CurrentGridPos;
+    Agent.CurrentNavTarget = LocalTarget;
     Agent.State = EAgentState::MovingToTarget;
 
     UE_LOG(LogTemp, Warning,
-        TEXT("[MiningProcessor] Agent %d assigned mining designation ID=%d -> Grid=(%d,%d,%d) Efficiency=%.2f Step=%d"),
+        TEXT("[MiningProcessor] Agent %d assigned mining designation ID=%d WorldGrid=(%d,%d,%d) LocalTarget=(%d,%d) Efficiency=%.2f Step=%d"),
         Agent.AgentID,
         DesignationID,
         MineGrid.X,
         MineGrid.Y,
         MineGrid.Z,
+        LocalTarget.X,
+        LocalTarget.Y,
         EfficiencyMod,
         StepNumber);
 
-    CompleteMiningDesignation(Agent, StepNumber, World);
     return true;
+}
+
+void UMiningProcessor::TickMiningWork(
+    FAgentData& Agent,
+    int32 StepNumber,
+    UWorld* World)
+{
+    float& Progress = AgentMiningProgress.FindOrAdd(Agent.AgentID);
+
+    const float EfficiencyMod = FMath::Clamp(Agent.CurrentEfficiency, 0.1f, 2.0f);
+    Progress += BaseMiningProgressPerStep * EfficiencyMod;
+
+    UE_LOG(LogTemp, Verbose,
+        TEXT("[MiningProcessor] Agent %d mining progress %.2f / %.2f Step=%d"),
+        Agent.AgentID,
+        Progress,
+        RequiredMiningProgress,
+        StepNumber);
+
+    if (Progress >= RequiredMiningProgress)
+    {
+        CompleteMiningDesignation(Agent, StepNumber, World);
+    }
 }
 
 void UMiningProcessor::CompleteMiningDesignation(
@@ -139,9 +190,34 @@ void UMiningProcessor::CompleteMiningDesignation(
         StepNumber);
 
     AgentMiningDesignationIDs.Remove(Agent.AgentID);
+    AgentMiningProgress.Remove(Agent.AgentID);
 
     Agent.State = EAgentState::Idle;
     Agent.CurrentJobTag = FGameplayTag();
     Agent.CurrentJobBuildingTag = FGameplayTag();
     Agent.ActiveReservationID = -1;
+}
+
+bool UMiningProcessor::ConvertMineGridToLocalTarget(
+    int32 SettlementID,
+    const FIntVector& MineGrid,
+    UWorld* World,
+    FIntPoint& OutLocalTarget) const
+{
+    const USettlementManager* SettlementManager = World
+        ? World->GetSubsystem<USettlementManager>()
+        : nullptr;
+
+    const FSettlementState* Settlement = SettlementManager
+        ? SettlementManager->GetSettlement(SettlementID)
+        : nullptr;
+
+    if (!Settlement)
+    {
+        return false;
+    }
+
+    const FIntPoint WorldCell(MineGrid.X, MineGrid.Y);
+    OutLocalTarget = WorldCell - Settlement->WorldOrigin;
+    return true;
 }

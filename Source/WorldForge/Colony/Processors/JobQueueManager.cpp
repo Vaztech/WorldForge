@@ -1,15 +1,43 @@
 #include "JobQueueManager.h"
 
 // ====================================================================
-// PostJob
+// JobQueueManager
 //
-// Creates a new queued job entry from the incoming request.
-// Assigns a unique JobID, clears assignment state, appends to Jobs,
-// and returns a pointer to the newly inserted entry.
+// Owns queued job storage and job selection scoring.
 //
-// WARNING:
-// The returned pointer is only valid until the next Add/Remove on Jobs.
+// Trait integration note:
+// Trait effects are applied before this file receives AgentData.
+// JobProcessor builds a temporary "scored agent" copy with:
+// - trait WorkEfficiencyMultiplier applied to CurrentEfficiency
+// - trait SkillModifiers applied to Skills
+//
+// This file then uses:
+// - Priority
+// - Skill
+// - CurrentEfficiency
+// - Distance
+//
+// to choose the best job.
 // ====================================================================
+
+namespace
+{
+    // Priority is intentionally very strong.
+    // Emergency/High jobs should usually beat normal jobs.
+    constexpr float PriorityWeight = 1000.0f;
+
+    // Skill makes a colonist prefer jobs they are better suited for.
+    // Trait SkillModifiers feed into this through JobProcessor.
+    constexpr float SkillWeight = 4.0f;
+
+    // Efficiency makes HardWorker/Fast/Slow/Lazy-style traits matter.
+    // JobProcessor applies trait WorkEfficiencyMultiplier before scoring.
+    constexpr float EfficiencyWeight = 250.0f;
+
+    // Distance prevents colonists from always picking far-away jobs.
+    constexpr float DistancePenaltyWeight = 1.5f;
+}
+
 FJobRequest* FJobQueueManager::PostJob(const FJobRequest& Request)
 {
     FJobRequest NewJob = Request;
@@ -21,13 +49,6 @@ FJobRequest* FJobQueueManager::PostJob(const FJobRequest& Request)
     return &Jobs.Last();
 }
 
-// ====================================================================
-// FindJobByIDMutable
-//
-// Searches the queue for a job with the given JobID and returns
-// mutable access if found.
-// Returns nullptr if no matching job exists.
-// ====================================================================
 FJobRequest* FJobQueueManager::FindJobByIDMutable(int32 JobID)
 {
     for (FJobRequest& J : Jobs)
@@ -41,12 +62,6 @@ FJobRequest* FJobQueueManager::FindJobByIDMutable(int32 JobID)
     return nullptr;
 }
 
-// ====================================================================
-// CancelJob
-//
-// Removes a specific job from the queue by JobID.
-// If no such job exists, nothing happens.
-// ====================================================================
 void FJobQueueManager::CancelJob(int32 JobID)
 {
     Jobs.RemoveAll([JobID](const FJobRequest& J)
@@ -55,12 +70,6 @@ void FJobQueueManager::CancelJob(int32 JobID)
         });
 }
 
-// ====================================================================
-// CancelAllJobsForAgent
-//
-// Removes all jobs currently assigned to the given agent.
-// Used when an agent dies, becomes invalid, or has jobs cancelled.
-// ====================================================================
 void FJobQueueManager::CancelAllJobsForAgent(int32 AgentID)
 {
     Jobs.RemoveAll([AgentID](const FJobRequest& J)
@@ -69,28 +78,13 @@ void FJobQueueManager::CancelAllJobsForAgent(int32 AgentID)
         });
 }
 
-// ====================================================================
-// FindBestJobForAgent
-//
-// Chooses the best unassigned job for a specific agent.
-//
-// Rules:
-// - Job must belong to the same settlement
-// - Job must not already be assigned
-// - If the job requires a skill, the agent must have that skill > 0
-// - Highest priority wins
-// - If priority ties, higher skill value wins
-//
-// Returns nullptr if no valid job exists.
-// ====================================================================
 FJobRequest* FJobQueueManager::FindBestJobForAgent(
     int32 AgentID,
     const FAgentData& AgentData,
     int32 SettlementID)
 {
     FJobRequest* Best = nullptr;
-    int32 BestPri = -1;
-    float BestSkill = -1.f;
+    float BestScore = -FLT_MAX;
 
     for (FJobRequest& J : Jobs)
     {
@@ -100,23 +94,41 @@ FJobRequest* FJobQueueManager::FindBestJobForAgent(
         }
 
         const int32 Pri = static_cast<int32>(J.Priority);
-        float Skill = 0.f;
 
-        // If job requires a skill, agent must have it
+        float Skill = 0.0f;
+
         if (J.RequiredSkill.IsValid())
         {
             Skill = GetAgentSkill(AgentData, J.RequiredSkill);
-            if (Skill <= 0.f)
+
+            // If a job requires a skill and the agent has none,
+            // skip it completely.
+            if (Skill <= 0.0f)
             {
                 continue;
             }
         }
 
-        // Higher priority wins; if tied, stronger skill wins
-        if (Pri > BestPri || (Pri == BestPri && Skill > BestSkill))
+        const int32 Distance =
+            FMath::Abs(AgentData.CurrentGridPos.X - J.TargetGridPos.X) +
+            FMath::Abs(AgentData.CurrentGridPos.Y - J.TargetGridPos.Y);
+
+        const float Efficiency = FMath::Clamp(
+            AgentData.CurrentEfficiency,
+            0.0f,
+            2.0f);
+
+        // Final weighted score.
+        // Higher score wins.
+        const float Score =
+            (Pri * PriorityWeight) +
+            (Skill * SkillWeight) +
+            (Efficiency * EfficiencyWeight) -
+            (Distance * DistancePenaltyWeight);
+
+        if (Score > BestScore)
         {
-            BestPri = Pri;
-            BestSkill = Skill;
+            BestScore = Score;
             Best = &J;
         }
     }
@@ -124,12 +136,6 @@ FJobRequest* FJobQueueManager::FindBestJobForAgent(
     return Best;
 }
 
-// ====================================================================
-// AssignJob
-//
-// Marks an existing job as assigned to the given agent.
-// If JobID is not found, nothing happens.
-// ====================================================================
 void FJobQueueManager::AssignJob(int32 JobID, int32 AgentID)
 {
     for (FJobRequest& J : Jobs)
@@ -143,11 +149,6 @@ void FJobQueueManager::AssignJob(int32 JobID, int32 AgentID)
     }
 }
 
-// ====================================================================
-// GetPendingCount
-//
-// Counts the number of unassigned jobs for a settlement.
-// ====================================================================
 int32 FJobQueueManager::GetPendingCount(int32 SID) const
 {
     int32 Count = 0;
@@ -163,11 +164,6 @@ int32 FJobQueueManager::GetPendingCount(int32 SID) const
     return Count;
 }
 
-// ====================================================================
-// GetAssignedCount
-//
-// Counts the number of assigned jobs for a settlement.
-// ====================================================================
 int32 FJobQueueManager::GetAssignedCount(int32 SID) const
 {
     int32 Count = 0;
@@ -183,25 +179,11 @@ int32 FJobQueueManager::GetAssignedCount(int32 SID) const
     return Count;
 }
 
-// ====================================================================
-// HasPendingJobs
-//
-// Convenience helper: returns true if settlement has any pending jobs.
-// ====================================================================
 bool FJobQueueManager::HasPendingJobs(int32 SID) const
 {
     return GetPendingCount(SID) > 0;
 }
 
-// ====================================================================
-// PruneCompletedJobs
-//
-// Removes orphaned assigned jobs whose AssignedAgentID is invalid.
-// This is a lightweight cleanup pass for queue hygiene.
-//
-// Note:
-// Current rule assumes an assigned job with AgentID < 0 is no longer valid.
-// ====================================================================
 void FJobQueueManager::PruneCompletedJobs()
 {
     Jobs.RemoveAll([](const FJobRequest& J)
@@ -210,12 +192,6 @@ void FJobQueueManager::PruneCompletedJobs()
         });
 }
 
-// ====================================================================
-// RestoreFromSave
-//
-// Restores the queue from serialized save data.
-// Rebuilds NextJobID so newly posted jobs continue with unique IDs.
-// ====================================================================
 void FJobQueueManager::RestoreFromSave(const TArray<FJobRequest>& Saved)
 {
     Jobs = Saved;
@@ -227,14 +203,8 @@ void FJobQueueManager::RestoreFromSave(const TArray<FJobRequest>& Saved)
     }
 }
 
-// ====================================================================
-// GetAgentSkill
-//
-// Looks up the agent's numeric skill value for the given tag.
-// Returns 0 if the skill is not present.
-// ====================================================================
 float FJobQueueManager::GetAgentSkill(const FAgentData& A, FGameplayTag Tag) const
 {
     const float* V = A.Skills.Find(Tag);
-    return V ? *V : 0.f;
+    return V ? *V : 0.0f;
 }

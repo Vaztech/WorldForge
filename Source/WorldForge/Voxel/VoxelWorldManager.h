@@ -11,6 +11,7 @@
 class AVoxelWorld;
 class AStaticMeshActor;
 class UStaticMesh;
+class UResourceSpawnSubsystem;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnTerrainReady);
 
@@ -136,7 +137,7 @@ public:
         FIntVector& OutBlock,
         int32 MaxSearchDown = 64) const;
 
-    
+
     /**
      * Restore a previously removed block for undo.
      *
@@ -196,8 +197,32 @@ public:
     UFUNCTION(BlueprintCallable, Category = "WorldForge|Voxel")
     void SetPipelineVolcanoes(const TArray<FVolcanoData>& InVolcanoes);
 
+    // ── FIX (Resource Discovery): Accept updated tile resource data from the pipeline.
+    // Call AFTER Step08_SeedResources so PendingWorldTiles and the snapshot
+    // contain VeinConfig/ResourceSurvey data for the terrain-ready hook.
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Voxel")
+    void SetPipelineResourceData(const TArray<FWorldTileData>& UpdatedTiles);
+
     UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
     bool HasCachedTerrainData() const;
+
+    // ── Resource Discovery: Public accessors for ResourceSpawnSubsystem ──
+
+    /** Get the cached world tiles array (read-only). Returns empty if terrain not cached. */
+    const TArray<FWorldTileData>& GetCachedWorldTiles() const;
+
+    /** Get the cached terrain grid width. */
+    int32 GetCachedGridWidth() const { return CachedTerrainGridWidth; }
+
+    /** Get the cached terrain grid height. */
+    int32 GetCachedGridHeight() const { return CachedTerrainGridHeight; }
+
+    /**
+     * Get the world-space surface height at a terrain cell.
+     * Returns the surface Z in world units (voxel Z * VoxelSize + origin Z).
+     * Returns 0 if the cell is invalid or terrain data is not cached.
+     */
+    float GetSurfaceHeightWorldAtTerrainCell(FIntPoint Cell) const;
 
     UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
     bool TryGetSurfaceWorldLocation(FIntPoint GridCell, FVector& OutWorldLocation, float ZOffset = 0.0f) const;
@@ -572,17 +597,19 @@ private:
     void ClearPendingTerrainRequest();
     void BroadcastTerrainReadyIfNeeded();
 
+    // ── Resource Discovery: notify ResourceSpawnSubsystem when terrain is ready ──
+    void NotifyResourceSpawnSystemTerrainReady();
+
     UPROPERTY(Transient)
     TObjectPtr<AVoxelWorld> VoxelWorldActor = nullptr;
 
     FWorldForgeTerrainSnapshot TerrainSnapshot;
 
-    void MarkTerrainBlockRemoved(const FIntVector& GridPos);
-    void UnmarkTerrainBlockRemoved(const FIntVector& GridPos);
-    bool IsTerrainBlockRemoved(const FIntVector& GridPos) const;
-    void RefreshEditedVoxel(const FIntVector& GridPos);
-    bool ApplyRuntimeVoxelRemoval(const FIntVector& GridPos);
+    // ── v5.0: SDF brush helpers for the Hybrid Chunking Modification Path ──
+    FSDFBrush MakeDigBrush(const FIntVector& GridPos) const;
+    bool ApplyRuntimeBrush(const FSDFBrush& Brush);
     bool ApplyRuntimeVoxelRestore(const FIntVector& GridPos);
+    void RefreshEditedVoxel(const FIntVector& GridPos);
 
     UPROPERTY(Transient)
     TMap<FIntVector, TObjectPtr<AStaticMeshActor>> RuntimeDigHoleActors;
@@ -616,8 +643,8 @@ private:
     UPROPERTY(Transient)
     TMap<FIntVector, TObjectPtr<AStaticMeshActor>> FallbackPlacedBlockActors;
 
-    UPROPERTY(Transient)
-    TSet<FIntVector> RemovedTerrainBlocks;
+    // v5.0: RemovedTerrainBlocks replaced by TerrainSnapshot.Modifications
+    // (FTerrainModificationMap — chunk-indexed SDF brush volumes)
 
     UPROPERTY(Transient)
     FTimerHandle TerrainRetryTimerHandle;

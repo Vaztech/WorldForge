@@ -1,3 +1,5 @@
+// MiningProcessor.h
+
 #pragma once
 
 #include "CoreMinimal.h"
@@ -22,10 +24,21 @@ public:
         return FName(TEXT("Mining"));
     }
 
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Simulation|Mining")
+    float RequiredMiningProgress = 10.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Simulation|Mining")
+    float BaseMiningProgressPerStep = 1.0f;
+
 private:
     bool TryAssignMiningDesignation(
         FAgentData& Agent,
         int32 SettlementID,
+        int32 StepNumber,
+        UWorld* World);
+
+    void TickMiningWork(
+        FAgentData& Agent,
         int32 StepNumber,
         UWorld* World);
 
@@ -34,7 +47,16 @@ private:
         int32 StepNumber,
         UWorld* World);
 
+    bool ConvertMineGridToLocalTarget(
+        int32 SettlementID,
+        const FIntVector& MineGrid,
+        UWorld* World,
+        FIntPoint& OutLocalTarget) const;
+
 private:
     UPROPERTY()
     TMap<int32, int32> AgentMiningDesignationIDs;
+
+    UPROPERTY()
+    TMap<int32, float> AgentMiningProgress;
 };

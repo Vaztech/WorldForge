@@ -2,7 +2,46 @@
 
 #include "EventBus.h"
 #include "WorldForgeDataTypes.h"
-#include "WorldForgeTags.h" // Phase 2 fix: use typed gameplay tag constants
+#include "WorldForgeTags.h"
+#include "Modifiers/WorldForgeModifierResolver.h"
+
+// ====================================================================
+// SHARED MODIFIER SUPPORT
+//
+// NeedsProcessor no longer reads DT_WorldForgeTraits directly.
+// It uses WorldForgeModifierResolver so decay reacts to:
+//
+// Traits (now)
+// Equipment (later)
+// Buffs / Debuffs (later)
+//
+// ====================================================================
+namespace
+{
+    float GetMoodBasedDecayMultiplier(const FAgentData& Agent)
+    {
+        const FWorldForgeResolvedModifiers Mods =
+            UWorldForgeModifierResolver::ResolveAgentModifiers(Agent);
+
+        // Positive MoodModifier = slower decay
+        // Negative MoodModifier = faster decay
+        const float Multiplier = 1.0f - (Mods.MoodModifier * 0.01f);
+
+        return FMath::Clamp(Multiplier, 0.25f, 2.0f);
+    }
+
+    float GetSocialDecayMultiplier(const FAgentData& Agent)
+    {
+        const FWorldForgeResolvedModifiers Mods =
+            UWorldForgeModifierResolver::ResolveAgentModifiers(Agent);
+
+        // Positive SocialModifier = slower decay
+        // Negative SocialModifier = faster decay
+        const float Multiplier = 1.0f - (Mods.SocialModifier * 0.01f);
+
+        return FMath::Clamp(Multiplier, 0.25f, 2.0f);
+    }
+}
 
 void UNeedsProcessor::ProcessStep(
     int32 Step,
@@ -15,27 +54,25 @@ void UNeedsProcessor::ProcessStep(
 
     for (FAgentData& Agent : Agents)
     {
-        // Only process living agents that belong to this settlement.
         if (Agent.SettlementID != SettlementID || Agent.State == EAgentState::Dead)
         {
             continue;
         }
 
-        // Decay core needs deterministically once per simulation step.
-        Agent.FoodNeed = FMath::Max(0.f, Agent.FoodNeed - FoodDecay);
-        Agent.SleepNeed = FMath::Max(0.f, Agent.SleepNeed - SleepDecay);
-        Agent.SocialNeed = FMath::Max(0.f, Agent.SocialNeed - SocialDecay);
-        Agent.SafetyNeed = FMath::Max(0.f, Agent.SafetyNeed - SafetyDecay);
-        Agent.PurposeNeed = FMath::Max(0.f, Agent.PurposeNeed - PurposeDecay);
+        const float MoodDecayMultiplier = GetMoodBasedDecayMultiplier(Agent);
+        const float SocialDecayMultiplier = GetSocialDecayMultiplier(Agent);
 
-        // If there is no event bus, needs still decay; we just skip event emission.
+        Agent.FoodNeed = FMath::Max(0.0f, Agent.FoodNeed - FoodDecay);
+        Agent.SleepNeed = FMath::Max(0.0f, Agent.SleepNeed - (SleepDecay * MoodDecayMultiplier));
+        Agent.SocialNeed = FMath::Max(0.0f, Agent.SocialNeed - (SocialDecay * SocialDecayMultiplier));
+        Agent.SafetyNeed = FMath::Max(0.0f, Agent.SafetyNeed - (SafetyDecay * MoodDecayMultiplier));
+        Agent.PurposeNeed = FMath::Max(0.0f, Agent.PurposeNeed - (PurposeDecay * MoodDecayMultiplier));
+
         if (!Bus)
         {
             continue;
         }
 
-        // Emit critical-food event using typed gameplay tags.
-        // This replaces string-based RequestGameplayTag usage.
         if (Agent.FoodNeed < CriticalThreshold)
         {
             FSimulationEvent Event;

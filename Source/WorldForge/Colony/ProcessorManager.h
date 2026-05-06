@@ -12,6 +12,7 @@ class UDiplomacySubsystem;
 class UNavalSystem;
 class UCosmicSimulationSubsystem;
 class UVoxelSpawnSubsystem;
+class UFarmingSubsystem;  // ════ Wild Harvest Integration ════
 
 UCLASS(BlueprintType)
 class WORLDFORGE_API UProcessorManager : public UWorldSubsystem
@@ -101,4 +102,5 @@ private:
     UPROPERTY() UNavalSystem* Naval = nullptr;
     UPROPERTY() UCosmicSimulationSubsystem* CosmicSim = nullptr;
     UPROPERTY() UVoxelSpawnSubsystem* VoxelSpawn = nullptr;
+    UPROPERTY() UFarmingSubsystem* FarmingSub = nullptr;  // ════ Wild Harvest Integration ════
 };

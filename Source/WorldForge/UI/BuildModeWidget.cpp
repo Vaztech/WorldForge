@@ -154,6 +154,36 @@ void UBuildModeWidget::SwitchToDigMode()
 	UE_LOG(LogTemp, Log, TEXT("[BuildModeWidget] Switched to dig mode."));
 }
 
+void UBuildModeWidget::SwitchToMineMode()
+{
+	UBuildModeManager* Mgr = GetManager();
+	if (!Mgr)
+	{
+		return;
+	}
+
+	Mgr->EnterMineMode();
+
+	OnStockpileChanged(FGameplayTag::EmptyTag, 0);
+
+	UE_LOG(LogTemp, Log, TEXT("[BuildModeWidget] Switched to mine mode."));
+}
+
+void UBuildModeWidget::SwitchToFarmMode()
+{
+	UBuildModeManager* Mgr = GetManager();
+	if (!Mgr)
+	{
+		return;
+	}
+
+	Mgr->EnterFarmMode();
+
+	OnStockpileChanged(FGameplayTag::EmptyTag, 0);
+
+	UE_LOG(LogTemp, Log, TEXT("[BuildModeWidget] Switched to farm mode."));
+}
+
 void UBuildModeWidget::CancelBuild()
 {
 	UBuildModeManager* Mgr = GetManager();
@@ -287,7 +317,9 @@ FText UBuildModeWidget::GetCurrentCostLabel() const
 		return FText::FromString(TEXT("Cost: N/A"));
 	}
 
-	if (Mgr->GetCurrentToolMode() == EBuildToolMode::Dig)
+	if (Mgr->GetCurrentToolMode() == EBuildToolMode::Dig ||
+		Mgr->GetCurrentToolMode() == EBuildToolMode::Mine ||
+		Mgr->GetCurrentToolMode() == EBuildToolMode::Farm)
 	{
 		return FText::FromString(TEXT("Cost: None"));
 	}
@@ -317,7 +349,9 @@ FText UBuildModeWidget::GetCurrentAvailabilityLabel() const
 		return FText::FromString(TEXT("Available: N/A"));
 	}
 
-	if (Mgr->GetCurrentToolMode() == EBuildToolMode::Dig)
+	if (Mgr->GetCurrentToolMode() == EBuildToolMode::Dig ||
+		Mgr->GetCurrentToolMode() == EBuildToolMode::Mine ||
+		Mgr->GetCurrentToolMode() == EBuildToolMode::Farm)
 	{
 		return FText::FromString(TEXT("Available: N/A"));
 	}
@@ -340,7 +374,9 @@ bool UBuildModeWidget::GetCanAffordCurrentSelection() const
 		return false;
 	}
 
-	if (Mgr->GetCurrentToolMode() == EBuildToolMode::Dig)
+	if (Mgr->GetCurrentToolMode() == EBuildToolMode::Dig ||
+		Mgr->GetCurrentToolMode() == EBuildToolMode::Mine ||
+		Mgr->GetCurrentToolMode() == EBuildToolMode::Farm)
 	{
 		return true;
 	}
@@ -390,6 +426,9 @@ FText UBuildModeWidget::GetCurrentToolModeLabel() const
 	case EBuildToolMode::Mine:
 		return FText::FromString(TEXT("Mode: Mine"));
 
+	case EBuildToolMode::Farm:
+		return FText::FromString(TEXT("Mode: Farm"));
+
 	case EBuildToolMode::None:
 	default:
 		return FText::FromString(TEXT("Mode: None"));
@@ -400,4 +439,16 @@ bool UBuildModeWidget::IsDigModeActive() const
 {
 	const UBuildModeManager* Mgr = const_cast<UBuildModeWidget*>(this)->GetManager();
 	return Mgr && Mgr->GetCurrentToolMode() == EBuildToolMode::Dig;
+}
+
+bool UBuildModeWidget::IsMineModeActive() const
+{
+	const UBuildModeManager* Mgr = const_cast<UBuildModeWidget*>(this)->GetManager();
+	return Mgr && Mgr->GetCurrentToolMode() == EBuildToolMode::Mine;
+}
+
+bool UBuildModeWidget::IsFarmModeActive() const
+{
+	const UBuildModeManager* Mgr = const_cast<UBuildModeWidget*>(this)->GetManager();
+	return Mgr && Mgr->GetCurrentToolMode() == EBuildToolMode::Farm;
 }

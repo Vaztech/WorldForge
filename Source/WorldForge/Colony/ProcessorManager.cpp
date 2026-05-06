@@ -24,6 +24,7 @@
 #include "CosmicSimulationSubsystem.h"
 #include "Visual/VoxelSpawnSubsystem.h"
 #include "../Core/Narrative/CommandersDeskManager.h"
+#include "../Farming/FarmingSubsystem.h"  // ════ Wild Harvest Integration ════
 
 // Required for FGameplayTag::RequestGameplayTag
 #include "GameplayTagContainer.h"
@@ -48,6 +49,7 @@ void UProcessorManager::Initialize(FSubsystemCollectionBase& Collection)
         Naval = World->GetSubsystem<UNavalSystem>();
         CosmicSim = World->GetSubsystem<UCosmicSimulationSubsystem>();
         VoxelSpawn = World->GetSubsystem<UVoxelSpawnSubsystem>();
+        FarmingSub = World->GetSubsystem<UFarmingSubsystem>();  // ════ Wild Harvest Integration ════
     }
 
     UE_LOG(
@@ -92,6 +94,7 @@ void UProcessorManager::Deinitialize()
     Naval = nullptr;
     CosmicSim = nullptr;
     VoxelSpawn = nullptr;
+    FarmingSub = nullptr;  // ════ Wild Harvest Integration ════
 
     Super::Deinitialize();
 }
@@ -135,6 +138,19 @@ void UProcessorManager::RunSimulationStep(int32 StepNumber)
     if (!VoxelSpawn)
     {
         VoxelSpawn = World->GetSubsystem<UVoxelSpawnSubsystem>();
+    }
+
+    // FarmingSubsystem can also initialize after ProcessorManager.
+    // If FarmingSub was null during Initialize(), reacquire it here so
+    // farm zones can tick and post Plant/Water/Harvest jobs.
+    if (!FarmingSub)
+    {
+        FarmingSub = World->GetSubsystem<UFarmingSubsystem>();
+
+        if (FarmingSub)
+        {
+            UE_LOG(LogTemp, Log, TEXT("[ProcessorManager] Late-bound FarmingSubsystem."));
+        }
     }
 
     for (float& T : ProcessorTimingsMs)
@@ -195,6 +211,23 @@ void UProcessorManager::RunSimulationStep(int32 StepNumber)
         if (CosmicSim)
         {
             CosmicSim->OnSimStep(StepNumber, SID, Agents, World);
+        }
+
+        // ════ Wild Harvest Integration ════
+        // Farming tick runs after all colony processors + world-level systems,
+        // before EventBus flush, so farm job events land in the same flush.
+        if (FarmingSub)
+        {
+            FarmingSub->TickFarmZones(StepNumber);
+
+            if (StepNumber % 10 == 0)
+            {
+                UE_LOG(LogTemp, Verbose, TEXT("[ProcessorManager] TickFarmZones called at Step=%d Settlement=%d"), StepNumber, SID);
+            }
+        }
+        else if (StepNumber % 10 == 0)
+        {
+            UE_LOG(LogTemp, Warning, TEXT("[ProcessorManager] FarmingSubsystem still null at Step=%d"), StepNumber);
         }
     }
 

@@ -45,6 +45,8 @@
 #include "WorldForgeTerrainGenerator.h"
 #include "Data/WorldForgeTags.h"
 #include "Utility/WorldForgeTerrainMath.h"
+#include "Mining/ResourceSpawnSubsystem.h"
+#include "Farming/WildHarvestAdapter.h"  // ════ Wild Harvest Integration ════
 
 // ─── [BIOME TAG HELPERS] ─────────────────────────────────────
 // Cached-by-call tag accessors. Kept in an anonymous namespace
@@ -194,8 +196,9 @@ void UVoxelWorldManager::Initialize(FSubsystemCollectionBase& Collection)
 
     // ── BUILD STAMP: If this line does NOT appear in the log, the editor
     // is still running a stale DLL.  Close UE, Rebuild in VS, relaunch.
+    // v5.0: Hybrid Chunking Modification Path
     UE_LOG(LogTemp, Log,
-        TEXT("[VoxelWorldManager] ===== BUILD TIMESTAMP: %s %s ====="),
+        TEXT("[VoxelWorldManager] ===== BUILD v5.0 TIMESTAMP: %s %s ====="),
         TEXT(__DATE__), TEXT(__TIME__));
 
     UE_LOG(LogTemp, Log, TEXT("[VoxelWorldManager] Initialized."));
@@ -216,7 +219,7 @@ void UVoxelWorldManager::Deinitialize()
     // Clear pipeline source data (not cleared by ClearTerrainCache)
     CachedMountainRanges.Reset();
     CachedVolcanoes.Reset();
-    
+
     ClearPlacedBlockVisuals();
 
     Super::Deinitialize();
@@ -461,10 +464,10 @@ void UVoxelWorldManager::BuildTerrainSnapshot(
     TerrainSnapshot.CachedBiomeTags = CachedBiomeTags;
     TerrainSnapshot.CachedSurfaceHeightsVoxels = CachedSurfaceHeightsVoxels;
 
-    // Keep the generator snapshot synced with all persistent dig edits.
-    // The active voxel generator owns a copied snapshot, so this mask must be
-    // copied into every rebuilt terrain snapshot.
-    TerrainSnapshot.RemovedTerrainBlocks = RemovedTerrainBlocks;
+    // ── v5.0: Initialize the modification map with grid parameters
+    // so it can convert voxel coords → chunk keys.  This does NOT clear
+    // existing brushes — modifications persist across snapshot rebuilds.
+    TerrainSnapshot.InitializeModifications();
 
     if (bLogTerrainGeneration)
     {
@@ -601,8 +604,9 @@ FWorldForgeTerrainSnapshot UVoxelWorldManager::MakeLocalTerrainSnapshot() const
     S.PipelineMountainRanges = CachedMountainRanges;
     S.PipelineVolcanoes = CachedVolcanoes;
 
-    // Keep local snapshots aware of active dig edits.
-    S.RemovedTerrainBlocks = RemovedTerrainBlocks;
+    // ── v5.0: Copy the modification map from the main snapshot.
+    // Single source of truth for all terrain edits.
+    S.Modifications = TerrainSnapshot.Modifications;
 
     return S;
 }
@@ -708,6 +712,52 @@ void UVoxelWorldManager::SetPipelineVolcanoes(const TArray<FVolcanoData>& InVolc
         UE_LOG(LogTemp, Log,
             TEXT("[VoxelWorldManager] Cached %d pipeline volcanoes for terrain generation."),
             CachedVolcanoes.Num());
+    }
+}
+
+// ── FIX (Resource Discovery): Patch resource data into pending/cached tiles.
+// Step05 copies tiles into PendingWorldTiles BEFORE Step08 writes VeinConfig.
+// This method lets the pipeline push the updated resource fields after Step08.
+void UVoxelWorldManager::SetPipelineResourceData(const TArray<FWorldTileData>& UpdatedTiles)
+{
+    const int32 TileCount = UpdatedTiles.Num();
+
+    // Patch PendingWorldTiles (used if terrain gen is still deferred via retry)
+    if (PendingWorldTiles.Num() == TileCount)
+    {
+        for (int32 i = 0; i < TileCount; ++i)
+        {
+            PendingWorldTiles[i].ResourceTags = UpdatedTiles[i].ResourceTags;
+            PendingWorldTiles[i].ResourceSurvey = UpdatedTiles[i].ResourceSurvey;
+            PendingWorldTiles[i].VeinConfig = UpdatedTiles[i].VeinConfig;
+        }
+
+        UE_LOG(LogTemp, Log,
+            TEXT("[VoxelWorldManager] Patched resource data into %d PendingWorldTiles."),
+            TileCount);
+    }
+
+    // Patch TerrainSnapshot.WorldTiles (used if terrain already built)
+    if (TerrainSnapshot.WorldTiles.Num() == TileCount)
+    {
+        for (int32 i = 0; i < TileCount; ++i)
+        {
+            TerrainSnapshot.WorldTiles[i].ResourceTags = UpdatedTiles[i].ResourceTags;
+            TerrainSnapshot.WorldTiles[i].ResourceSurvey = UpdatedTiles[i].ResourceSurvey;
+            TerrainSnapshot.WorldTiles[i].VeinConfig = UpdatedTiles[i].VeinConfig;
+        }
+
+        UE_LOG(LogTemp, Log,
+            TEXT("[VoxelWorldManager] Patched resource data into %d TerrainSnapshot tiles."),
+            TileCount);
+    }
+
+    if (PendingWorldTiles.Num() != TileCount && TerrainSnapshot.WorldTiles.Num() != TileCount)
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[VoxelWorldManager] SetPipelineResourceData: tile count mismatch. "
+                "Updated=%d Pending=%d Snapshot=%d — resource data NOT patched."),
+            TileCount, PendingWorldTiles.Num(), TerrainSnapshot.WorldTiles.Num());
     }
 }
 
@@ -1130,7 +1180,8 @@ void UVoxelWorldManager::ClearTerrainCache()
     CachedVoxelProfiles.Reset();
     CachedBiomeTags.Reset();
     CachedTileElevations.Reset();
-    RemovedTerrainBlocks.Reset();
+    // v5.0: Clear terrain modifications on full cache reset
+    TerrainSnapshot.ClearAllModifications();
 
     // NOTE: CachedMountainRanges and CachedVolcanoes are NOT cleared here.
     // They are pipeline SOURCE data set by SetPipelineMountainRanges() and
@@ -2360,6 +2411,340 @@ void UVoxelWorldManager::BroadcastTerrainReadyIfNeeded()
     }
 
     OnTerrainReady.Broadcast();
+
+    // ── Resource Discovery: notify ResourceSpawnSubsystem that all terrain
+    // tiles are ready for resource node spawning.
+    NotifyResourceSpawnSystemTerrainReady();
+}
+
+// ── Resource Discovery: public accessors ──
+
+const TArray<FWorldTileData>& UVoxelWorldManager::GetCachedWorldTiles() const
+{
+    // Return the snapshot's tile array (populated during BuildTerrainSnapshot).
+    // If terrain hasn't been generated yet, this returns an empty array.
+    return TerrainSnapshot.WorldTiles;
+}
+
+float UVoxelWorldManager::GetSurfaceHeightWorldAtTerrainCell(FIntPoint Cell) const
+{
+    if (!HasCachedTerrainData() || !IsValidTerrainCell(Cell))
+    {
+        return 0.0f;
+    }
+
+    const FIntPoint ClampedCell = ClampTerrainCellToBounds(Cell);
+    const int32 Index = TerrainIndex(ClampedCell);
+
+    if (!CachedSurfaceHeightsVoxels.IsValidIndex(Index))
+    {
+        return 0.0f;
+    }
+
+    const float SurfaceVoxelZ = CachedSurfaceHeightsVoxels[Index];
+    const float RVS = GetRenderVoxelSize();
+    const FVector Origin = GetVoxelWorldOrigin();
+
+    return Origin.Z + (SurfaceVoxelZ * RVS) + TerrainSurfaceZOffset;
+}
+
+// ── Resource Discovery: terrain-ready notification ──
+
+void UVoxelWorldManager::NotifyResourceSpawnSystemTerrainReady()
+{
+    UWorld* World = GetWorld();
+    if (!World)
+    {
+        return;
+    }
+
+    UResourceSpawnSubsystem* ResourceSpawn = World->GetSubsystem<UResourceSpawnSubsystem>();
+    if (!ResourceSpawn)
+    {
+        UE_LOG(LogTemp, Log,
+            TEXT("[VoxelWorldManager] ResourceSpawnSubsystem not found — skipping resource node spawn. "
+                "(Normal if resource system is not yet enabled.)"));
+        return;
+    }
+
+    // ── Auto-configure Shatter Stone assets from TerrainSettings ────
+    // This replaces the Blueprint-side SetOreDataTable / SetNodeBlueprintClass
+    // calls.  The user picks the assets once in Project Settings → WorldForge
+    // → Resources → ShatterStone, and this code wires them in automatically
+    // before the first OnChunkActivated fires.
+    {
+        const UWorldForgeTerrainSettings* Settings = GetDefault<UWorldForgeTerrainSettings>();
+        if (Settings)
+        {
+            // Load and register data table for all categories.
+            if (!Settings->ShatterStoneDataTable.IsNull())
+            {
+                UDataTable* DT = Settings->ShatterStoneDataTable.LoadSynchronous();
+                if (DT)
+                {
+                    for (int32 i = 0; i < static_cast<int32>(EResourceCategory::COUNT); ++i)
+                    {
+                        ResourceSpawn->SetOreDataTable(
+                            static_cast<EResourceCategory>(i), DT);
+                    }
+
+                    UE_LOG(LogTemp, Log,
+                        TEXT("[VoxelWorldManager] Auto-configured ShatterStone DataTable: %s"),
+                        *DT->GetPathName());
+                }
+                else
+                {
+                    UE_LOG(LogTemp, Warning,
+                        TEXT("[VoxelWorldManager] ShatterStoneDataTable configured but failed to load. "
+                            "Check Project Settings → WorldForge → Resources → ShatterStone."));
+                }
+            }
+            else
+            {
+                UE_LOG(LogTemp, Warning,
+                    TEXT("[VoxelWorldManager] ShatterStoneDataTable not set. "
+                        "No ore nodes will spawn. Set it in Project Settings → WorldForge → Resources → ShatterStone."));
+            }
+
+            // Load and register node Blueprint class.
+            if (!Settings->ShatterStoneNodeClass.IsNull())
+            {
+                UClass* NodeClass = Settings->ShatterStoneNodeClass.LoadSynchronous();
+                if (NodeClass)
+                {
+                    ResourceSpawn->SetNodeBlueprintClass(NodeClass);
+
+                    UE_LOG(LogTemp, Log,
+                        TEXT("[VoxelWorldManager] Auto-configured ShatterStone NodeClass: %s"),
+                        *NodeClass->GetPathName());
+                }
+                else
+                {
+                    UE_LOG(LogTemp, Warning,
+                        TEXT("[VoxelWorldManager] ShatterStoneNodeClass configured but failed to load. "
+                            "Check Project Settings → WorldForge → Resources → ShatterStone."));
+                }
+            }
+            else
+            {
+                UE_LOG(LogTemp, Warning,
+                    TEXT("[VoxelWorldManager] ShatterStoneNodeClass not set. "
+                        "No ore nodes will spawn. Set it in Project Settings → WorldForge → Resources → ShatterStone."));
+            }
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // Wild Harvest Integration — Auto-configure WildHarvestAdapter
+    //
+    // Same pattern as Shatter Stone above.  The user picks the assets
+    // once in Project Settings → WorldForge → Farming → WildHarvest,
+    // and this code wires them into WildHarvestAdapter automatically.
+    // ════════════════════════════════════════════════════════════════
+    {
+        UWildHarvestAdapter* WildHarvestAdapter = World->GetSubsystem<UWildHarvestAdapter>();
+        if (WildHarvestAdapter)
+        {
+            const UWorldForgeTerrainSettings* WHSettings = GetDefault<UWorldForgeTerrainSettings>();
+            if (WHSettings)
+            {
+                // Load and register DT_LowPoly data table.
+                if (!WHSettings->WildHarvest_DT_LowPoly.IsNull())
+                {
+                    UDataTable* CropDT = WHSettings->WildHarvest_DT_LowPoly.LoadSynchronous();
+                    if (CropDT)
+                    {
+                        WildHarvestAdapter->SetCropDataTable(CropDT);
+
+                        UE_LOG(LogTemp, Log,
+                            TEXT("[VoxelWorldManager] Auto-configured WildHarvest DataTable: %s"),
+                            *CropDT->GetPathName());
+                    }
+                    else
+                    {
+                        UE_LOG(LogTemp, Warning,
+                            TEXT("[VoxelWorldManager] WildHarvest_DT_LowPoly configured but failed to load. "
+                                "Check Project Settings → WorldForge → Farming → WildHarvest."));
+                    }
+                }
+                else
+                {
+                    UE_LOG(LogTemp, Log,
+                        TEXT("[VoxelWorldManager] WildHarvest_DT_LowPoly not set. "
+                            "Farming will not function. Set it in Project Settings → WorldForge → Farming → WildHarvest."));
+                }
+
+                // Load and register crop patch Blueprint class.
+                // Prefer the LowPoly sub-pack class; fall back to the master class.
+                bool bClassSet = false;
+
+                if (!WHSettings->WildHarvestCropPatchLowPolyClass.IsNull())
+                {
+                    UClass* PatchClass = WHSettings->WildHarvestCropPatchLowPolyClass.LoadSynchronous();
+                    if (PatchClass)
+                    {
+                        WildHarvestAdapter->SetCropPatchClass(PatchClass);
+                        bClassSet = true;
+
+                        UE_LOG(LogTemp, Log,
+                            TEXT("[VoxelWorldManager] Auto-configured WildHarvest CropPatchClass (LowPoly): %s"),
+                            *PatchClass->GetPathName());
+                    }
+                }
+
+                if (!bClassSet && !WHSettings->WildHarvestCropPatchMasterClass.IsNull())
+                {
+                    UClass* MasterClass = WHSettings->WildHarvestCropPatchMasterClass.LoadSynchronous();
+                    if (MasterClass)
+                    {
+                        WildHarvestAdapter->SetCropPatchClass(MasterClass);
+                        bClassSet = true;
+
+                        UE_LOG(LogTemp, Log,
+                            TEXT("[VoxelWorldManager] Auto-configured WildHarvest CropPatchClass (Master): %s"),
+                            *MasterClass->GetPathName());
+                    }
+                }
+
+                if (!bClassSet)
+                {
+                    UE_LOG(LogTemp, Log,
+                        TEXT("[VoxelWorldManager] WildHarvest CropPatchClass not set. "
+                            "Farming will not function. Set it in Project Settings → WorldForge → Farming → WildHarvest."));
+                }
+            }
+        }
+        else
+        {
+            UE_LOG(LogTemp, Log,
+                TEXT("[VoxelWorldManager] WildHarvestAdapter not found — skipping farming auto-config."));
+        }
+    }
+
+    const TArray<FWorldTileData>& Tiles = TerrainSnapshot.WorldTiles;
+    const int32 GW = CachedTerrainGridWidth;
+    const int32 GH = CachedTerrainGridHeight;
+
+    if (Tiles.Num() != GW * GH || GW <= 0 || GH <= 0)
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[VoxelWorldManager] NotifyResourceSpawnSystemTerrainReady — tile data invalid. "
+                "Tiles=%d Grid=%dx%d"),
+            Tiles.Num(), GW, GH);
+        return;
+    }
+
+    int32 SnapshotHasVeinBoolCount = 0;
+    int32 SnapshotHasPresentCategoriesCount = 0;
+    int32 SnapshotHasSpawnSeedsCount = 0;
+    int32 SnapshotHasDepthRangesCount = 0;
+    int32 SnapshotHasAnyVeinDataCount = 0;
+
+    for (const FWorldTileData& Tile : Tiles)
+    {
+        const bool bHasBool = Tile.VeinConfig.bHasVeins;
+        const bool bHasPresentCategories = Tile.VeinConfig.PresentCategories.Num() > 0;
+        const bool bHasSpawnSeeds = Tile.VeinConfig.SpawnSeeds.Num() > 0;
+        const bool bHasDepthRanges = Tile.VeinConfig.DepthRanges.Num() > 0;
+
+        if (bHasBool)
+        {
+            ++SnapshotHasVeinBoolCount;
+        }
+
+        if (bHasPresentCategories)
+        {
+            ++SnapshotHasPresentCategoriesCount;
+        }
+
+        if (bHasSpawnSeeds)
+        {
+            ++SnapshotHasSpawnSeedsCount;
+        }
+
+        if (bHasDepthRanges)
+        {
+            ++SnapshotHasDepthRangesCount;
+        }
+
+        if (bHasBool || bHasPresentCategories || bHasSpawnSeeds || bHasDepthRanges)
+        {
+            ++SnapshotHasAnyVeinDataCount;
+        }
+    }
+
+    UE_LOG(LogTemp, Warning,
+        TEXT("[VoxelWorldManager] Resource snapshot diagnostic: bHasVeins=%d PresentCategories=%d SpawnSeeds=%d DepthRanges=%d AnyVeinData=%d / %d"),
+        SnapshotHasVeinBoolCount,
+        SnapshotHasPresentCategoriesCount,
+        SnapshotHasSpawnSeedsCount,
+        SnapshotHasDepthRangesCount,
+        SnapshotHasAnyVeinDataCount,
+        Tiles.Num());
+
+    int32 ActivatedCount = 0;
+    int32 SkippedDueToActivationCap = 0;
+
+    // TEMPORARY SAFETY CAP:
+    // Do NOT spawn physical Shatter Stone actors for the entire world at terrain-ready.
+    // On medium/large maps this can create tens of thousands of actors and freeze Unreal.
+    // Long-term: spawn resource nodes only around active gameplay/settlement chunks.
+    const int32 MaxResourceTilesToActivateAtTerrainReady = 128;
+
+    for (int32 Y = 0; Y < GH; ++Y)
+    {
+        for (int32 X = 0; X < GW; ++X)
+        {
+            const int32 Index = (Y * GW) + X;
+            const FWorldTileData& Tile = Tiles[Index];
+
+            // Only activate tiles that have resource vein data seeded by Step08.
+            // Do not rely only on bHasVeins because older pipeline code may populate
+            // PresentCategories/SpawnSeeds/DepthRanges without setting the boolean.
+            const bool bHasVeinData =
+                Tile.VeinConfig.bHasVeins ||
+                Tile.VeinConfig.PresentCategories.Num() > 0 ||
+                Tile.VeinConfig.SpawnSeeds.Num() > 0 ||
+                Tile.VeinConfig.VeinRichness.Num() > 0 ||
+                Tile.VeinConfig.DepthRanges.Num() > 0;
+
+            if (!bHasVeinData)
+            {
+                continue;
+            }
+
+            if (ActivatedCount >= MaxResourceTilesToActivateAtTerrainReady)
+            {
+                ++SkippedDueToActivationCap;
+                continue;
+            }
+
+            const FIntPoint TileCell(X, Y);
+            const float SurfaceHeightWorld = GetSurfaceHeightWorldAtTerrainCell(TileCell);
+
+            ResourceSpawn->OnChunkActivated(
+                TileCell,
+                Tile,
+                ChunkWorldSize,
+                SurfaceHeightWorld
+            );
+
+            ++ActivatedCount;
+        }
+    }
+
+    if (SkippedDueToActivationCap > 0)
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[VoxelWorldManager] Resource spawn activation capped. Activated=%d Skipped=%d. "
+                "This prevents editor freezes; long-term fix is settlement/chunk-based resource streaming."),
+            ActivatedCount,
+            SkippedDueToActivationCap);
+    }
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[VoxelWorldManager] Resource spawn: activated %d / %d tiles with vein data."),
+        ActivatedCount, Tiles.Num());
 }
 
 void UVoxelWorldManager::RequestBatchedTerrainRebuild()
@@ -2400,8 +2785,8 @@ void UVoxelWorldManager::ExecuteBatchedTerrainRebuild()
     bBatchedTerrainRebuildPending = false;
 
     UE_LOG(LogTemp, Warning,
-        TEXT("[VoxelWorldManager] Batched terrain rebuild. RemovedBlocks=%d"),
-        RemovedTerrainBlocks.Num());
+        TEXT("[VoxelWorldManager] Batched terrain rebuild. DirtyChunks=%d"),
+        TerrainSnapshot.NumDirtyChunks());
 
     if (!RebuildVoxelWorldFromCurrentSnapshot())
     {
@@ -2645,9 +3030,14 @@ FGameplayTag UVoxelWorldManager::GetBlockTypeAt(const FIntVector& GridPos) const
         return FGameplayTag();
     }
 
-    if (IsTerrainBlockRemoved(GridPos))
+    // v5.0: Check if this position has been carved by a modification brush
+    const float ModDensity = TerrainSnapshot.SampleModificationDensity(
+        static_cast<float>(GridPos.X),
+        static_cast<float>(GridPos.Y),
+        static_cast<float>(GridPos.Z));
+    if (ModDensity > 0.5f)
     {
-        return FGameplayTag();
+        return FGameplayTag();  // carved to air
     }
 
     const FIntPoint VoxelXY(GridPos.X, GridPos.Y);
@@ -2709,35 +3099,35 @@ bool UVoxelWorldManager::RemoveBlockAt(const FIntVector& GridPos)
         return false;
     }
 
-    if (IsTerrainBlockRemoved(GridPos))
-    {
-        return false;
-    }
-
     const FGameplayTag BlockType = GetBlockTypeAt(GridPos);
     if (!BlockType.IsValid() || BlockType == TAG_Terrain_Bedrock)
     {
         return false;
     }
 
-    MarkTerrainBlockRemoved(GridPos);
-    TerrainSnapshot.MarkTerrainBlockRemoved(GridPos);
+    // ── v5.0: Create SDF brush and add to the modification map ──
+    FSDFBrush DigBrush = MakeDigBrush(GridPos);
 
-    const bool bRuntimeEdited = ApplyRuntimeVoxelRemoval(GridPos);
+    // Add to the snapshot's modification map (single source of truth).
+    // The brush is stored in all chunks its AABB overlaps.
+    const int64 BrushID = TerrainSnapshot.AddModificationBrush(DigBrush);
+
+    // Apply the same brush geometry to the live Voxel Plugin data
+    // for immediate visual feedback (no generator rebuild needed).
+    DigBrush.BrushID = BrushID;
+    ApplyRuntimeBrush(DigBrush);
+
     RemoveRuntimeDigHoleActor(GridPos);
 
     const FVector WorldPosition = GridToWorld(FIntPoint(GridPos.X, GridPos.Y), GridPos.Z);
     OnVoxelDigged(WorldPosition);
 
     UE_LOG(LogTemp, Warning,
-        TEXT("[DigTrace][VoxelWorldManager] RemoveBlockAt SUCCESS RemovedGrid=%s Type=%s"),
+        TEXT("[DigTrace][VoxelWorldManager] RemoveBlockAt SUCCESS Grid=%s Type=%s BrushID=%lld DirtyChunks=%d"),
         *GridPos.ToString(),
-        *BlockType.ToString());
-        
-
-    UE_LOG(LogTemp, Warning,
-        TEXT("[DigTrace][VoxelWorldManager] RemoveBlockAt CALLED RequestedRemoveGrid=%s"),
-        *GridPos.ToString());
+        *BlockType.ToString(),
+        BrushID,
+        TerrainSnapshot.NumDirtyChunks());
 
     return true;
 }
@@ -2749,21 +3139,28 @@ bool UVoxelWorldManager::RestoreBlockAt(const FIntVector& GridPos, const FGamepl
         return false;
     }
 
-    if (!IsTerrainBlockRemoved(GridPos))
+    // ── v5.0: Remove all brushes near this grid position ──
+    const FVector VoxelPos(
+        static_cast<float>(GridPos.X),
+        static_cast<float>(GridPos.Y),
+        static_cast<float>(GridPos.Z)
+    );
+
+    const int32 NumRemoved = TerrainSnapshot.RemoveModificationsNear(VoxelPos, 3.0f);
+
+    if (NumRemoved == 0)
     {
         return false;
     }
 
-    UnmarkTerrainBlockRemoved(GridPos);
-    TerrainSnapshot.UnmarkTerrainBlockRemoved(GridPos);
-
     RefreshEditedVoxel(GridPos);
 
     UE_LOG(LogTemp, Log,
-        TEXT("[VoxelWorldManager] RestoreBlockAt SUCCESS Grid=%s Type=%s RemovedBlocks=%d"),
+        TEXT("[VoxelWorldManager] RestoreBlockAt SUCCESS Grid=%s Type=%s RemovedBrushes=%d DirtyChunks=%d"),
         *GridPos.ToString(),
         *BlockType.ToString(),
-        RemovedTerrainBlocks.Num());
+        NumRemoved,
+        TerrainSnapshot.NumDirtyChunks());
 
     return true;
 }
@@ -2797,7 +3194,10 @@ bool UVoxelWorldManager::ApplyRuntimeVoxelRestore(const FIntVector& GridPos)
 #endif
 }
 
-bool UVoxelWorldManager::ApplyRuntimeVoxelRemoval(const FIntVector& GridPos)
+// ── v5.0: Apply SDF brush to live Voxel Plugin data ──
+// Brush geometry matches what GetValueImpl will compute on regeneration,
+// so runtime edits and generator output agree exactly.
+bool UVoxelWorldManager::ApplyRuntimeBrush(const FSDFBrush& Brush)
 {
 #if WITH_VOXEL_PLUGIN
     AVoxelWorld* VoxelWorld = Cast<AVoxelWorld>(VoxelWorldActor);
@@ -2808,31 +3208,49 @@ bool UVoxelWorldManager::ApplyRuntimeVoxelRemoval(const FIntVector& GridPos)
 
     FVoxelData& Data = VoxelWorld->GetData();
 
-    const int32 BrushRadiusXY = 1;
-    const int32 BrushUp = 2;
-    const int32 BrushDown = 2;
+    const FBox BrushBounds = Brush.GetBounds();
 
     const FVoxelIntBox Bounds(
-        GridPos - FIntVector(BrushRadiusXY + 1, BrushRadiusXY + 1, BrushDown + 1),
-        GridPos + FIntVector(BrushRadiusXY + 2, BrushRadiusXY + 2, BrushUp + 2)
+        FIntVector(
+            FMath::FloorToInt(BrushBounds.Min.X) - 1,
+            FMath::FloorToInt(BrushBounds.Min.Y) - 1,
+            FMath::FloorToInt(BrushBounds.Min.Z) - 1
+        ),
+        FIntVector(
+            FMath::CeilToInt(BrushBounds.Max.X) + 2,
+            FMath::CeilToInt(BrushBounds.Max.Y) + 2,
+            FMath::CeilToInt(BrushBounds.Max.Z) + 2
+        )
     );
 
     FVoxelWriteScopeLock Lock(Data, Bounds, FUNCTION_FNAME);
 
-    for (int32 X = GridPos.X - BrushRadiusXY; X <= GridPos.X + BrushRadiusXY; ++X)
+    for (int32 X = Bounds.Min.X; X < Bounds.Max.X; ++X)
     {
-        for (int32 Y = GridPos.Y - BrushRadiusXY; Y <= GridPos.Y + BrushRadiusXY; ++Y)
+        for (int32 Y = Bounds.Min.Y; Y < Bounds.Max.Y; ++Y)
         {
-            for (int32 Z = GridPos.Z - BrushDown; Z <= GridPos.Z + BrushUp; ++Z)
+            for (int32 Z = Bounds.Min.Z; Z < Bounds.Max.Z; ++Z)
             {
-                Data.SetValue(X, Y, Z, FVoxelValue::Empty());
+                const float BrushValue = Brush.Evaluate(
+                    static_cast<float>(X),
+                    static_cast<float>(Y),
+                    static_cast<float>(Z)
+                );
+
+                if (FMath::Abs(BrushValue) > KINDA_SMALL_NUMBER)
+                {
+                    const FVoxelValue Current = Data.GetValue(X, Y, Z, 0);
+                    const float CurrentF = Current.ToFloat();
+                    const float NewF = FMath::Clamp(CurrentF + BrushValue, -1.0f, 1.0f);
+                    Data.SetValue(X, Y, Z, FVoxelValue(NewF));
+                }
             }
         }
     }
 
     VoxelWorld->GetLODManager().UpdateBounds(Bounds);
-
     return true;
+
 #else
     return false;
 #endif
@@ -2861,33 +3279,31 @@ int32 UVoxelWorldManager::GetTerrainDepthAt(const FIntPoint& GridXY) const
     return FMath::Max(0, SurfaceZ - MinZ + 1);
 }
 
-void UVoxelWorldManager::MarkTerrainBlockRemoved(const FIntVector& GridPos)
+// ── v5.0: Create an SDF brush for a standard dig operation ──
+FSDFBrush UVoxelWorldManager::MakeDigBrush(const FIntVector& GridPos) const
 {
-    RemovedTerrainBlocks.Add(GridPos);
-}
-
-void UVoxelWorldManager::UnmarkTerrainBlockRemoved(const FIntVector& GridPos)
-{
-    RemovedTerrainBlocks.Remove(GridPos);
-}
-
-bool UVoxelWorldManager::IsTerrainBlockRemoved(const FIntVector& GridPos) const
-{
-    return RemovedTerrainBlocks.Contains(GridPos);
+    FSDFBrush Brush;
+    Brush.Shape = ESDFBrushShape::Sphere;
+    Brush.Mode = ESDFBrushMode::Carve;
+    Brush.Center = FVector(
+        static_cast<float>(GridPos.X),
+        static_cast<float>(GridPos.Y),
+        static_cast<float>(GridPos.Z)
+    );
+    Brush.Radius = 2.0f;
+    Brush.HalfHeight = 2.5f;
+    Brush.Strength = 1.0f;
+    Brush.FalloffVoxels = 0.5f;
+    return Brush;
 }
 
 void UVoxelWorldManager::RefreshEditedVoxel(const FIntVector& GridPos)
 {
-    if (IsTerrainBlockRemoved(GridPos))
-    {
-        ApplyRuntimeVoxelRemoval(GridPos);
-        RemoveRuntimeDigHoleActor(GridPos);
-    }
-    else
-    {
-        ApplyRuntimeVoxelRestore(GridPos);
-        RemoveRuntimeDigHoleActor(GridPos);
-    }
+    // v5.0: On restore, write Full() density back and let the next
+    // LOD update regenerate from the generator (which no longer has
+    // the removed brush in its snapshot).
+    ApplyRuntimeVoxelRestore(GridPos);
+    RemoveRuntimeDigHoleActor(GridPos);
 }
 
 AStaticMeshActor* UVoxelWorldManager::SpawnRuntimeDigHoleActor(const FIntVector& GridPos)

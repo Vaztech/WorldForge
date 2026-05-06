@@ -11,6 +11,22 @@
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 
+void AWorldForgeMiniMapHUD::SetMiniMapVisible(bool bVisible)
+{
+    bShowMiniMap = bVisible;
+
+    UE_LOG(
+        LogTemp,
+        Log,
+        TEXT("[MiniMapHUD] MiniMap %s."),
+        bShowMiniMap ? TEXT("shown") : TEXT("hidden"));
+}
+
+void AWorldForgeMiniMapHUD::ToggleMiniMapVisible()
+{
+    SetMiniMapVisible(!bShowMiniMap);
+}
+
 void AWorldForgeMiniMapHUD::DrawHUD()
 {
     Super::DrawHUD();
@@ -78,7 +94,13 @@ FVector2D AWorldForgeMiniMapHUD::WorldCellToMiniMap(const FIntPoint& WorldCell) 
     FRotator CameraRotation;
     PC->GetPlayerViewPoint(CameraLocation, CameraRotation);
 
-    const UVoxelWorldManager* VoxelWorldManager = GetWorld()->GetSubsystem<UVoxelWorldManager>();
+    const UWorld* World = GetWorld();
+    if (!World)
+    {
+        return MiniMapPosition;
+    }
+
+    const UVoxelWorldManager* VoxelWorldManager = World->GetSubsystem<UVoxelWorldManager>();
     if (!VoxelWorldManager)
     {
         return MiniMapPosition;
@@ -89,7 +111,7 @@ FVector2D AWorldForgeMiniMapHUD::WorldCellToMiniMap(const FIntPoint& WorldCell) 
     const int32 RelativeX = WorldCell.X - CameraCell.X;
     const int32 RelativeY = WorldCell.Y - CameraCell.Y;
 
-    const float VisibleHalf = MiniMapZoom; // 🔥 now using property
+    const float VisibleHalf = FMath::Max(1.0f, MiniMapZoom);
 
     const float NormalizedX = (RelativeX / VisibleHalf) * 0.5f + 0.5f;
     const float NormalizedY = (RelativeY / VisibleHalf) * 0.5f + 0.5f;
@@ -124,7 +146,6 @@ bool AWorldForgeMiniMapHUD::IsWorldCellInBounds(const FIntPoint& WorldCell) cons
 
 void AWorldForgeMiniMapHUD::DrawMiniMapBackground()
 {
-    // Always draw the dark background first (visible beyond map edges)
     DrawRect(
         BackgroundColor,
         MiniMapPosition.X,
@@ -133,24 +154,35 @@ void AWorldForgeMiniMapHUD::DrawMiniMapBackground()
         MiniMapSize.Y
     );
 
-    // Try to render the actual world map texture on top
     const UWorld* World = GetWorld();
-    if (!World) return;
+    if (!World)
+    {
+        return;
+    }
 
     const UWorldMapSubsystem* MapSys = World->GetSubsystem<UWorldMapSubsystem>();
-    if (!MapSys || !MapSys->IsInitialized()) return;
+    if (!MapSys || !MapSys->IsInitialized())
+    {
+        return;
+    }
 
-    // Use the detailed map texture (higher resolution)
     UTexture2D* MapTex = MapSys->GetCachedDetailedMapTexture();
     if (!MapTex)
     {
         MapTex = MapSys->GetCachedMapTexture();
     }
-    if (!MapTex) return;
+
+    if (!MapTex)
+    {
+        return;
+    }
 
     const UVoxelWorldManager* VoxelMgr = World->GetSubsystem<UVoxelWorldManager>();
     const APlayerController* PC = GetOwningPlayerController();
-    if (!PC || !VoxelMgr) return;
+    if (!PC || !VoxelMgr)
+    {
+        return;
+    }
 
     FVector CameraLocation;
     FRotator CameraRotation;
@@ -160,33 +192,35 @@ void AWorldForgeMiniMapHUD::DrawMiniMapBackground()
     const int32 GW = MapSys->GetGridWidth();
     const int32 GH = MapSys->GetGridHeight();
 
-    if (GW <= 0 || GH <= 0) return;
+    if (GW <= 0 || GH <= 0)
+    {
+        return;
+    }
 
-    // Camera position in normalized UV space [0..1]
     const float CamU = static_cast<float>(CameraCell.X) / static_cast<float>(GW);
     const float CamV = static_cast<float>(CameraCell.Y) / static_cast<float>(GH);
 
-    // Visible half-extent in UV space based on zoom (cells visible)
     const float HalfU = (MiniMapZoom * 0.5f) / static_cast<float>(GW);
     const float HalfV = (MiniMapZoom * 0.5f) / static_cast<float>(GH);
 
-    // Desired UV window (may extend beyond [0..1])
     float U0 = CamU - HalfU;
     float V0 = CamV - HalfV;
     float U1 = CamU + HalfU;
     float V1 = CamV + HalfV;
 
-    // Clamp UV to valid texture range and compute screen rect offset
     const float FullUWidth = U1 - U0;
     const float FullVHeight = V1 - V0;
 
-    // Screen position adjustments for clamped edges
     float ScreenX = MiniMapPosition.X;
     float ScreenY = MiniMapPosition.Y;
     float ScreenW = MiniMapSize.X;
     float ScreenH = MiniMapSize.Y;
 
-    // Clamp left/top — shift screen rect inward
+    if (FullUWidth <= KINDA_SMALL_NUMBER || FullVHeight <= KINDA_SMALL_NUMBER)
+    {
+        return;
+    }
+
     if (U0 < 0.0f)
     {
         const float Fraction = (-U0) / FullUWidth;
@@ -194,6 +228,7 @@ void AWorldForgeMiniMapHUD::DrawMiniMapBackground()
         ScreenW -= Fraction * MiniMapSize.X;
         U0 = 0.0f;
     }
+
     if (V0 < 0.0f)
     {
         const float Fraction = (-V0) / FullVHeight;
@@ -202,13 +237,13 @@ void AWorldForgeMiniMapHUD::DrawMiniMapBackground()
         V0 = 0.0f;
     }
 
-    // Clamp right/bottom — shrink screen rect
     if (U1 > 1.0f)
     {
         const float Fraction = (U1 - 1.0f) / FullUWidth;
         ScreenW -= Fraction * MiniMapSize.X;
         U1 = 1.0f;
     }
+
     if (V1 > 1.0f)
     {
         const float Fraction = (V1 - 1.0f) / FullVHeight;
@@ -216,15 +251,18 @@ void AWorldForgeMiniMapHUD::DrawMiniMapBackground()
         V1 = 1.0f;
     }
 
-    // Draw the texture region
     if (ScreenW > 0.0f && ScreenH > 0.0f && (U1 - U0) > 0.0f && (V1 - V0) > 0.0f)
     {
         DrawTexture(
             MapTex,
-            ScreenX, ScreenY,
-            ScreenW, ScreenH,
-            U0, V0,
-            U1 - U0, V1 - V0,
+            ScreenX,
+            ScreenY,
+            ScreenW,
+            ScreenH,
+            U0,
+            V0,
+            U1 - U0,
+            V1 - V0,
             FLinearColor::White,
             BLEND_Opaque
         );
@@ -257,10 +295,15 @@ void AWorldForgeMiniMapHUD::DrawMiniMapTitle()
     );
 }
 
-//////////////////////////////////////////////////////////////////////////
-// 🔥 UPDATED: Handles BOTH on-screen + off-screen pawns
-void AWorldForgeMiniMapHUD::DrawPawnDots(const USettlementManager* SettlementManager, const UProcessorManager* ProcessorManager)
+void AWorldForgeMiniMapHUD::DrawPawnDots(
+    const USettlementManager* SettlementManager,
+    const UProcessorManager* ProcessorManager)
 {
+    if (!SettlementManager || !ProcessorManager)
+    {
+        return;
+    }
+
     const TArray<FAgentData>& Agents = ProcessorManager->GetAllAgents();
 
     for (const FAgentData& Agent : Agents)
@@ -287,7 +330,6 @@ void AWorldForgeMiniMapHUD::DrawPawnDots(const USettlementManager* SettlementMan
         const float Size = bInside ? PawnDotSize : EdgeIndicatorSize;
         const float Half = Size * 0.5f;
 
-        // Outline
         DrawRect(
             FLinearColor::Black,
             DrawPoint.X - Half - 1.0f,
@@ -296,7 +338,6 @@ void AWorldForgeMiniMapHUD::DrawPawnDots(const USettlementManager* SettlementMan
             Size + 2.0f
         );
 
-        // Fill
         DrawRect(
             bInside ? DotColor : OutOfBoundsColor,
             DrawPoint.X - Half,
@@ -306,8 +347,6 @@ void AWorldForgeMiniMapHUD::DrawPawnDots(const USettlementManager* SettlementMan
         );
     }
 }
-
-//////////////////////////////////////////////////////////////////////////
 
 void AWorldForgeMiniMapHUD::DrawCameraLocation(const UVoxelWorldManager* VoxelWorldManager)
 {
@@ -335,7 +374,9 @@ void AWorldForgeMiniMapHUD::DrawCameraLocation(const UVoxelWorldManager* VoxelWo
     );
 }
 
-void AWorldForgeMiniMapHUD::DrawDebugStats(const UProcessorManager* ProcessorManager, const UVoxelWorldManager* VoxelWorldManager)
+void AWorldForgeMiniMapHUD::DrawDebugStats(
+    const UProcessorManager* ProcessorManager,
+    const UVoxelWorldManager* VoxelWorldManager)
 {
     const int32 AgentCount = ProcessorManager ? ProcessorManager->GetAllAgents().Num() : 0;
 
@@ -355,12 +396,6 @@ FLinearColor AWorldForgeMiniMapHUD::GetDotColorForSettlement(int32 SettlementID)
     return (SettlementID == 0) ? PlayerDotColor : AIDotColor;
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// v4.0: Z-LEVEL INDICATOR
-// Shows camera altitude relative to terrain surface.
-// Positive = above ground, negative = underground.
-// ═══════════════════════════════════════════════════════════════════
-
 void AWorldForgeMiniMapHUD::DrawZLevelIndicator(const UVoxelWorldManager* VoxelWorldManager)
 {
     const APlayerController* PC = GetOwningPlayerController();
@@ -373,11 +408,9 @@ void AWorldForgeMiniMapHUD::DrawZLevelIndicator(const UVoxelWorldManager* VoxelW
     FRotator CameraRotation;
     PC->GetPlayerViewPoint(CameraLocation, CameraRotation);
 
-    // Camera world Z in voxel units (divide by VoxelSize)
     const float VoxelSize = VoxelWorldManager ? VoxelWorldManager->GetRenderVoxelSize() : 100.0f;
     const float CameraZVoxels = CameraLocation.Z / FMath::Max(1.0f, VoxelSize);
 
-    // Get surface height at camera XY position
     float SurfaceZ = 0.0f;
     FString DepthLabel;
 
@@ -403,7 +436,6 @@ void AWorldForgeMiniMapHUD::DrawZLevelIndicator(const UVoxelWorldManager* VoxelW
         DepthLabel = FString::Printf(TEXT("Z: %.0f  [%.0fv above surface]"), CameraZVoxels, RelativeZ);
     }
 
-    // Draw Z bar at the bottom of the minimap
     const float DrawX = MiniMapPosition.X;
     const float DrawY = MiniMapPosition.Y + MiniMapSize.Y + 20.0f;
 
@@ -421,29 +453,26 @@ void AWorldForgeMiniMapHUD::DrawZLevelIndicator(const UVoxelWorldManager* VoxelW
         false
     );
 
-    // Z depth bar visualization
     const float BarY = DrawY + 16.0f;
     const float BarWidth = MiniMapSize.X;
     const float BarHeight = 6.0f;
 
-    // Background
     DrawRect(FLinearColor(0.1f, 0.1f, 0.1f, 0.8f), DrawX, BarY, BarWidth, BarHeight);
 
-    // Marker position: 0.5 = surface, 0.0 = deep underground, 1.0 = high sky
     const float NormZ = FMath::Clamp((RelativeZ + 100.0f) / 200.0f, 0.0f, 1.0f);
     const float MarkerX = DrawX + NormZ * BarWidth;
 
-    // Surface line (center)
-    DrawLine(DrawX + BarWidth * 0.5f, BarY, DrawX + BarWidth * 0.5f, BarY + BarHeight, FLinearColor::White, 1.0f);
+    DrawLine(
+        DrawX + BarWidth * 0.5f,
+        BarY,
+        DrawX + BarWidth * 0.5f,
+        BarY + BarHeight,
+        FLinearColor::White,
+        1.0f
+    );
 
-    // Camera marker
     DrawRect(DisplayColor, MarkerX - 2.0f, BarY - 1.0f, 4.0f, BarHeight + 2.0f);
 }
-
-// ═══════════════════════════════════════════════════════════════════
-// v4.0: TERRAIN INFO PANEL
-// Shows biome, elevation, cave/canyon info at camera position.
-// ═══════════════════════════════════════════════════════════════════
 
 void AWorldForgeMiniMapHUD::DrawTerrainInfo(const UVoxelWorldManager* VoxelWorldManager)
 {
@@ -469,7 +498,6 @@ void AWorldForgeMiniMapHUD::DrawTerrainInfo(const UVoxelWorldManager* VoxelWorld
         return;
     }
 
-    // Get tile at camera position
     FIntPoint CameraCell = FIntPoint(0, 0);
     if (VoxelWorldManager)
     {
@@ -483,45 +511,46 @@ void AWorldForgeMiniMapHUD::DrawTerrainInfo(const UVoxelWorldManager* VoxelWorld
         return;
     }
 
-    // Extract biome name from tag
     FString BiomeName = TEXT("Unknown");
     if (TileData.BiomeType.IsValid())
     {
-        BiomeName = TileData.BiomeType.ToString();
-        // Strip the "WorldForge.Biome." prefix for cleaner display
-        const int32 LastDot = INDEX_NONE;
         BiomeName = TileData.BiomeType.GetTagName().ToString();
-        int32 DotPos;
+
+        int32 DotPos = INDEX_NONE;
         if (BiomeName.FindLastChar('.', DotPos))
         {
             BiomeName = BiomeName.Mid(DotPos + 1);
         }
     }
 
-    // Draw info panel below the Z-level bar
     const float DrawX = MiniMapPosition.X;
     float DrawY = MiniMapPosition.Y + MiniMapSize.Y + 46.0f;
     const float LineHeight = 14.0f;
 
-    // Biome
     DrawText(
         FString::Printf(TEXT("Biome: %s"), *BiomeName),
         TerrainInfoColor,
-        DrawX, DrawY,
-        nullptr, 0.8f, false
+        DrawX,
+        DrawY,
+        nullptr,
+        0.8f,
+        false
     );
+
     DrawY += LineHeight;
 
-    // Elevation
     DrawText(
         FString::Printf(TEXT("Elev: %.2f  Temp: %.2f  Rain: %.2f"), TileData.Elevation, TileData.Temperature, TileData.Rainfall),
         TerrainInfoColor,
-        DrawX, DrawY,
-        nullptr, 0.8f, false
+        DrawX,
+        DrawY,
+        nullptr,
+        0.8f,
+        false
     );
+
     DrawY += LineHeight;
 
-    // Underground features
     const float CaveI = TileData.VoxelProfile.CaveIntensity;
     const float CanyonI = TileData.VoxelProfile.CanyonIntensity;
 
@@ -553,16 +582,22 @@ void AWorldForgeMiniMapHUD::DrawTerrainInfo(const UVoxelWorldManager* VoxelWorld
     DrawText(
         UndergroundInfo,
         UGColor,
-        DrawX, DrawY,
-        nullptr, 0.8f, false
+        DrawX,
+        DrawY,
+        nullptr,
+        0.8f,
+        false
     );
 
-    // Cell coordinates
     DrawY += LineHeight;
+
     DrawText(
         FString::Printf(TEXT("Cell: (%d, %d)  WorldZ: %.0f"), CameraCell.X, CameraCell.Y, CameraLocation.Z),
         FLinearColor(0.6f, 0.6f, 0.6f, 1.0f),
-        DrawX, DrawY,
-        nullptr, 0.75f, false
+        DrawX,
+        DrawY,
+        nullptr,
+        0.75f,
+        false
     );
 }

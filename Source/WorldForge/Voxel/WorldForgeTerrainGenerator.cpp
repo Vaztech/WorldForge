@@ -1,7 +1,7 @@
 // ════════════════════════════════════════════════════════════════════
-// WorldForgeTerrainGenerator.cpp — v4.0
+// WorldForgeTerrainGenerator.cpp — v5.0
 //
-// 3D SDF LAYERED DENSITY COMPOSITOR
+// 3D SDF LAYERED DENSITY COMPOSITOR + HYBRID CHUNKING MODIFICATION PATH
 //
 // The voxel generator produces a true 3D density field via layered
 // composition.  Each layer is independent and additive:
@@ -13,11 +13,15 @@
 //   Layer 5: Biome density bias
 //   Foundation: Solid floor below all terrain [existing]
 //
+// v5.0 MODIFICATION PATH:
+//   After all base layers, the modification map is sampled.
+//   Modifications are SDF brush volumes (sphere, cylinder, box)
+//   indexed by chunk coordinate.  Only chunks with active digs
+//   are evaluated — O(M) per modified chunk, O(0) for pristine
+//   chunks.  Replaces the v4.0 O(N) flat RemovedTerrainBlocks scan.
+//
 // Positive density = air.  Negative density = solid.
 // Voxel Plugin meshes the isosurface at density = 0.
-//
-// Caves, canyons, overhangs, arched ceilings, and underground
-// biomes all emerge naturally from the 3D density field.
 // ════════════════════════════════════════════════════════════════════
 
 #include "WorldForgeTerrainGenerator.h"
@@ -80,6 +84,11 @@ void FWorldForgeTerrainGeneratorInstance::Init(const FVoxelGeneratorInit& InitSt
     LavaTubeNoise.SetSeed(Seed + 17000);  // lava tube field A
     LavaTubeNoiseB.SetSeed(Seed + 21000); // lava tube field B
 
+    // v6.0: Resource vein noise — offsets from FResourceNoiseRegistry
+    ResourceNoiseMetal.SetSeed(Seed + 25000);
+    ResourceNoiseCrystal.SetSeed(Seed + 29000);
+    ResourceNoiseFossil.SetSeed(Seed + 33000);
+
     if (TerrainSnapshot.IsValid())
     {
         const float HalfGridX = static_cast<float>(TerrainSnapshot.GridWidth) * 0.5f;
@@ -87,18 +96,19 @@ void FWorldForgeTerrainGeneratorInstance::Init(const FVoxelGeneratorInit& InitSt
         const float MinVoxel = -HalfGridX * ChunkSizeF;
         const float MaxVoxel = HalfGridX * ChunkSizeF;
         UE_LOG(LogTemp, Log,
-            TEXT("[TerrainGen] Init: Grid=%dx%d ChunkSizeVoxels=%d VoxelSize=%.1f "
-                 "Expected voxel range=[%.0f..%.0f] (total=%.0f) Volcanoes=%d"),
+            TEXT("[TerrainGen] Init v5.0: Grid=%dx%d ChunkSizeVoxels=%d VoxelSize=%.1f "
+                "Expected voxel range=[%.0f..%.0f] (total=%.0f) Volcanoes=%d DirtyChunks=%d"),
             TerrainSnapshot.GridWidth, TerrainSnapshot.GridHeight,
             TerrainSnapshot.ChunkSizeVoxels,
             TerrainSnapshot.VoxelSize,
             MinVoxel, MaxVoxel, MaxVoxel - MinVoxel,
-            TerrainSnapshot.PipelineVolcanoes.Num());
+            TerrainSnapshot.PipelineVolcanoes.Num(),
+            TerrainSnapshot.Modifications.NumDirtyChunks());
     }
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// DENSITY FIELD — v4.0 Layered 3D SDF Compositor
+// DENSITY FIELD — v5.0 Layered 3D SDF Compositor + Hybrid Modifications
 // ═══════════════════════════════════════════════════════════════════
 
 v_flt FWorldForgeTerrainGeneratorInstance::GetValueImpl(
@@ -111,33 +121,6 @@ v_flt FWorldForgeTerrainGeneratorInstance::GetValueImpl(
     if (!IsSnapshotValid())
     {
         return 1.0f;
-    }
-
-// ── DIG MASK: carve a visible SDF hole around removed blocks ──
-// Exact integer matching is too small for smooth SDF meshing.
-// This creates a small spherical air pocket around the removed voxel.
-    constexpr float DigRadiusVoxels = 1.45f;
-
-    for (const FIntVector& RemovedBlock : TerrainSnapshot.RemovedTerrainBlocks)
-    {
-        const FVector RemovedCenter(
-            static_cast<float>(RemovedBlock.X),
-            static_cast<float>(RemovedBlock.Y),
-            static_cast<float>(RemovedBlock.Z)
-        );
-
-        const FVector SamplePos(
-            static_cast<float>(X),
-            static_cast<float>(Y),
-            static_cast<float>(Z)
-        );
-
-        const float Dist = FVector::Dist(SamplePos, RemovedCenter);
-
-        if (Dist <= DigRadiusVoxels)
-        {
-            return DigRadiusVoxels - Dist + 0.25f; // positive = air
-        }
     }
 
     // ── Layer 1: Base terrain (2D heightmap → density gradient) ──
@@ -181,6 +164,28 @@ v_flt FWorldForgeTerrainGeneratorInstance::GetValueImpl(
         Density = FMath::Min(Density, FoundationDensity);
     }
 
+    // ═══════════════════════════════════════════════════════════════
+    // v5.0 HYBRID MODIFICATION PATH
+    // ═══════════════════════════════════════════════════════════════
+    // Sample the chunk-indexed modification map.  This replaces the
+    // old O(N) RemovedTerrainBlocks scan with an O(1) chunk lookup
+    // + O(M) brush evaluation where M = brushes in this chunk.
+    //
+    // Composition formula:
+    //   FinalDensity = BaseDensity + ModificationCarve
+    //
+    // ModificationCarve is positive where brushes carve (push
+    // density toward air), so adding it to a negative base density
+    // (solid) can flip it positive (air) — creating the void.
+    // ═══════════════════════════════════════════════════════════════
+
+    const float ModificationCarve = TerrainSnapshot.SampleModificationDensity(X, Y, Z);
+
+    if (ModificationCarve != 0.0f)
+    {
+        Density += ModificationCarve;
+    }
+
     return Density;
 }
 
@@ -214,7 +219,7 @@ FVoxelMaterial FWorldForgeTerrainGeneratorInstance::GetMaterialImpl(
     return MakeVoxelMaterialFromLayer(ClassifyUndergroundMaterial(X, Y, Z, SurfaceHeight));
 }
 
-// ─── Value range (LOD culling) — v4.0 conservative for 3D ─────
+// ─── Value range (LOD culling) — v5.0 chunk-indexed ─────────────
 
 TVoxelRange<v_flt> FWorldForgeTerrainGeneratorInstance::GetValueRangeImpl(
     const FVoxelIntBox& Bounds,
@@ -267,24 +272,20 @@ TVoxelRange<v_flt> FWorldForgeTerrainGeneratorInstance::GetValueRangeImpl(
         MinValue = FMath::Min(MinValue, FoundationMin);
     }
 
-    // ── NEW FIX: Prevent Voxel Plugin from culling chunks with dug holes ──
-    if (TerrainSnapshot.RemovedTerrainBlocks.Num() > 0)
+    // ── v5.0: Chunk-indexed modification bounds check ──
+    // Instead of iterating every removed block O(N), check if any
+    // modified chunks overlap this query region.  O(C) where C is
+    // the number of chunks the bounds span (typically 1–4).
+    if (TerrainSnapshot.HasModificationsInBounds(
+        static_cast<float>(Bounds.Min.X),
+        static_cast<float>(Bounds.Min.Y),
+        static_cast<float>(Bounds.Max.X),
+        static_cast<float>(Bounds.Max.Y)))
     {
-        for (const FIntVector& RemovedBlock : TerrainSnapshot.RemovedTerrainBlocks)
-        {
-            // If the removed block falls within this chunk's bounds
-            constexpr int32 DigRangePadding = 3;
-
-            if (RemovedBlock.X >= Bounds.Min.X - DigRangePadding && RemovedBlock.X <= Bounds.Max.X + DigRangePadding &&
-                RemovedBlock.Y >= Bounds.Min.Y - DigRangePadding && RemovedBlock.Y <= Bounds.Max.Y + DigRangePadding &&
-                RemovedBlock.Z >= Bounds.Min.Z - DigRangePadding && RemovedBlock.Z <= Bounds.Max.Z + DigRangePadding)
-            {
-                return TVoxelRange<v_flt>(
-                    FMath::Min(MinValue, -10.0f),
-                    FMath::Max(MaxValue, 10.0f)
-                );
-            }
-        }
+        return TVoxelRange<v_flt>(
+            FMath::Min(MinValue, -10.0f),
+            FMath::Max(MaxValue, 10.0f)
+        );
     }
 
     return TVoxelRange<v_flt>(MinValue, MaxValue);
@@ -387,24 +388,6 @@ float FWorldForgeTerrainGeneratorInstance::ComputeDetailHeight(float VoxelX, flo
 // ═══════════════════════════════════════════════════════════════════
 // LAYER 2: WORM CAVE NETWORKS (v4.0)
 // ═══════════════════════════════════════════════════════════════════
-//
-// Two independent 3D noise fields are sampled.  Caves form where
-// BOTH fields are near zero simultaneously, producing natural
-// tubular passages ("worm caves").
-//
-// The intersection condition creates narrow tube-shaped voids:
-//   caveMask = 1.0 - (n1² + n2²)
-//   When caveMask > threshold → carve
-//
-// This produces rounded cave walls naturally because the SDF
-// Transvoxel mesh follows the smooth noise gradient, giving the
-// "natural arched ceilings" the GDD describes.
-//
-// Parameters are biome-driven via FVoxelBiomeProfile:
-//   CaveIntensity: overall multiplier (0=none, 1=normal, 2+=dense)
-//   CaveWormFrequency: spatial frequency of the noise
-//   CaveMinDepth / CaveMaxDepth: depth gate below surface
-//   CaveZScale: Z-axis frequency scale (<1 = horizontal tubes)
 
 float FWorldForgeTerrainGeneratorInstance::ComputeWormCaveDensity(
     float X, float Y, float Z,
@@ -412,7 +395,6 @@ float FWorldForgeTerrainGeneratorInstance::ComputeWormCaveDensity(
 {
     const float DepthBelowSurface = SurfaceHeight - Z;
 
-    // Depth gate: no caves above MinDepth or below MaxDepth
     const float MinDepth = FMath::Max(1.0f, Profile.CaveMinDepth);
     const float MaxDepth = FMath::Max(MinDepth + 1.0f, Profile.CaveMaxDepth);
 
@@ -421,8 +403,6 @@ float FWorldForgeTerrainGeneratorInstance::ComputeWormCaveDensity(
         return 0.0f;
     }
 
-    // Depth fade: caves ramp in over the first 20% of the range
-    // and fade out over the last 10%.
     const float DepthRange = MaxDepth - MinDepth;
     const float FadeInEnd = MinDepth + DepthRange * 0.2f;
     const float FadeOutStart = MaxDepth - DepthRange * 0.1f;
@@ -437,7 +417,6 @@ float FWorldForgeTerrainGeneratorInstance::ComputeWormCaveDensity(
         DepthAlpha = FMath::Clamp((MaxDepth - DepthBelowSurface) / (MaxDepth - FadeOutStart), 0.0f, 1.0f);
     }
 
-    // Sample two 3D noise fields with offset seeds
     const float Freq = FMath::Max(0.00001f, Profile.CaveWormFrequency);
     const float ZScale = FMath::Max(0.05f, Profile.CaveZScale);
     const float SeedF = static_cast<float>(Seed);
@@ -454,10 +433,8 @@ float FWorldForgeTerrainGeneratorInstance::ComputeWormCaveDensity(
         (Z + 1000.0f + SeedF * 0.89f) * Freq * ZScale
     );
 
-    // Worm intersection: peaks where both fields are near zero
     const float WormMask = 1.0f - (N1 * N1 + N2 * N2);
 
-    // Apply threshold — only carve where mask exceeds it
     const float Threshold = FMath::Clamp(TerrainSnapshot.CaveWormThreshold, 0.0f, 1.0f);
 
     if (WormMask <= Threshold)
@@ -465,7 +442,6 @@ float FWorldForgeTerrainGeneratorInstance::ComputeWormCaveDensity(
         return 0.0f;
     }
 
-    // Carve strength: positive = push toward air
     const float CarveStrength = FMath::Max(0.0f, TerrainSnapshot.CaveCarveStrength);
     const float Intensity = FMath::Max(0.0f, Profile.CaveIntensity);
 
@@ -477,57 +453,35 @@ float FWorldForgeTerrainGeneratorInstance::ComputeWormCaveDensity(
 // ═══════════════════════════════════════════════════════════════════
 // LAYER 3: CANYON CARVING (v4.0)
 // ═══════════════════════════════════════════════════════════════════
-//
-// Canyons are deep, narrow cuts from the surface downward.
-// Domain-warped ridge noise defines the canyon paths (see
-// FWorldForgeTerrainMath::SampleCanyonRidgeNoise).
-//
-// The carve is 3D-aware: canyon walls aren't perfectly vertical
-// because the ridge noise field is continuous.  Slight overhangs
-// form naturally where the noise bows inward.
-//
-// Parameters are biome-driven:
-//   CanyonIntensity: 0 = no canyons (most biomes)
-//   CanyonMaxDepth: how deep the canyon cuts (voxels)
-//   CanyonSharpness: power curve on the ridge (higher = narrower)
 
 float FWorldForgeTerrainGeneratorInstance::ComputeCanyonCarve(
     float X, float Y, float Z,
     float SurfaceHeight, const FVoxelBiomeProfile& Profile) const
 {
-    // Only carve between surface and canyon floor
     const float MaxDepth = FMath::Max(1.0f, Profile.CanyonMaxDepth);
     const float DepthBelowSurface = SurfaceHeight - Z;
 
-    // Above surface or below canyon floor → no carve
     if (DepthBelowSurface < -2.0f || DepthBelowSurface > MaxDepth)
     {
         return 0.0f;
     }
 
-    // Sample the ridge noise (0–1, peaks at canyon center)
     const float RidgeRaw = FWorldForgeTerrainMath::SampleCanyonRidgeNoise(
         X, Y, TerrainSnapshot);
 
-    // Apply sharpness power curve: higher = narrower canyon cuts
     const float Sharpness = FMath::Max(0.5f, Profile.CanyonSharpness);
     const float Ridge = FMath::Pow(FMath::Clamp(RidgeRaw, 0.0f, 1.0f), Sharpness);
 
-    // Canyon depth at this XY: how deep the ridge noise wants to cut
     const float CanyonFloor = SurfaceHeight - Ridge * MaxDepth;
 
-    // Slight overhang via 3D noise perturbation: offset the wall
-    // by a small 3D noise that varies with depth.
     const float OverhangNoise = WF_Perlin3D(
         X * 0.015f + 3100.0f,
         Y * 0.015f + 7300.0f,
         Z * 0.02f + 1900.0f
-    ) * 3.0f; // ±3 voxels of wall variation
+    ) * 3.0f;
 
-    // If this voxel is inside the canyon void, push density positive (air)
     if (Z > (CanyonFloor + OverhangNoise) && Z < (SurfaceHeight + 1.0f))
     {
-        // Smooth falloff at canyon walls
         const float DistFromFloor = Z - (CanyonFloor + OverhangNoise);
         const float DistFromSurface = SurfaceHeight - Z;
         const float WallFade = FMath::Min(
@@ -536,7 +490,7 @@ float FWorldForgeTerrainGeneratorInstance::ComputeCanyonCarve(
         );
 
         const float Intensity = FMath::Max(0.0f, Profile.CanyonIntensity);
-        return WallFade * Intensity * 8.0f; // positive = air
+        return WallFade * Intensity * 8.0f;
     }
 
     return 0.0f;
@@ -545,10 +499,6 @@ float FWorldForgeTerrainGeneratorInstance::ComputeCanyonCarve(
 // ═══════════════════════════════════════════════════════════════════
 // LAYER 4: LAVA TUBE SUB-LAYER (v4.0)
 // ═══════════════════════════════════════════════════════════════════
-//
-// Lava tubes are horizontal-biased worm caves that only generate
-// within the cone radius of volcanoes.  They use a compressed Z
-// frequency to produce flat, tube-shaped passages.
 
 float FWorldForgeTerrainGeneratorInstance::ComputeLavaTubeDensity(
     float X, float Y, float Z,
@@ -561,13 +511,11 @@ float FWorldForgeTerrainGeneratorInstance::ComputeLavaTubeDensity(
 
     const float DepthBelowSurface = SurfaceHeight - Z;
 
-    // Lava tubes only exist 15–80 voxels below surface
     if (DepthBelowSurface < 15.0f || DepthBelowSurface > 80.0f)
     {
         return 0.0f;
     }
 
-    // Check if this voxel is within any volcano's cone
     const float ChunkSize = static_cast<float>(FMath::Max(1, TerrainSnapshot.ChunkSizeVoxels));
     const float HalfGridX = static_cast<float>(TerrainSnapshot.GridWidth) * 0.5f;
     const float HalfGridY = static_cast<float>(TerrainSnapshot.GridHeight) * 0.5f;
@@ -591,7 +539,6 @@ float FWorldForgeTerrainGeneratorInstance::ComputeLavaTubeDensity(
         return 0.0f;
     }
 
-    // Worm cave with Z-compressed frequency → horizontal tubes
     const float Freq = 0.015f;
     const float ZCompress = FMath::Max(0.05f, TerrainSnapshot.LavaTubeZCompress);
     const float SeedF = static_cast<float>(Seed);
@@ -615,9 +562,8 @@ float FWorldForgeTerrainGeneratorInstance::ComputeLavaTubeDensity(
         return 0.0f;
     }
 
-    // Depth fade
     const float DepthAlpha = FMath::Clamp((DepthBelowSurface - 15.0f) / 20.0f, 0.0f, 1.0f) *
-                              FMath::Clamp((80.0f - DepthBelowSurface) / 15.0f, 0.0f, 1.0f);
+        FMath::Clamp((80.0f - DepthBelowSurface) / 15.0f, 0.0f, 1.0f);
 
     return (WormMask - 0.60f) * 10.0f * DepthAlpha;
 }
@@ -626,8 +572,6 @@ float FWorldForgeTerrainGeneratorInstance::ComputeLavaTubeDensity(
 
 float FWorldForgeTerrainGeneratorInstance::ComputeCaveDensity(float X, float Y, float Z, const FVoxelBiomeProfile& Profile) const
 {
-    // v4.0: This is no longer called.  Worm caves (ComputeWormCaveDensity)
-    // replaced this system.  Kept for reference/rollback.
     return 0.0f;
 }
 
@@ -676,14 +620,12 @@ int32 FWorldForgeTerrainGeneratorInstance::ClassifyTerrainMaterialLayer(float Vo
 
         const FGameplayTag BiomeTag = TerrainSnapshot.GetBiomeTag(Cell);
 
-        // Lava biome override
         static const FGameplayTag LavaTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Lava")), false);
         if (LavaTag.IsValid() && BiomeTag.MatchesTag(LavaTag))
         {
             return TerrainLayer_Lava;
         }
 
-        // Volcanic biome → basalt
         static const FGameplayTag VolcanicTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Volcanic")), false);
         if (VolcanicTag.IsValid() && BiomeTag.MatchesTag(VolcanicTag))
         {
@@ -691,13 +633,11 @@ int32 FWorldForgeTerrainGeneratorInstance::ClassifyTerrainMaterialLayer(float Vo
         }
     }
 
-    // ── Water
     if (SurfaceHeight <= SeaLevel)
     {
         return TerrainLayer_Water;
     }
 
-    // ── Sand (beach strip)
     const float CoastBand = FMath::Max(0.0f, TerrainSnapshot.CoastBandVoxels);
     if (SurfaceHeight <= (SeaLevel + CoastBand) ||
         NormElev <= FMath::Clamp(TerrainSnapshot.SandMaxElevationNormalized, 0.0f, 1.0f))
@@ -705,46 +645,37 @@ int32 FWorldForgeTerrainGeneratorInstance::ClassifyTerrainMaterialLayer(float Vo
         return TerrainLayer_Sand;
     }
 
-    // ── Snow (high peaks)
     if (NormElev >= FMath::Clamp(TerrainSnapshot.SnowMinElevationNormalized, 0.0f, 1.0f))
     {
         return TerrainLayer_Snow;
     }
 
-    // ── Rock (cliffs by slope)
     if (SlopeDeg >= FMath::Max(0.0f, TerrainSnapshot.CliffSlopeThresholdDegrees))
     {
         return TerrainLayer_Rock;
     }
 
-    // ── Rock (high altitude)
     if (NormElev >= FMath::Clamp(TerrainSnapshot.HighRockMinElevationNormalized, 0.0f, 1.0f))
     {
         return TerrainLayer_Rock;
     }
 
-    // ── Rock (mid altitude + steep)
     if (NormElev >= FMath::Clamp(TerrainSnapshot.RockMinElevationNormalized, 0.0f, 1.0f) &&
         SlopeDeg >= FMath::Max(0.0f, TerrainSnapshot.RockSlopeThresholdDegrees))
     {
         return TerrainLayer_Rock;
     }
 
-    // ── Dirt (mid elevation or moderate slope)
     if (NormElev >= FMath::Clamp(TerrainSnapshot.DirtMinElevationNormalized, 0.0f, 1.0f) ||
         SlopeDeg >= FMath::Max(0.0f, TerrainSnapshot.DirtSlopeThresholdDegrees))
     {
         return TerrainLayer_Dirt;
     }
 
-    // ── Grass (everything else — the broad lowland band)
     return TerrainLayer_Grass;
 }
 
 // ─── v4.0: Underground material classification ──────────────────
-//
-// Depth-stratified: the deeper you go, the harder the rock.
-// Cave walls and lava tube walls get special treatment.
 
 int32 FWorldForgeTerrainGeneratorInstance::ClassifyUndergroundMaterial(
     float VoxelX, float VoxelY, float Z, float SurfaceHeight) const
@@ -752,7 +683,6 @@ int32 FWorldForgeTerrainGeneratorInstance::ClassifyUndergroundMaterial(
     const float DepthBelowSurface = SurfaceHeight - Z;
     const int32 SurfaceLayer = ClassifyTerrainMaterialLayer(VoxelX, VoxelY, SurfaceHeight);
 
-    // ── Biome tag check for volcanic underground
     {
         const float ChunkSizeF = static_cast<float>(FMath::Max(1, TerrainSnapshot.ChunkSizeVoxels));
         const float HalfGridX = static_cast<float>(TerrainSnapshot.GridWidth) * 0.5f;
@@ -775,10 +705,8 @@ int32 FWorldForgeTerrainGeneratorInstance::ClassifyUndergroundMaterial(
         }
     }
 
-    // ── Depth strata
     if (DepthBelowSurface <= 4.5f)
     {
-        // Shallow subsurface: transitional material
         switch (SurfaceLayer)
         {
         case TerrainLayer_Water:  return TerrainLayer_Water;
@@ -793,11 +721,9 @@ int32 FWorldForgeTerrainGeneratorInstance::ClassifyUndergroundMaterial(
 
     if (DepthBelowSurface <= 20.0f)
     {
-        // Mid depth: rock
         return TerrainLayer_Rock;
     }
 
-    // Deep underground: deep rock
     return TerrainLayer_DeepRock;
 }
 
@@ -830,6 +756,54 @@ int32 FWorldForgeTerrainGeneratorInstance::ComputeChunkBaseDepthVoxels(const FVo
         : 100.0f;
     const int32 DerivedDepth = FMath::RoundToInt(Profile.NoiseAmplitude / SafeVoxelSize);
     return FMath::Max(12, DerivedDepth);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// RESOURCE VEIN NOISE SAMPLING (v6.0)
+//
+// Each EResourceCategory has its own dual-noise intersection field.
+// These functions are used by Step08_SeedResources (via pipeline scan)
+// and ResourceSpawnSubsystem for deterministic node placement.
+// They do NOT modify terrain visuals — ore rendering is handled
+// entirely by Shatter Stone BP actors spawned at runtime.
+//
+// Tuning comes from FResourceNoiseRegistry so the terrain generator,
+// Step08 pipeline scan, and ResourceSpawnSubsystem all share the
+// same parameters.
+// ═══════════════════════════════════════════════════════════════════
+
+float FWorldForgeTerrainGeneratorInstance::SampleResourceDensity(
+    EResourceCategory Category,
+    float X, float Y, float Z) const
+{
+    const FResourceNoiseProfile& Prof = FResourceNoiseRegistry::GetProfile(Category);
+
+    const float Freq = Prof.Frequency;
+    const float ZScale = Prof.ZScale;
+    const float SeedOffset = Prof.SeedOffset;
+    const float SeedF = static_cast<float>(Seed);
+
+    const float N1 = WF_Perlin3D(
+        (X + SeedF * 0.71f + SeedOffset) * Freq,
+        (Y + SeedF * 0.83f + SeedOffset) * Freq,
+        (Z + SeedF * 0.97f + SeedOffset) * Freq * ZScale
+    );
+
+    const float N2 = WF_Perlin3D(
+        (X + 3000.0f + SeedF * 0.41f + SeedOffset) * Freq,
+        (Y + 3000.0f + SeedF * 0.59f + SeedOffset) * Freq,
+        (Z + 3000.0f + SeedF * 0.67f + SeedOffset) * Freq * ZScale
+    );
+
+    // Intersection mask — high when both noise fields are near zero
+    const float Mask = 1.0f - (N1 * N1 + N2 * N2);
+    return FMath::Clamp(Mask, 0.0f, 1.0f);
+}
+
+bool FWorldForgeTerrainGeneratorInstance::IsNearSurface(
+    float Z, float SurfaceHeight, float Tolerance) const
+{
+    return FMath::Abs(Z - SurfaceHeight) <= Tolerance;
 }
 
 // ─── Legacy stubs (kept for header compatibility) ───────────────

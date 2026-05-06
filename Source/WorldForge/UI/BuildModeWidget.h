@@ -37,6 +37,12 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "WorldForge|BuildUI")
 	void SwitchToDigMode();
 
+	UFUNCTION(BlueprintCallable, Category = "WorldForge|BuildUI")
+	void SwitchToMineMode();
+
+	UFUNCTION(BlueprintCallable, Category = "WorldForge|BuildUI")
+	void SwitchToFarmMode();
+
 	// Player clicked cancel in the UI.
 	UFUNCTION(BlueprintCallable, Category = "WorldForge|BuildUI")
 	void CancelBuild();
@@ -93,6 +99,12 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "WorldForge|BuildUI")
 	bool IsDigModeActive() const;
+
+	UFUNCTION(BlueprintPure, Category = "WorldForge|BuildUI")
+	bool IsMineModeActive() const;
+
+	UFUNCTION(BlueprintPure, Category = "WorldForge|BuildUI")
+	bool IsFarmModeActive() const;
 
 	// ================================
 	// Events (implement in Blueprint to update visuals)

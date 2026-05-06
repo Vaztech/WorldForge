@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "GameplayTagContainer.h"
 #include "Civilization/WorldHistory/WorldHistoryTypes.h"
+#include "Modifiers/WorldForgeEquipmentTypes.h"
 #include "WorldForgeDataTypes.generated.h"
 
 // ═══════════════════════════════════════════════════════════════════
@@ -148,6 +149,191 @@ struct FWorldKnowledgeState
 };
 
 // ═══════════════════════════════════════════════════════════════════
+// RESOURCE DISCOVERY (v6.0)
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Categories of mineable resources.  Each category gets its own
+ * 3D noise field in the terrain generator so veins cluster
+ * independently.  Expand by adding entries before COUNT and adding
+ * a matching noise field in WorldForgeTerrainGenerator.
+ */
+UENUM(BlueprintType)
+enum class EResourceCategory : uint8
+{
+    Metal    UMETA(DisplayName = "Metal Ores"),
+    Crystal  UMETA(DisplayName = "Crystals & Gems"),
+    Fossil   UMETA(DisplayName = "Fossils & Stone"),
+    COUNT    UMETA(Hidden)
+};
+
+/**
+ * Per-tile resource survey result.  Written during Step08,
+ * consumed by WorldMapSubsystem for the heatmap overlay.
+ */
+USTRUCT(BlueprintType)
+struct FResourceSurveyData
+{
+    GENERATED_BODY()
+
+    /** Peak density per resource category (indexed by EResourceCategory) */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    TArray<float> DensityByCategory;
+
+    /** Depth (voxels below surface) where the strongest signal was found */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    TArray<float> PeakDepthByCategory;
+
+    /** Overall richness score [0,1] for quick map coloring */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    float OverallRichness = 0.0f;
+
+    FResourceSurveyData()
+    {
+        const int32 N = static_cast<int32>(EResourceCategory::COUNT);
+        DensityByCategory.SetNumZeroed(N);
+        PeakDepthByCategory.SetNumZeroed(N);
+    }
+};
+
+/**
+ * Per-tile vein configuration.  Cached during Step08 so the
+ * ResourceSpawnSubsystem doesn't need to re-evaluate noise at runtime.
+ */
+USTRUCT(BlueprintType)
+struct FResourceVeinConfig
+{
+    GENERATED_BODY()
+
+    /** Which resource categories are present in this tile */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    TArray<EResourceCategory> PresentCategories;
+
+    /** Per-category spawn seed for deterministic node placement */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    TArray<int64> SpawnSeeds;
+
+    /** Per-category vein richness [0,1] — controls spawn density */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    TArray<float> VeinRichness;
+
+    /** Depth range (min, max in voxels below surface) per category */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    TArray<FVector2D> DepthRanges;
+
+    /** True if this tile has any resource veins at all (quick early-out). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    bool bHasVeins = false;
+
+    /** NEW: allows spawning visible surface resource nodes (Shatter Stone style) */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    bool bHasSurfaceExposure = false;
+};
+
+/**
+ * Runtime record of a spawned Shatter Stone node.
+ * Tracked by ResourceSpawnSubsystem for proximity queries and save/load.
+ */
+USTRUCT(BlueprintType)
+struct FSpawnedResourceNode
+{
+    GENERATED_BODY()
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    int32 NodeID = INDEX_NONE;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    EResourceCategory Category = EResourceCategory::Metal;
+
+    /** Gameplay tag for the specific ore type (e.g. WorldForge.Resource.Iron) */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    FGameplayTag ResourceTag;
+
+    /** Row name in the Shatter Stone Data Table */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    FName DataTableRowName;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    FIntPoint ChunkCell = FIntPoint::ZeroValue;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    FVector WorldPosition = FVector::ZeroVector;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    bool bExposed = false;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    bool bDepleted = false;
+
+    /** Weak reference to the spawned actor (not saved — re-spawned on chunk activation). */
+    UPROPERTY(Transient, BlueprintReadOnly)
+    TWeakObjectPtr<AActor> SpawnedActor;
+};
+
+/**
+ * Resource noise tuning for one EResourceCategory.
+ * Stored in FResourceNoiseRegistry so the pipeline, terrain generator,
+ * and spawn subsystem all share the same magic numbers.
+ *
+ * To add a new resource category:
+ *   1. Add entry to EResourceCategory (before COUNT)
+ *   2. Add an FResourceNoiseProfile to ResourceNoiseRegistry::GetProfile()
+ *   3. Add a noise field in WorldForgeTerrainGenerator (Seed + new offset)
+ */
+USTRUCT(BlueprintType)
+struct FResourceNoiseProfile
+{
+    GENERATED_BODY()
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite)
+    EResourceCategory Category = EResourceCategory::Metal;
+
+    /** 3D noise frequency — higher = tighter clusters */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite)
+    float Frequency = 0.025f;
+
+    /** Z-axis frequency scale.  < 1 = horizontal bias. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite)
+    float ZScale = 0.8f;
+
+    /** Seed offset added to the world seed for this noise field */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite)
+    float SeedOffset = 25000.0f;
+
+    /** Minimum intersection mask to consider a vein "present" */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite)
+    float PresenceThreshold = 0.55f;
+
+    /** Minimum intersection mask for surface exposure */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite)
+    float ExposedThreshold = 0.72f;
+};
+
+/**
+ * Static registry of noise profiles.  One source of truth for the
+ * terrain generator, Step08, and ResourceSpawnSubsystem.
+ */
+struct FResourceNoiseRegistry
+{
+    static const FResourceNoiseProfile& GetProfile(EResourceCategory Category)
+    {
+        static const FResourceNoiseProfile Profiles[] =
+        {
+            { EResourceCategory::Metal,   0.025f, 0.8f, 25000.0f, 0.55f, 0.72f },
+            { EResourceCategory::Crystal, 0.018f, 1.2f, 29000.0f, 0.55f, 0.72f },
+            { EResourceCategory::Fossil,  0.030f, 0.4f, 33000.0f, 0.55f, 0.72f },
+        };
+
+        const int32 Idx = FMath::Clamp(
+            static_cast<int32>(Category), 0,
+            static_cast<int32>(EResourceCategory::COUNT) - 1);
+        return Profiles[Idx];
+    }
+
+    static int32 Num() { return static_cast<int32>(EResourceCategory::COUNT); }
+};
+
+// ═══════════════════════════════════════════════════════════════════
 // VOXEL
 // ═══════════════════════════════════════════════════════════════════
 
@@ -211,6 +397,12 @@ struct FWorldTileData
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) float Rainfall = 0.5f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TArray<FGameplayTag> ResourceNodes;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TArray<FGameplayTag> ResourceTags;
+
+    /** v6.0: Resource survey results for world map heatmap */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FResourceSurveyData ResourceSurvey;
+
+    /** v6.0: Vein configuration for runtime Shatter Stone spawning */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FResourceVeinConfig VeinConfig;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 ControllingCivID = -1;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FWorldKnowledgeState KnowledgeState;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FVoxelBiomeProfile VoxelProfile;
@@ -767,6 +959,31 @@ struct FActiveProductionTask
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) int32 SettlementID = -1;
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) FGameplayTag JobTag;
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) FGameplayTag BuildingTag;
+
+    // ------------------------------------------------------------------------
+    // Job target metadata copied from FJobRequest when the agent arrives.
+    //
+    // Why this exists:
+    // FJobRequest already knows which farm zone, mining designation, tile, item,
+    // or building target the job belongs to. Once JobProcessor starts a
+    // ProductionProcessor task, that information must survive until CompleteTask().
+    //
+    // Examples:
+    // - Farming:
+    //     TargetID      = Farm ZoneID
+    //     TargetGridPos = Farm tile in settlement-local coordinates
+    //
+    // - Mining:
+    //     TargetID      = Mining DesignationID
+    //     TargetGridPos = Mine target X/Y in settlement/nav coordinates
+    //
+    // - Generic work:
+    //     TargetItemTag can still identify item/resource outputs when needed.
+    // ------------------------------------------------------------------------
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) int32 TargetID = INDEX_NONE;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) FIntPoint TargetGridPos = FIntPoint::ZeroValue;
+    UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) FGameplayTag TargetItemTag;
+
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) int32 AssignedAgentID = -1;
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) float Progress = 0.f;
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) float RequiredProgress = 10.f;
@@ -811,8 +1028,10 @@ struct FAgentData
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float EthicsCompassion = 50.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float EthicsHonour = 50.f;
 
-    
-    
+    // Equipped items by slot (Tool, Head, etc)
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TMap<EWorldForgeEquipmentSlot, FGameplayTag> EquippedItems;
+
+
     // ── Health System ──
 // Overall health pool. 100 = healthy, 0 = dead/incapacitated depending on processor rules.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float Health = 100.f;

@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Engine/DeveloperSettings.h"
+#include "Engine/DataTable.h"
 #include "VoxelWorldManager.h"
 #include "WorldForgeTerrainSettings.generated.h"
 
@@ -266,6 +267,140 @@ public:
 
     UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Caves|LavaTubes", meta = (ClampMin = "0.05", ClampMax = "1.0"))
     float LavaTubeZCompress = 0.3f;
+
+    // ============================================================
+    // 9D. Resource Veins (Batch 3 — mirrors FResourceNoiseProfile)
+    //
+    // These are editor-visible overrides for the noise parameters
+    // that FResourceNoiseRegistry uses.  When bOverrideResourceNoise
+    // is true, FResourceNoiseRegistry::GetProfile() reads from
+    // these settings instead of the compiled defaults.
+    //
+    // All three systems — WorldForgeTerrainGenerator (layer 6),
+    // Step08_SeedResources(), and ResourceSpawnSubsystem — share
+    // these parameters via FResourceNoiseRegistry.
+    // ============================================================
+
+    UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Resources")
+    bool bOverrideResourceNoise = false;
+
+    // ── Metal ──────────────────────────────────────────────────
+    UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Resources|Metal", meta = (ClampMin = "0.001", EditCondition = "bOverrideResourceNoise"))
+    float MetalFrequency = 0.018f;
+
+    UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Resources|Metal", meta = (ClampMin = "0.1", EditCondition = "bOverrideResourceNoise"))
+    float MetalZScale = 0.6f;
+
+    UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Resources|Metal", meta = (EditCondition = "bOverrideResourceNoise"))
+    int32 MetalSeedOffset = 25000;
+
+    UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Resources|Metal", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bOverrideResourceNoise"))
+    float MetalSpawnThreshold = 0.72f;
+
+    UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Resources|Metal", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bOverrideResourceNoise"))
+    float MetalSurveyThreshold = 0.45f;
+
+    // ── Crystal ────────────────────────────────────────────────
+    UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Resources|Crystal", meta = (ClampMin = "0.001", EditCondition = "bOverrideResourceNoise"))
+    float CrystalFrequency = 0.022f;
+
+    UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Resources|Crystal", meta = (ClampMin = "0.1", EditCondition = "bOverrideResourceNoise"))
+    float CrystalZScale = 0.5f;
+
+    UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Resources|Crystal", meta = (EditCondition = "bOverrideResourceNoise"))
+    int32 CrystalSeedOffset = 29000;
+
+    UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Resources|Crystal", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bOverrideResourceNoise"))
+    float CrystalSpawnThreshold = 0.78f;
+
+    UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Resources|Crystal", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bOverrideResourceNoise"))
+    float CrystalSurveyThreshold = 0.50f;
+
+    // ── Fossil ─────────────────────────────────────────────────
+    UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Resources|Fossil", meta = (ClampMin = "0.001", EditCondition = "bOverrideResourceNoise"))
+    float FossilFrequency = 0.015f;
+
+    UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Resources|Fossil", meta = (ClampMin = "0.1", EditCondition = "bOverrideResourceNoise"))
+    float FossilZScale = 0.8f;
+
+    UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Resources|Fossil", meta = (EditCondition = "bOverrideResourceNoise"))
+    int32 FossilSeedOffset = 33000;
+
+    UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Resources|Fossil", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bOverrideResourceNoise"))
+    float FossilSpawnThreshold = 0.75f;
+
+    UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Resources|Fossil", meta = (ClampMin = "0.0", ClampMax = "1.0", EditCondition = "bOverrideResourceNoise"))
+    float FossilSurveyThreshold = 0.48f;
+
+    // ============================================================
+    // 9E. Shatter Stone Asset References
+    //
+    // Set these in Project Settings → WorldForge to point at your
+    // NV3D Shatter Stone pack assets.  VoxelWorldManager reads them
+    // at terrain-ready time and auto-configures ResourceSpawnSubsystem.
+    // ============================================================
+
+    /**
+     * The Shatter Stone Data Table containing ore node configurations.
+     * e.g. DT_OreNodeConfig_MetalOre from the NV3D pack.
+     * Used for ALL resource categories (Metal, Crystal, Fossil) — the
+     * spawn subsystem maps categories to rows via PickOreRowName().
+     */
+    UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Resources|ShatterStone")
+    TSoftObjectPtr<UDataTable> ShatterStoneDataTable;
+
+    /**
+     * The Blueprint class to spawn for ore nodes.
+     * e.g. BP_MetalOreNode from the NV3D pack.
+     * Must be a child of AActor with the Shatter Stone destruction system.
+     */
+    UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Resources|ShatterStone")
+    TSoftClassPtr<AActor> ShatterStoneNodeClass;
+
+    // ============================================================
+    // 9F. Wild Harvest Asset References
+    //
+    // Set these in Project Settings → WorldForge to point at your
+    // NV3D Wild Harvest pack assets.  FarmingSubsystem reads them
+    // at game start and auto-configures WildHarvestAdapter.
+    //
+    // Discovered folder structure:
+    //   /WildHarvest/_Core/Blueprints/       — BP_CropPatch_Master, STR_CropConfig, E_CropStates
+    //   /WildHarvest/_Core/Blueprints/Interfaces/ — BPI_WH_Fertilize, BPI_WH_Harvesting,
+    //                                               BPI_WH_Interact, BPI_WH_Watering
+    //   /WildHarvest/WH_LowPoly/Blueprints/  — BP_CropPatch_LowPoly, DT_LowPoly, E_LowPoly
+    // ============================================================
+
+    /**
+     * Wild Harvest Data Table — the LowPoly pack uses a single DT_LowPoly
+     * containing all crop configs.  Additional sub-packs may have their own.
+     * Path: /Game/WildHarvest/WH_LowPoly/Blueprints/DT_LowPoly
+     */
+    UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Farming|WildHarvest")
+    TSoftObjectPtr<UDataTable> WildHarvest_DT_LowPoly;
+
+    /**
+     * The master crop patch Blueprint class.
+     * Path: /Game/WildHarvest/_Core/Blueprints/BP_CropPatch_Master
+     * Sub-packs have children: e.g. BP_CropPatch_LowPoly
+     */
+    UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Farming|WildHarvest")
+    TSoftClassPtr<AActor> WildHarvestCropPatchMasterClass;
+
+    /**
+     * The LowPoly sub-pack crop patch Blueprint.
+     * Path: /Game/WildHarvest/WH_LowPoly/Blueprints/BP_CropPatch_LowPoly
+     * Use this as the default spawn class if only the LowPoly pack is installed.
+     */
+    UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Farming|WildHarvest")
+    TSoftClassPtr<AActor> WildHarvestCropPatchLowPolyClass;
+
+    /**
+     * The pickup Blueprint class for harvested crop items.
+     * Path: /Game/WildHarvest/_Core/Blueprints/BP_CropPickup_Master
+     */
+    UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Farming|WildHarvest")
+    TSoftClassPtr<AActor> WildHarvestCropPickupMasterClass;
 
     // ============================================================
     // 10. Performance

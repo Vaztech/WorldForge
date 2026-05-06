@@ -38,11 +38,17 @@ public:
 
     // Starts a production task for the given agent/job/building context.
     // Returns the new TaskID, or -1 if task creation failed.
+    //
+    // Target metadata is copied from FJobRequest so CompleteTask() can route
+    // farm/mining completions back to the correct subsystem record.
     int32 StartProductionTask(
         int32 AgentID,
         int32 SettlementID,
         FGameplayTag JobTag,
-        FGameplayTag BuildingTag);
+        FGameplayTag BuildingTag,
+        int32 TargetID = INDEX_NONE,
+        FIntPoint TargetGridPos = FIntPoint::ZeroValue,
+        FGameplayTag TargetItemTag = FGameplayTag());
 
     // Returns true if this agent already has an active production task.
     bool HasActiveTask(int32 AgentID) const;

@@ -9,6 +9,8 @@
 #include "Voxel/VoxelWorldManager.h"
 #include "Blueprint/UserWidget.h"
 #include "GameFramework/PlayerController.h"
+#include "UI/WorldForgeEmbarkationManager.h"
+
 
 AWorldGenBootstrapActor::AWorldGenBootstrapActor()
 {
@@ -125,7 +127,71 @@ void AWorldGenBootstrapActor::RunBootstrap()
         Pipeline = NewObject<UWorldGenPipeline>(this);
     }
 
-    UE_LOG(LogTemp, Log, TEXT("[WorldGenBootstrap] Starting world generation. Seed=%lld"), WorldSeed);
+    // ------------------------------------------------------------
+    // Frontend / Embarkation config bridge.
+    //
+    // If the player came from Frontend_Map, the seed + world size are stored in
+    // UWorldForgeEmbarkationManager, which lives on the GameInstance and survives OpenLevel.
+    //
+    // If no user-driven embark config exists, we fall back to this actor's Details-panel defaults.
+    // ------------------------------------------------------------
+    if (UWorldForgeEmbarkationManager* EmbarkationManager =
+        GameInstance->GetSubsystem<UWorldForgeEmbarkationManager>())
+    {
+        if (EmbarkationManager->HasUserEmbarkConfig())
+        {
+            const FString SeedString = EmbarkationManager->GetSeedString();
+            const int32 EmbarkWorldSize = EmbarkationManager->GetWorldSize();
+
+            WorldSeed = static_cast<int64>(EmbarkationManager->GetResolvedSeed());
+
+            switch (EmbarkWorldSize)
+            {
+            case 128:
+                WorldGenConfig.WorldSize = EWorldSize::Small;
+                break;
+
+            case 512:
+                WorldGenConfig.WorldSize = EWorldSize::Large;
+                break;
+
+            case 1024:
+                WorldGenConfig.WorldSize = EWorldSize::OMG;
+                break;
+
+            case 256:
+            default:
+                WorldGenConfig.WorldSize = EWorldSize::Medium;
+                break;
+            }
+
+            UE_LOG(LogTemp, Log,
+                TEXT("[WorldGenBootstrap] Using embarkation config. SeedString='%s' ResolvedSeed=%lld WorldSizeGrid=%d WorldSizeEnum=%d"),
+                *SeedString,
+                WorldSeed,
+                EmbarkWorldSize,
+                static_cast<int32>(WorldGenConfig.WorldSize));
+        }
+        else
+        {
+            UE_LOG(LogTemp, Warning,
+                TEXT("[WorldGenBootstrap] No user embark config found. Falling back to actor defaults. Seed=%lld WorldSizeEnum=%d"),
+                WorldSeed,
+                static_cast<int32>(WorldGenConfig.WorldSize));
+        }
+    }
+    else
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[WorldGenBootstrap] EmbarkationManager not found. Falling back to actor defaults. Seed=%lld WorldSizeEnum=%d"),
+            WorldSeed,
+            static_cast<int32>(WorldGenConfig.WorldSize));
+    }
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[WorldGenBootstrap] Starting world generation. Seed=%lld WorldSizeEnum=%d"),
+        WorldSeed,
+        static_cast<int32>(WorldGenConfig.WorldSize));
 
     RNG->InitializeWithSeed(WorldSeed);
     Pipeline->GenerateWorld(WorldSeed, WorldGenConfig, RNG);

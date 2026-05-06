@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "GameplayTagContainer.h"
 #include "Data/WorldForgeDataTypes.h"
+#include "TerrainModificationLayer.h"
 #include "WorldForgeTerrainSnapshot.generated.h"
 
 USTRUCT(BlueprintType)
@@ -243,18 +244,21 @@ public:
     UPROPERTY()
     TArray<float> CachedSurfaceHeightsVoxels;
 
-   
+    // ─────────────────────────────────────────────────────────────
+    // v5.0: Hybrid Chunking Modification Path
+    // ─────────────────────────────────────────────────────────────
+    // Replaces the v4.0 TSet<FIntVector> RemovedTerrainBlocks with
+    // chunk-indexed SDF brush volumes.  Only modified chunks are
+    // stored.  The generator samples modifications at O(M) per
+    // chunk instead of O(N) globally.
+    //
+    // The modification map is initialized with grid parameters
+    // during BuildTerrainSnapshot() so it knows how to convert
+    // voxel coords → chunk keys.
+    // ─────────────────────────────────────────────────────────────
 
-    
-    // ─────────────────────────────────────────────────────────────
-    // Phase 1 Digging: persistent terrain edit mask
-    // ─────────────────────────────────────────────────────────────
-    // Generator-driven terrain is rebuilt from this snapshot. Without this
-    // mask, dug blocks visually regenerate because GetValueImpl only sees the
-    // original terrain height/cave field.
-    
     UPROPERTY()
-    TSet<FIntVector> RemovedTerrainBlocks;
+    FTerrainModificationMap Modifications;
 
 public:
     bool IsValid() const
@@ -381,26 +385,94 @@ public:
         return FGameplayTag();
     }
 
-    
-
     int32 GetFoundationDepthVoxels() const
     {
         const float SafeVoxelSize = VoxelSize > KINDA_SMALL_NUMBER ? VoxelSize : 100.0f;
         return FMath::Max(8, FMath::RoundToInt(GlobalFoundationDepthWorld / SafeVoxelSize));
     }
 
-    bool IsTerrainBlockRemoved(const FIntVector& GridPos) const
+    // ─────────────────────────────────────────────────────────────
+    // v5.0: Modification API
+    // ─────────────────────────────────────────────────────────────
+    // These replace the old IsTerrainBlockRemoved / MarkTerrainBlockRemoved /
+    // UnmarkTerrainBlockRemoved methods.  The modification map must be
+    // initialized (via InitializeModifications) before use.
+    // ─────────────────────────────────────────────────────────────
+
+    /**
+     * Initialize the modification map with current grid parameters.
+     * Must be called after GridWidth, GridHeight, and ChunkSizeVoxels are set.
+     */
+    void InitializeModifications()
     {
-        return RemovedTerrainBlocks.Contains(GridPos);
+        Modifications.Initialize(ChunkSizeVoxels, GridWidth, GridHeight);
     }
 
-    void MarkTerrainBlockRemoved(const FIntVector& GridPos)
+    /**
+     * Add an SDF brush to the modification map.
+     * The brush is stored in all chunks its bounding box overlaps.
+     * Returns the assigned BrushID for later removal.
+     */
+    int64 AddModificationBrush(const FSDFBrush& Brush)
     {
-        RemovedTerrainBlocks.Add(GridPos);
+        return Modifications.AddBrush(Brush);
     }
 
-    void UnmarkTerrainBlockRemoved(const FIntVector& GridPos)
+    /**
+     * Remove a brush by ID from all chunks.
+     */
+    void RemoveModificationBrush(int64 BrushID)
     {
-        RemovedTerrainBlocks.Remove(GridPos);
+        Modifications.RemoveBrush(BrushID);
+    }
+
+    /**
+     * Remove all brushes near a voxel-space position (for undo).
+     * Returns the number of brushes removed.
+     */
+    int32 RemoveModificationsNear(const FVector& VoxelPosition, float SearchRadius)
+    {
+        return Modifications.RemoveBrushesNear(VoxelPosition, SearchRadius);
+    }
+
+    /**
+     * Sample the total modification density at a voxel-space point.
+     * Returns positive for net carve (toward air).
+     */
+    float SampleModificationDensity(float X, float Y, float Z) const
+    {
+        return Modifications.SampleAt(X, Y, Z);
+    }
+
+    /**
+     * Check if any modifications exist in the given voxel-space bounds.
+     */
+    bool HasModificationsInBounds(float MinX, float MinY, float MaxX, float MaxY) const
+    {
+        return Modifications.HasModificationsInBounds(MinX, MinY, MaxX, MaxY);
+    }
+
+    /**
+     * Check if there are any terrain modifications at all.
+     */
+    bool HasAnyModifications() const
+    {
+        return !Modifications.IsEmpty();
+    }
+
+    /**
+     * Clear all terrain modifications.
+     */
+    void ClearAllModifications()
+    {
+        Modifications.Reset();
+    }
+
+    /**
+     * Get the number of modified chunks.
+     */
+    int32 NumDirtyChunks() const
+    {
+        return Modifications.NumDirtyChunks();
     }
 };

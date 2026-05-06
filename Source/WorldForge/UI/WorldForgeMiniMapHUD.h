@@ -16,6 +16,15 @@ class WORLDFORGE_API AWorldForgeMiniMapHUD : public AHUD
 public:
     virtual void DrawHUD() override;
 
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|MiniMap")
+    void SetMiniMapVisible(bool bVisible);
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|MiniMap")
+    void ToggleMiniMapVisible();
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|MiniMap")
+    bool IsMiniMapVisible() const { return bShowMiniMap; }
+
 protected:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|MiniMap")
     bool bShowMiniMap = true;
@@ -41,7 +50,6 @@ protected:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|MiniMap", meta = (ClampMin = "1", UIMin = "1"))
     FIntPoint WorldCellDimensions = FIntPoint(256, 256);
 
-    // 🔥 NEW: Zoom (controls how much world is visible)
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|MiniMap", meta = (ClampMin = "1.0", UIMin = "1.0"))
     float MiniMapZoom = 32.0f;
 
@@ -66,11 +74,9 @@ protected:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|MiniMap", meta = (ClampMin = "1.0", UIMin = "1.0"))
     float PawnDotSize = 8.0f;
 
-    // 🔥 NEW: Off-screen indicator size
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|MiniMap", meta = (ClampMin = "2.0", UIMin = "2.0"))
     float EdgeIndicatorSize = 10.0f;
 
-    // 🔥 NEW: Padding from edge
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|MiniMap")
     float EdgePadding = 6.0f;
 
@@ -86,7 +92,6 @@ protected:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|MiniMap|Debug")
     bool bShowDebugStats = true;
 
-    // v4.0: Show camera Z altitude and terrain info
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|MiniMap")
     bool bShowZLevel = true;
 
@@ -103,7 +108,6 @@ private:
     FVector2D WorldCellToMiniMap(const FIntPoint& WorldCell) const;
     bool IsWorldCellInBounds(const FIntPoint& WorldCell) const;
 
-    // Clamp to minimap bounds (for edge indicators)
     FVector2D ClampToMiniMapBounds(const FVector2D& Point) const;
 
     void DrawMiniMapBackground();

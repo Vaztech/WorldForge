@@ -5,132 +5,76 @@
 #include "EventBus.h"
 #include "ProcessorManager.h"
 #include "ProductionProcessor.h"
+#include "Mining/MiningSubsystem.h"
 #include "WorldForgeDataTypes.h"
 #include "WorldForgeTags.h"
-#include "Traits/WorldForgeTraitTypes.h"
-#include "Engine/DataTable.h"
+#include "Modifiers/WorldForgeModifierResolver.h"
 
 // ====================================================================
-// TRAIT SUPPORT
-// JobProcessor uses traits for job-selection scoring only.
-// Production speed itself is still handled by ProductionProcessor.
+// SHARED MODIFIER SUPPORT
+//
+// JobProcessor no longer loads DT_WorldForgeTraits directly.
+// It asks WorldForgeModifierResolver for the agent's effective values.
+//
+// This matters because later equipment can be added to the resolver and
+// JobProcessor will automatically score:
+// Base skills + trait mods + equipment mods + buff/debuff mods
+//
+// The real Agent is not permanently mutated here.
+// We build a temporary scoring copy for JobQueueManager.
 // ====================================================================
 namespace
 {
-    UDataTable* GetWorldForgeTraitTable()
-    {
-        static UDataTable* CachedTraitTable = nullptr;
-        static bool bAttemptedLoad = false;
+    // Turn this on only when debugging score math.
+    // Leaving it false prevents log spam every simulation step.
+    constexpr bool bLogJobModifierScoring = false;
 
-        if (!bAttemptedLoad)
-        {
-            bAttemptedLoad = true;
-
-            // Future us:
-            // Update this path if DT_WorldForgeTraits is moved.
-            CachedTraitTable = LoadObject<UDataTable>(
-                nullptr,
-                TEXT("/Game/Data/DT_WorldForgeTraits.DT_WorldForgeTraits"));
-
-            if (!CachedTraitTable)
-            {
-                UE_LOG(
-                    LogTemp,
-                    Warning,
-                    TEXT("[JobProcessor] Could not load DT_WorldForgeTraits at /Game/Data/DT_WorldForgeTraits. Trait job scoring will be skipped."));
-            }
-        }
-
-        return CachedTraitTable;
-    }
-
-    FName GetLeafRowNameFromTraitTag(const FGameplayTag& TraitTag)
-    {
-        FString TagString = TraitTag.ToString();
-
-        FString Left;
-        FString Right;
-
-        if (TagString.Split(TEXT("."), &Left, &Right, ESearchCase::IgnoreCase, ESearchDir::FromEnd))
-        {
-            return FName(*Right);
-        }
-
-        return TraitTag.GetTagName();
-    }
-
-    const FWorldForgeTraitDefinition* FindTraitDefinition(
-        UDataTable* TraitTable,
-        const FGameplayTag& TraitTag)
-    {
-        if (!TraitTable || !TraitTag.IsValid())
-        {
-            return nullptr;
-        }
-
-        // First try full tag row name:
-        // WorldForge.Trait.Lucky
-        if (const FWorldForgeTraitDefinition* TraitDef =
-            TraitTable->FindRow<FWorldForgeTraitDefinition>(
-                TraitTag.GetTagName(),
-                TEXT("JobProcessor Trait FullTag Lookup"),
-                false))
-        {
-            return TraitDef;
-        }
-
-        // Then try short row name:
-        // Lucky
-        return TraitTable->FindRow<FWorldForgeTraitDefinition>(
-            GetLeafRowNameFromTraitTag(TraitTag),
-            TEXT("JobProcessor Trait Leaf Lookup"),
-            false);
-    }
-
-    FAgentData BuildTraitScoredAgentForJobSelection(const FAgentData& Agent)
+    FAgentData BuildModifierScoredAgentForJobSelection(const FAgentData& Agent)
     {
         FAgentData ScoredAgent = Agent;
 
-        UDataTable* TraitTable = GetWorldForgeTraitTable();
-        if (!TraitTable || Agent.TraitTags.IsEmpty())
+        // Resolve all additive/multiplicative modifiers in one place.
+        // Today this can include traits.
+        // Later this can include equipment, buffs, wounds, curses, etc.
+        const FWorldForgeResolvedModifiers Mods =
+            UWorldForgeModifierResolver::ResolveAgentModifiers(Agent);
+
+        const float OldEfficiency = ScoredAgent.CurrentEfficiency;
+
+        // Use the resolver's final work-efficiency value.
+        // This keeps JobProcessor independent from where modifiers came from.
+        ScoredAgent.CurrentEfficiency =
+            UWorldForgeModifierResolver::ResolveWorkEfficiency(Agent);
+
+        // Apply additive skill modifiers to the temporary scoring copy only.
+        // This does NOT permanently change Agent.Skills.
+        for (const TPair<FGameplayTag, float>& SkillMod : Mods.SkillModifiers)
         {
-            return ScoredAgent;
-        }
-
-        float WorkEfficiencyMultiplier = 1.0f;
-
-        for (const FGameplayTag& TraitTag : Agent.TraitTags)
-        {
-            const FWorldForgeTraitDefinition* TraitDef =
-                FindTraitDefinition(TraitTable, TraitTag);
-
-            if (!TraitDef)
+            if (!SkillMod.Key.IsValid())
             {
                 continue;
             }
 
-            // WorkEfficiencyMultiplier affects how attractive this agent is for jobs
-            // if JobQueue scoring considers CurrentEfficiency.
-            WorkEfficiencyMultiplier *= TraitDef->WorkEfficiencyMultiplier;
+            const float OldSkillValue = ScoredAgent.Skills.FindRef(SkillMod.Key);
 
-            // SkillModifiers are additive temporary scoring bonuses.
-            // They do not permanently change the agent's saved skills.
-            for (const TPair<FGameplayTag, float>& SkillMod : TraitDef->SkillModifiers)
-            {
-                if (!SkillMod.Key.IsValid())
-                {
-                    continue;
-                }
-
-                float& SkillValue = ScoredAgent.Skills.FindOrAdd(SkillMod.Key);
-                SkillValue = FMath::Clamp(SkillValue + SkillMod.Value, 0.0f, 100.0f);
-            }
+            float& SkillValue = ScoredAgent.Skills.FindOrAdd(SkillMod.Key);
+            SkillValue = FMath::Clamp(
+                OldSkillValue + SkillMod.Value,
+                0.0f,
+                100.0f);
         }
 
-        ScoredAgent.CurrentEfficiency = FMath::Clamp(
-            ScoredAgent.CurrentEfficiency * WorkEfficiencyMultiplier,
-            0.0f,
-            2.0f);
+        if (bLogJobModifierScoring)
+        {
+            UE_LOG(
+                LogTemp,
+                Log,
+                TEXT("[JobModifierScoring] Agent=%d Efficiency %.2f -> %.2f SkillMods=%d"),
+                Agent.AgentID,
+                OldEfficiency,
+                ScoredAgent.CurrentEfficiency,
+                Mods.SkillModifiers.Num());
+        }
 
         return ScoredAgent;
     }
@@ -262,6 +206,66 @@ void UJobProcessor::OnAgentArrived(
 {
     const FGameplayTag JobTag = Agent.CurrentJobTag;
 
+    // Find the assigned queue entry for this agent.
+    //
+    // This lets us preserve FJobRequest metadata when handing the work off
+    // to ProductionProcessor:
+    // - TargetID
+    // - TargetGridPos
+    // - TargetItemTag
+    //
+    // Without this, farming/mining completion cannot know which farm zone,
+    // farm tile, or mining designation was completed.
+    const FJobRequest* AssignedJob = nullptr;
+    const FJobRequest* FallbackAssignedJob = nullptr;
+
+    for (const FJobRequest& Job : JobQueue.GetAllJobs())
+    {
+        if (!Job.bAssigned || Job.AssignedAgentID != Agent.AgentID)
+        {
+            continue;
+        }
+
+        // Keep a fallback in case old/stale jobs exist, but prefer exact match.
+        if (!FallbackAssignedJob)
+        {
+            FallbackAssignedJob = &Job;
+        }
+
+        const bool bTagMatches = Job.JobTag == JobTag;
+        const bool bTargetMatches = Job.TargetGridPos == Agent.CurrentNavTarget;
+
+        if (bTagMatches && bTargetMatches)
+        {
+            AssignedJob = &Job;
+            break;
+        }
+
+        // Farm jobs must preserve TargetID/TargetGridPos, so at least require tag match.
+        if (!AssignedJob && bTagMatches)
+        {
+            AssignedJob = &Job;
+        }
+    }
+
+    if (!AssignedJob)
+    {
+        AssignedJob = FallbackAssignedJob;
+    }
+
+    if (!AssignedJob)
+    {
+        UE_LOG(
+            LogTemp,
+            Warning,
+            TEXT("[JobProcessor] Agent %d arrived for %s but no assigned job metadata was found. NavTarget=(%d,%d) Step=%d"),
+            Agent.AgentID,
+            *JobTag.ToString(),
+            Agent.CurrentNavTarget.X,
+            Agent.CurrentNavTarget.Y,
+            StepNumber);
+    }
+
     if (JobTag == TAG_Job_Eat)
     {
         Agent.State = EAgentState::Eating;
@@ -294,9 +298,21 @@ void UJobProcessor::OnAgentArrived(
     if (JobTag == TAG_Job_Cook ||
         JobTag == TAG_Job_Craft ||
         JobTag == TAG_Job_Build ||
-        JobTag.MatchesTag(TAG_Job_Harvest))
+        JobTag == TAG_Job_Mine ||
+        JobTag.MatchesTag(TAG_Job_Harvest) ||
+        // Wild Harvest Integration
+        JobTag == TAG_Job_Farm_Plant ||
+        JobTag == TAG_Job_Farm_Water ||
+        JobTag == TAG_Job_Farm_Harvest ||
+        JobTag == TAG_Job_Farm_Clear ||
+        JobTag == TAG_Job_Farm_Fertilize)
     {
         Agent.State = EAgentState::Working;
+
+        const int32 TargetID = AssignedJob ? AssignedJob->TargetID : INDEX_NONE;
+        const FIntPoint TargetGridPos = AssignedJob ? AssignedJob->TargetGridPos : Agent.CurrentGridPos;
+        const FGameplayTag TargetItemTag = AssignedJob ? AssignedJob->TargetItemTag : FGameplayTag();
+        const FGameplayTag BuildingTag = AssignedJob ? AssignedJob->TargetBuildingTag : Agent.CurrentJobBuildingTag;
 
         if (UProcessorManager* PM = World->GetSubsystem<UProcessorManager>())
         {
@@ -306,11 +322,26 @@ void UJobProcessor::OnAgentArrived(
                     Agent.AgentID,
                     Agent.SettlementID,
                     JobTag,
-                    Agent.CurrentJobBuildingTag);
+                    BuildingTag,
+                    TargetID,
+                    TargetGridPos,
+                    TargetItemTag);
             }
         }
+
+        UE_LOG(
+            LogTemp,
+            Log,
+            TEXT("[JobProcessor] Agent %d arrived for %s TargetID=%d TargetGrid=(%d,%d) Step=%d"),
+            Agent.AgentID,
+            *JobTag.ToString(),
+            TargetID,
+            TargetGridPos.X,
+            TargetGridPos.Y,
+            StepNumber);
     }
 }
+
 
 // ====================================================================
 // CRITICAL NEEDS HANDLER
@@ -404,9 +435,9 @@ bool UJobProcessor::HandleCriticalNeeds(
 // JOB ASSIGNMENT
 // Finds best job from queue and assigns it to agent.
 //
-// Trait hook:
-// We create a temporary scoring copy of the agent with trait skill bonuses
-// and work-efficiency modifiers. The real Agent is not permanently changed.
+// Modifier hook:
+// We create a temporary scoring copy of the agent with effective skill
+// and efficiency modifiers. The real Agent is not permanently changed.
 // ====================================================================
 bool UJobProcessor::TryAssignQueuedJob(
     FAgentData& Agent,
@@ -420,7 +451,7 @@ bool UJobProcessor::TryAssignQueuedJob(
         return false;
     }
 
-    const FAgentData ScoredAgent = BuildTraitScoredAgentForJobSelection(Agent);
+    const FAgentData ScoredAgent = BuildModifierScoredAgentForJobSelection(Agent);
 
     FJobRequest* Job = JobQueue.FindBestJobForAgent(
         Agent.AgentID,
@@ -524,6 +555,25 @@ void UJobProcessor::GenerateIdleHarvestJobs(
         return;
     }
 
+    // --------------------------------------------------------------------
+    // Player/system-created mining designations should post real jobs before
+    // fallback idle harvest jobs.
+    //
+    // This allows the loop:
+    //   MiningSubsystem designation
+    //   → JobProcessor queued TAG_Job_Mine
+    //   → colonist walks to target
+    //   → ProductionProcessor completes work
+    //   → MiningSubsystem::CompleteDesignation()
+    //
+    // The generic TAG_Job_Harvest_Stone jobs below are still useful as
+    // fallback/idle gathering, but they should not replace explicit mining.
+    // --------------------------------------------------------------------
+    if (UMiningSubsystem* MiningSubsystem = World ? World->GetSubsystem<UMiningSubsystem>() : nullptr)
+    {
+        MiningSubsystem->PostMiningJobs(SettlementID, StepNumber);
+    }
+
     const int32 FoodAmt = SM->GetStockpileAmount(SettlementID, TAG_Item_Food);
     const int32 WoodAmt = SM->GetStockpileAmount(SettlementID, TAG_Item_Wood);
     const int32 StoneAmt = SM->GetStockpileAmount(SettlementID, TAG_Item_Stone);
@@ -569,6 +619,8 @@ void UJobProcessor::GenerateIdleHarvestJobs(
             Job.RequiredSkill = TAG_Skill_Farming;
             Job.Priority = (FoodAmt < 20) ? EJobPriority::High : EJobPriority::Normal;
             Job.TargetGridPos = GetSpreadTarget(10, 10);
+            Job.TargetID = INDEX_NONE;
+            Job.TargetItemTag = TAG_Item_Food;
 
             if (FJobRequest* J = PostJob(Job))
             {
@@ -599,6 +651,8 @@ void UJobProcessor::GenerateIdleHarvestJobs(
             Job.RequiredSkill = TAG_Skill_Hauling;
             Job.Priority = EJobPriority::Normal;
             Job.TargetGridPos = GetSpreadTarget(15, 10);
+            Job.TargetID = INDEX_NONE;
+            Job.TargetItemTag = TAG_Item_Wood;
 
             if (FJobRequest* J = PostJob(Job))
             {
@@ -629,6 +683,8 @@ void UJobProcessor::GenerateIdleHarvestJobs(
             Job.RequiredSkill = TAG_Skill_Mining;
             Job.Priority = EJobPriority::Normal;
             Job.TargetGridPos = GetSpreadTarget(20, 10);
+            Job.TargetID = INDEX_NONE;
+            Job.TargetItemTag = TAG_Item_Stone;
 
             if (FJobRequest* J = PostJob(Job))
             {
@@ -648,6 +704,7 @@ void UJobProcessor::GenerateIdleHarvestJobs(
         UE_LOG(LogTemp, Log, TEXT("[JobProcessor] Skipping stone harvest job: Stone stockpile is sufficient."));
     }
 }
+
 
 // ====================================================================
 // PUBLIC API
@@ -696,17 +753,28 @@ FGameplayTag UJobProcessor::GetSkillTagForJob(FGameplayTag JobTag) const
 
     if (JobTag == TAG_Job_Cook)
     {
-        return TAG_Skill_Farming;
+        return TAG_Skill_Cooking;
     }
 
     if (JobTag == TAG_Job_Craft)
     {
-        return TAG_Skill_Hauling;
+        return TAG_Skill_Crafting;
     }
 
     if (JobTag == TAG_Job_Build)
     {
-        return TAG_Skill_Hauling;
+        return TAG_Skill_Building;
+    }
+
+    // ════ Wild Harvest Integration ════
+    // All farming jobs use the Farming skill.
+    if (JobTag == TAG_Job_Farm_Plant ||
+        JobTag == TAG_Job_Farm_Water ||
+        JobTag == TAG_Job_Farm_Harvest ||
+        JobTag == TAG_Job_Farm_Clear ||
+        JobTag == TAG_Job_Farm_Fertilize)
+    {
+        return TAG_Skill_Farming;
     }
 
     return FGameplayTag();

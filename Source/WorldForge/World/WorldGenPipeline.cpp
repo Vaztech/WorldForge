@@ -158,10 +158,17 @@ void UWorldGenPipeline::GenerateWorld(
     Step04_AssignBiomes();
     PushPartialMapUpdate();                      // terrain colors improve
 
+    // CRITICAL HANDOFF FIX:
+    // Resource veins must be seeded before voxel terrain initialization.
+    // Step05 hands WorldTiles to VoxelWorldManager, which may immediately cache/snapshot
+    // tile metadata even if actual terrain generation is deferred.
+    // If resources are seeded after Step05, VoxelWorldManager sees 0 vein tiles.
+    Step08_SeedResources();
+    PushPartialMapUpdate();                      // resource overlay/data now exists before terrain snapshot
+
     Step05_InitVoxelChunks();
     Step06_PCGDecorationPass();
     Step07_ApplyWorldDriver();
-    Step08_SeedResources();
 
     Step09_PlaceCivilizations();
     PushPartialMapUpdate();                      // civ territory appears
@@ -1219,21 +1226,64 @@ void UWorldGenPipeline::Step04_AssignBiomes()
 void UWorldGenPipeline::Step05_InitVoxelChunks()
 {
     UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step05: Init voxel chunks..."));
-    if (!WorldRef) { UE_LOG(LogTemp, Warning, TEXT("[WorldGen] Step05 failed: WorldRef is null.")); return; }
+
+    if (!WorldRef)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[WorldGen] Step05 failed: WorldRef is null."));
+        return;
+    }
 
     UVoxelWorldManager* VoxelMgr = WorldRef->GetSubsystem<UVoxelWorldManager>();
-    if (!VoxelMgr) { UE_LOG(LogTemp, Warning, TEXT("[WorldGen] Step05 failed: UVoxelWorldManager not found.")); return; }
+    if (!VoxelMgr)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[WorldGen] Step05 failed: UVoxelWorldManager not found."));
+        return;
+    }
 
     VoxelMgr->SetPipelineMountainRanges(MountainRanges);
     VoxelMgr->SetPipelineVolcanoes(Volcanoes);
 
+    // Diagnostic: verify resource data is already present before VoxelWorldManager
+    // snapshots/caches the tile array.
+    int32 TilesWithVeinData = 0;
+    int32 TilesWithResourceTags = 0;
+
+    for (const FWorldTileData& Tile : WorldTiles)
+    {
+        if (Tile.VeinConfig.PresentCategories.Num() > 0)
+        {
+            ++TilesWithVeinData;
+        }
+
+        if (Tile.ResourceTags.Num() > 0)
+        {
+            ++TilesWithResourceTags;
+        }
+    }
+
+    UE_LOG(LogTemp, Warning,
+        TEXT("[WorldGen] Step05 handoff diagnostic: VeinTiles=%d ResourceTagTiles=%d / %d"),
+        TilesWithVeinData,
+        TilesWithResourceTags,
+        WorldTiles.Num());
+
     const bool bAccepted = VoxelMgr->GenerateTerrainFromTiles(
-        WorldTiles, GridWidth, GridHeight, CurrentConfig.TerrainMode, CurrentConfig.BlockHeightStep);
+        WorldTiles,
+        GridWidth,
+        GridHeight,
+        CurrentConfig.TerrainMode,
+        CurrentConfig.BlockHeightStep);
 
-    if (!bAccepted) { UE_LOG(LogTemp, Warning, TEXT("[WorldGen] Step05: terrain request was not accepted.")); return; }
+    if (!bAccepted)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[WorldGen] Step05: terrain request was not accepted."));
+        return;
+    }
 
-    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step05 done. TerrainMode=%s BlockHeightStep=%d"),
-        CurrentConfig.TerrainMode == ETerrainMode::Blocky ? TEXT("Blocky") : TEXT("Smooth"), CurrentConfig.BlockHeightStep);
+    UE_LOG(LogTemp, Log,
+        TEXT("[WorldGen] Step05 done. TerrainMode=%s BlockHeightStep=%d"),
+        CurrentConfig.TerrainMode == ETerrainMode::Blocky ? TEXT("Blocky") : TEXT("Smooth"),
+        CurrentConfig.BlockHeightStep);
 }
 
 void UWorldGenPipeline::Step06_PCGDecorationPass()
@@ -1254,12 +1304,19 @@ void UWorldGenPipeline::Step07_ApplyWorldDriver()
 
 void UWorldGenPipeline::Step08_SeedResources()
 {
-    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step08: Seeding resources..."));
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step08: Seeding resources (v6.0 noise-driven)..."));
 
+    // ── Gameplay tags ──
     const FGameplayTag StoneTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Resource.Stone")));
     const FGameplayTag WoodTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Resource.Wood")));
     const FGameplayTag OreTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Resource.Ore")));
+    const FGameplayTag IronTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Resource.Iron")), false);
+    const FGameplayTag CopperTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Resource.Copper")), false);
+    const FGameplayTag GoldTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Resource.Gold")), false);
+    const FGameplayTag CrystalTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Resource.Crystal")), false);
+    const FGameplayTag FossilTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Resource.Fossil")), false);
 
+    // Biome tags for weighting
     const FGameplayTag MountainTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Mountain")));
     const FGameplayTag SnowPeakTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.SnowPeak")));
     const FGameplayTag AlpineTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Alpine")));
@@ -1270,40 +1327,243 @@ void UWorldGenPipeline::Step08_SeedResources()
     const FGameplayTag SwampTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Swamp")));
     const FGameplayTag MarshTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Marsh")));
     const FGameplayTag HillsTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Hills")));
+    const FGameplayTag CanyonTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Canyon")), false);
+    const FGameplayTag VolcanicTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Volcanic")), false);
 
-    for (FWorldTileData& Tile : WorldTiles)
+    // ── 1D vertical noise scan config ──
+    const int32 ScanDepthMin = 2;
+    const int32 ScanDepthMax = 100;
+    const int32 ScanStep = 4;
+
+    const int32 NumCategories = FResourceNoiseRegistry::Num();
+    const float SeedF = static_cast<float>(WorldSeed & 0x7FFFFFFF);
+
+    int32 TilesWithOre = 0;
+    int32 SurfaceNodeTiles = 0;
+
+    for (int32 TileIdx = 0; TileIdx < WorldTiles.Num(); ++TileIdx)
     {
+        FWorldTileData& Tile = WorldTiles[TileIdx];
         Tile.ResourceTags.Reset();
-        if (Tile.BiomeType.MatchesTag(MountainTag) || Tile.BiomeType.MatchesTag(SnowPeakTag) || Tile.BiomeType.MatchesTag(AlpineTag))
+
+        const bool bHighland =
+            Tile.BiomeType.MatchesTag(MountainTag) ||
+            Tile.BiomeType.MatchesTag(SnowPeakTag) ||
+            Tile.BiomeType.MatchesTag(AlpineTag);
+
+        const bool bHills = Tile.BiomeType.MatchesTag(HillsTag);
+
+        const bool bForested =
+            Tile.BiomeType.MatchesTag(ForestTag) ||
+            Tile.BiomeType.MatchesTag(WoodlandTag) ||
+            Tile.BiomeType.MatchesTag(JungleTag);
+
+        // ── Legacy resource tags ──
+        if (bHighland)
         {
             Tile.ResourceTags.Add(StoneTag);
-            if (RNGRef->NextFloat(UWorldForgeRNG::BRANCH_RESOURCES) > 0.5f) Tile.ResourceTags.Add(OreTag);
+            if (RNGRef->NextFloat(UWorldForgeRNG::BRANCH_RESOURCES) > 0.5f)
+                Tile.ResourceTags.Add(OreTag);
         }
-        else if (Tile.BiomeType.MatchesTag(HillsTag))
+        else if (bHills)
         {
-            if (RNGRef->NextFloat(UWorldForgeRNG::BRANCH_RESOURCES) > 0.4f) Tile.ResourceTags.Add(StoneTag);
-            if (RNGRef->NextFloat(UWorldForgeRNG::BRANCH_RESOURCES) > 0.75f) Tile.ResourceTags.Add(OreTag);
+            if (RNGRef->NextFloat(UWorldForgeRNG::BRANCH_RESOURCES) > 0.4f)
+                Tile.ResourceTags.Add(StoneTag);
+            if (RNGRef->NextFloat(UWorldForgeRNG::BRANCH_RESOURCES) > 0.75f)
+                Tile.ResourceTags.Add(OreTag);
         }
-        else if (Tile.BiomeType.MatchesTag(ForestTag) || Tile.BiomeType.MatchesTag(WoodlandTag) || Tile.BiomeType.MatchesTag(JungleTag))
+        else if (bForested)
         {
             Tile.ResourceTags.Add(WoodTag);
-            if (RNGRef->NextFloat(UWorldForgeRNG::BRANCH_RESOURCES) > 0.8f) Tile.ResourceTags.Add(StoneTag);
+            if (RNGRef->NextFloat(UWorldForgeRNG::BRANCH_RESOURCES) > 0.8f)
+                Tile.ResourceTags.Add(StoneTag);
         }
         else if (Tile.BiomeType.MatchesTag(SwampTag) || Tile.BiomeType.MatchesTag(MarshTag))
         {
-            if (RNGRef->NextFloat(UWorldForgeRNG::BRANCH_RESOURCES) > 0.5f) Tile.ResourceTags.Add(WoodTag);
+            if (RNGRef->NextFloat(UWorldForgeRNG::BRANCH_RESOURCES) > 0.5f)
+                Tile.ResourceTags.Add(WoodTag);
         }
         else if (Tile.BiomeType.MatchesTag(DesertTag))
         {
-            if (RNGRef->NextFloat(UWorldForgeRNG::BRANCH_RESOURCES) > 0.9f) Tile.ResourceTags.Add(StoneTag);
-        }
-        else
-        {
-            if (Tile.Elevation > 0.4f && RNGRef->NextFloat(UWorldForgeRNG::BRANCH_RESOURCES) > 0.7f)
+            if (RNGRef->NextFloat(UWorldForgeRNG::BRANCH_RESOURCES) > 0.9f)
                 Tile.ResourceTags.Add(StoneTag);
         }
+        else if (Tile.Elevation > 0.4f && RNGRef->NextFloat(UWorldForgeRNG::BRANCH_RESOURCES) > 0.7f)
+        {
+            Tile.ResourceTags.Add(StoneTag);
+        }
+
+        // ── Reset vein config ──
+        FResourceVeinConfig& Vein = Tile.VeinConfig;
+        Vein.bHasVeins = false;
+        Vein.bHasSurfaceExposure = false;
+        Vein.PresentCategories.Reset();
+        Vein.SpawnSeeds.Reset();
+        Vein.VeinRichness.Reset();
+        Vein.DepthRanges.Reset();
+
+        if (Tile.Elevation < 0.48f)
+        {
+            continue;
+        }
+
+        float Weights[3] = { 0.5f, 0.5f, 0.5f };
+
+        if (bHighland)
+        {
+            Weights[0] = 1.0f;  Weights[1] = 0.6f;  Weights[2] = 0.3f;
+        }
+        else if (bHills)
+        {
+            Weights[0] = 0.8f;  Weights[1] = 0.4f;  Weights[2] = 0.5f;
+        }
+        else if (bForested)
+        {
+            Weights[0] = 0.3f;  Weights[1] = 0.7f;  Weights[2] = 0.4f;
+        }
+        else if (Tile.BiomeType.MatchesTag(DesertTag))
+        {
+            Weights[0] = 0.4f;  Weights[1] = 0.3f;  Weights[2] = 0.9f;
+        }
+
+        if (CanyonTag.IsValid() && Tile.BiomeType.MatchesTag(CanyonTag))
+        {
+            Weights[0] = 0.7f;  Weights[2] = 0.8f;
+        }
+        if (VolcanicTag.IsValid() && Tile.BiomeType.MatchesTag(VolcanicTag))
+        {
+            Weights[0] = 1.2f;  Weights[1] = 0.9f;
+        }
+
+        const int32 TileX = TileIdx % GridWidth;
+        const int32 TileY = TileIdx / GridWidth;
+
+        FResourceSurveyData& Survey = Tile.ResourceSurvey;
+        Survey = FResourceSurveyData();
+
+        for (int32 Cat = 0; Cat < NumCategories; ++Cat)
+        {
+            const FResourceNoiseProfile& Prof = FResourceNoiseRegistry::GetProfile(
+                static_cast<EResourceCategory>(Cat));
+
+            float PeakDensity = 0.0f;
+            float PeakDepth = 0.0f;
+
+            for (int32 Depth = ScanDepthMin; Depth <= ScanDepthMax; Depth += ScanStep)
+            {
+                const float Z = -static_cast<float>(Depth);
+
+                const float N1 = FMath::PerlinNoise3D(FVector(
+                    (TileX + SeedF * 0.71f + Prof.SeedOffset) * Prof.Frequency,
+                    (TileY + SeedF * 0.83f + Prof.SeedOffset) * Prof.Frequency,
+                    (Z + SeedF * 0.97f + Prof.SeedOffset) * Prof.Frequency * Prof.ZScale
+                ));
+
+                const float N2 = FMath::PerlinNoise3D(FVector(
+                    (TileX + 3000.0f + SeedF * 0.41f + Prof.SeedOffset) * Prof.Frequency,
+                    (TileY + 3000.0f + SeedF * 0.59f + Prof.SeedOffset) * Prof.Frequency,
+                    (Z + 3000.0f + SeedF * 0.67f + Prof.SeedOffset) * Prof.Frequency * Prof.ZScale
+                ));
+
+                const float Mask = 1.0f - (N1 * N1 + N2 * N2);
+                const float Weighted = FMath::Clamp(Mask * Weights[Cat], 0.0f, 1.0f);
+
+                if (Weighted > PeakDensity)
+                {
+                    PeakDensity = Weighted;
+                    PeakDepth = static_cast<float>(Depth);
+                }
+            }
+
+            Survey.DensityByCategory[Cat] = PeakDensity;
+            Survey.PeakDepthByCategory[Cat] = PeakDepth;
+        }
+
+        // ── Build veins ──
+        bool bHasAnyVein = false;
+
+        for (int32 Cat = 0; Cat < NumCategories; ++Cat)
+        {
+            const FResourceNoiseProfile& Prof = FResourceNoiseRegistry::GetProfile(
+                static_cast<EResourceCategory>(Cat));
+
+            if (Survey.DensityByCategory[Cat] < Prof.PresenceThreshold)
+            {
+                continue;
+            }
+
+            Vein.PresentCategories.Add(static_cast<EResourceCategory>(Cat));
+
+            const int64 SubSeed = WorldSeed
+                ^ (static_cast<int64>(TileIdx) * 2654435761LL)
+                ^ (static_cast<int64>(Cat) * 40503LL);
+
+            Vein.SpawnSeeds.Add(SubSeed);
+            Vein.VeinRichness.Add(Survey.DensityByCategory[Cat]);
+
+            const float Spread = (Cat == static_cast<int32>(EResourceCategory::Fossil)) ? 8.0f : 20.0f;
+            const float Peak = Survey.PeakDepthByCategory[Cat];
+
+            Vein.DepthRanges.Add(FVector2D(
+                FMath::Max(2.0f, Peak - Spread),
+                FMath::Min(100.0f, Peak + Spread)));
+
+            bHasAnyVein = true;
+        }
+
+        Vein.bHasVeins = bHasAnyVein;
+
+        if (!bHasAnyVein)
+        {
+            continue;
+        }
+
+        ++TilesWithOre;
+
+        // ── NEW: Surface exposure logic ──
+        const bool bNearSurface =
+            Survey.PeakDepthByCategory[0] <= 14.0f ||
+            Survey.PeakDepthByCategory[1] <= 14.0f ||
+            Survey.PeakDepthByCategory[2] <= 10.0f;
+
+        const bool bGoodBiome =
+            bHighland || bHills ||
+            (CanyonTag.IsValid() && Tile.BiomeType.MatchesTag(CanyonTag)) ||
+            (VolcanicTag.IsValid() && Tile.BiomeType.MatchesTag(VolcanicTag));
+
+        if (bNearSurface && bGoodBiome)
+        {
+            const float Chance = bHighland ? 0.10f : 0.045f;
+
+            if (RNGRef->NextFloat(UWorldForgeRNG::BRANCH_RESOURCES) < Chance)
+            {
+                Vein.bHasSurfaceExposure = true;
+                ++SurfaceNodeTiles;
+            }
+        }
+
+        // ── Resource tags ──
+        const float Thresh = FResourceNoiseRegistry::GetProfile(EResourceCategory::Metal).PresenceThreshold;
+
+        if (Survey.DensityByCategory[0] >= Thresh)
+        {
+            if (IronTag.IsValid()) Tile.ResourceTags.AddUnique(IronTag);
+            Tile.ResourceTags.AddUnique(OreTag);
+        }
+        if (Survey.DensityByCategory[1] >= Thresh)
+        {
+            if (CrystalTag.IsValid()) Tile.ResourceTags.AddUnique(CrystalTag);
+        }
+        if (Survey.DensityByCategory[2] >= Thresh)
+        {
+            if (FossilTag.IsValid()) Tile.ResourceTags.AddUnique(FossilTag);
+        }
     }
-    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step08 done"));
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[WorldGen] Step08 done. VeinTiles=%d SurfaceNodes=%d"),
+        TilesWithOre,
+        SurfaceNodeTiles);
 }
 
 void UWorldGenPipeline::Step12_GenerateCosmicRoster()
@@ -1485,18 +1745,34 @@ void UWorldGenPipeline::Step15_RecordFinalState()
     // with the complete world generation output for persistence.
 
     int32 LandTiles = 0;
+    int32 WaterTiles = 0;
+
+    const FGameplayTag DeepOceanTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.DeepOcean")), false);
+    const FGameplayTag OceanTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Ocean")), false);
+    const FGameplayTag SeaTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Sea")), false);
+
     for (const FWorldTileData& Tile : WorldTiles)
     {
-        if (Tile.Elevation > 0.0f && Tile.WaterDepth <= KINDA_SMALL_NUMBER)
+        const bool bWater =
+            Tile.BiomeType.MatchesTag(DeepOceanTag) ||
+            Tile.BiomeType.MatchesTag(OceanTag) ||
+            Tile.BiomeType.MatchesTag(SeaTag);
+
+        if (bWater)
+        {
+            ++WaterTiles;
+        }
+        else
         {
             ++LandTiles;
         }
     }
 
     UE_LOG(LogTemp, Log,
-        TEXT("[WorldGen] Step15: Final state — Tiles=%d Land=%d Civs=%d Events=%d Currencies=%d Traits=%d MountainRanges=%d Volcanoes=%d"),
+        TEXT("[WorldGen] Step15: Final state — Tiles=%d Land=%d Water=%d Civs=%d Events=%d Currencies=%d Traits=%d MountainRanges=%d Volcanoes=%d"),
         WorldTiles.Num(),
         LandTiles,
+        WaterTiles,
         Civilizations.Num(),
         HistoryLog.Num(),
         Currencies.Num(),

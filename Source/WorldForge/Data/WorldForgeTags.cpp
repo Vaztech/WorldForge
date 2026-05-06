@@ -108,6 +108,33 @@ UE_DEFINE_GAMEPLAY_TAG(TAG_Resource_Obsidian, "WorldForge.Resource.Obsidian");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Resource_VoidCrystal, "WorldForge.Resource.VoidCrystal");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Resource_Starstone, "WorldForge.Resource.Starstone");
 
+// ---- Batch 3: Resource Discovery category tags ---------------------
+UE_DEFINE_GAMEPLAY_TAG(TAG_Resource_Crystal, "WorldForge.Resource.Crystal");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Resource_Fossil, "WorldForge.Resource.Fossil");
+
+// ════════════════════════════════════════════════════════════════════
+// Wild Harvest Integration — Farming Tags
+// ════════════════════════════════════════════════════════════════════
+
+// ---- Farming job tags --------------------------------------------------
+UE_DEFINE_GAMEPLAY_TAG(TAG_Job_Farm_Plant,     "WorldForge.Job.Farm.Plant");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Job_Farm_Water,     "WorldForge.Job.Farm.Water");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Job_Farm_Harvest,   "WorldForge.Job.Farm.Harvest");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Job_Farm_Clear,     "WorldForge.Job.Farm.Clear");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Job_Farm_Fertilize, "WorldForge.Job.Farm.Fertilize");
+
+// ---- Farming item tags -------------------------------------------------
+UE_DEFINE_GAMEPLAY_TAG(TAG_Item_Grain,     "WorldForge.Item.Grain");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Item_Berries,   "WorldForge.Item.Berries");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Item_RootVeg,   "WorldForge.Item.RootVeg");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Item_Greens,    "WorldForge.Item.Greens");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Item_Herbs,     "WorldForge.Item.Herbs");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Item_Mushrooms, "WorldForge.Item.Mushrooms");
+
+// ---- Farming sim event tags --------------------------------------------
+UE_DEFINE_GAMEPLAY_TAG(TAG_Sim_Event_CropHarvested, "WorldForge.Sim.Event.CropHarvested");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Sim_Event_CropDied,      "WorldForge.Sim.Event.CropDied");
+
 // ---- Job tags ------------------------------------------------------
 FGameplayTag UWorldForgeTagLibrary::GetJobEatTag()
 {
@@ -355,3 +382,33 @@ FGameplayTag UWorldForgeTagLibrary::GetBuildingEconomicMarketStallTag()
 {
     return TAG_Building_Economic_MarketStall;
 }
+// ---- Batch 3: Resource Discovery category tags ---------------------
+FGameplayTag UWorldForgeTagLibrary::GetResourceCrystalTag()
+{
+    return TAG_Resource_Crystal;
+}
+
+FGameplayTag UWorldForgeTagLibrary::GetResourceFossilTag()
+{
+    return TAG_Resource_Fossil;
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Wild Harvest Integration — Farming Tag Accessors
+// ════════════════════════════════════════════════════════════════════
+
+FGameplayTag UWorldForgeTagLibrary::GetJobFarmPlantTag()     { return TAG_Job_Farm_Plant; }
+FGameplayTag UWorldForgeTagLibrary::GetJobFarmWaterTag()     { return TAG_Job_Farm_Water; }
+FGameplayTag UWorldForgeTagLibrary::GetJobFarmHarvestTag()   { return TAG_Job_Farm_Harvest; }
+FGameplayTag UWorldForgeTagLibrary::GetJobFarmClearTag()     { return TAG_Job_Farm_Clear; }
+FGameplayTag UWorldForgeTagLibrary::GetJobFarmFertilizeTag() { return TAG_Job_Farm_Fertilize; }
+
+FGameplayTag UWorldForgeTagLibrary::GetItemGrainTag()      { return TAG_Item_Grain; }
+FGameplayTag UWorldForgeTagLibrary::GetItemBerriesTag()    { return TAG_Item_Berries; }
+FGameplayTag UWorldForgeTagLibrary::GetItemRootVegTag()    { return TAG_Item_RootVeg; }
+FGameplayTag UWorldForgeTagLibrary::GetItemGreensTag()     { return TAG_Item_Greens; }
+FGameplayTag UWorldForgeTagLibrary::GetItemHerbsTag()      { return TAG_Item_Herbs; }
+FGameplayTag UWorldForgeTagLibrary::GetItemMushroomsTag()  { return TAG_Item_Mushrooms; }
+
+FGameplayTag UWorldForgeTagLibrary::GetCropHarvestedEventTag() { return TAG_Sim_Event_CropHarvested; }
+FGameplayTag UWorldForgeTagLibrary::GetCropDiedEventTag()      { return TAG_Sim_Event_CropDied; }

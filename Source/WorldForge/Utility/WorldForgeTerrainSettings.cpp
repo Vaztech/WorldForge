@@ -95,6 +95,24 @@ UWorldForgeTerrainSettings::UWorldForgeTerrainSettings()
     bEnableLavaTubes = true;
     LavaTubeZCompress = 0.3f;
 
+    // Resource veins (Batch 3)
+    bOverrideResourceNoise = false;
+    MetalFrequency = 0.018f;
+    MetalZScale = 0.6f;
+    MetalSeedOffset = 25000;
+    MetalSpawnThreshold = 0.72f;
+    MetalSurveyThreshold = 0.45f;
+    CrystalFrequency = 0.022f;
+    CrystalZScale = 0.5f;
+    CrystalSeedOffset = 29000;
+    CrystalSpawnThreshold = 0.78f;
+    CrystalSurveyThreshold = 0.50f;
+    FossilFrequency = 0.015f;
+    FossilZScale = 0.8f;
+    FossilSeedOffset = 33000;
+    FossilSpawnThreshold = 0.75f;
+    FossilSurveyThreshold = 0.48f;
+
     // Performance
     bUseFastTerrainSampling = false;
 

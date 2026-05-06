@@ -1,15 +1,17 @@
 // DigGhostActor.cpp
-// WorldForge — Phase 1: Digging Foundation
+// WorldForge — Phase 1: Digging Foundation (v5.0 SDF Brush Path)
 
 #include "Player/DigGhostActor.h"
 #include "ProceduralMeshComponent.h"
 #include "Materials/MaterialInstanceDynamic.h"
+#include "Mining/ResourceSpawnSubsystem.h"
+#include "Player/PlayerBuildContext.h"
 #include "Engine/World.h"
 
 ADigGhostActor::ADigGhostActor()
 {
 	PrimaryActorTick.bCanEverTick = true;
-	PrimaryActorTick.TickGroup = TG_PostUpdateWork; // Tick after camera so we're always current
+	PrimaryActorTick.TickGroup = TG_PostUpdateWork;
 
 	RootScene = CreateDefaultSubobject<USceneComponent>(TEXT("RootScene"));
 	SetRootComponent(RootScene);
@@ -20,10 +22,14 @@ ADigGhostActor::ADigGhostActor()
 	WireframeMesh->SetCastShadow(false);
 	WireframeMesh->bUseAsyncCooking = false;
 
-	// Ghost should never block anything.
-	SetCanBeDamaged(false);
+	XRayMesh = CreateDefaultSubobject<UProceduralMeshComponent>(TEXT("XRayMesh"));
+	XRayMesh->SetupAttachment(RootScene);
+	XRayMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	XRayMesh->SetCastShadow(false);
+	XRayMesh->bUseAsyncCooking = false;
+	XRayMesh->SetAbsolute(true, false, false); // absolute position so outlines stay at node world positions
 
-	// Don't replicate — purely local visual.
+	SetCanBeDamaged(false);
 	bReplicates = false;
 }
 
@@ -31,54 +37,35 @@ void ADigGhostActor::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// ------------------------------------------------------------------
-	// Ensure this actor NEVER interacts with gameplay systems.
-	// This is purely a visual preview — no collision, no shadows.
-	// ------------------------------------------------------------------
 	WireframeMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	WireframeMesh->SetCollisionResponseToAllChannels(ECR_Ignore);
 	WireframeMesh->SetGenerateOverlapEvents(false);
 
-	// Disable all shadow casting — ghost visuals should not affect lighting.
 	WireframeMesh->SetCastShadow(false);
 	WireframeMesh->bCastDynamicShadow = false;
 	WireframeMesh->bCastStaticShadow = false;
 
-	// ------------------------------------------------------------------
-	// Material setup
-	//
-	// IMPORTANT:
-	// If no material is assigned, Unreal will fallback to a default
-	// opaque material — which turns our "wireframe" box into a giant
-	// solid black cube (bad).
-	//
-	// So instead of letting that happen, we HIDE the mesh entirely.
-	// ------------------------------------------------------------------
 	if (BaseMaterial)
 	{
-		// Create a dynamic instance so we can change color + opacity at runtime
 		GhostMaterial = UMaterialInstanceDynamic::Create(BaseMaterial, this);
-
-		// Apply it to the procedural mesh
 		WireframeMesh->SetMaterial(0, GhostMaterial);
+
+		// X-ray uses the same base material with a distinct cyan color.
+		XRayMaterial = UMaterialInstanceDynamic::Create(BaseMaterial, this);
+		XRayMaterial->SetVectorParameterValue(TEXT("BaseColor"), FLinearColor(0.0f, 0.85f, 1.0f, 0.5f));
+		XRayMaterial->SetScalarParameterValue(TEXT("Opacity"), 0.5f);
+		XRayMesh->SetMaterial(0, XRayMaterial);
 	}
 	else
 	{
 		UE_LOG(LogTemp, Warning,
 			TEXT("[DigGhostActor] No BaseMaterial assigned — hiding dig ghost mesh. "
 				"Assign a translucent/wireframe material in defaults."));
-
-		// Prevent the ugly default material fallback
 		WireframeMesh->SetVisibility(false, true);
 	}
 
-	// ------------------------------------------------------------------
-	// Start hidden — BuildModeManager will activate us when needed
-	// ------------------------------------------------------------------
 	SetGhostVisible(false);
 	SetGhostState(EDigGhostState::Hidden);
-
-	// Build initial geometry (1x1x1 dig volume)
 	RebuildWireframeGeometry();
 }
 
@@ -91,6 +78,43 @@ void ADigGhostActor::Tick(float DeltaTime)
 		return;
 	}
 
+	// ── Resource Detection: when ghost is in Valid state, periodically check
+	// for nearby hidden resource nodes and auto-transition to ResourceDetected.
+	if (CurrentState == EDigGhostState::Valid || CurrentState == EDigGhostState::ResourceDetected)
+	{
+		CheckForNearbyResources(DeltaTime);
+	}
+
+	// ── X-Ray outlines: when Ctrl is held (bXRayResourcesActive), render
+	// wireframe spheres at nearby hidden node positions through terrain.
+	{
+		UPlayerBuildContext* BuildCtx = GetPlayerBuildContext();
+		const bool bWantXRay = BuildCtx && BuildCtx->bXRayResourcesActive
+			&& (CurrentState != EDigGhostState::Hidden);
+
+		if (bWantXRay && !bXRayOutlinesActive)
+		{
+			RebuildXRayOutlines();
+			bXRayOutlinesActive = true;
+		}
+		else if (bWantXRay && bXRayOutlinesActive)
+		{
+			// Rebuild periodically — reuse the resource check timer cadence.
+			// The outlines were already built; only refresh when the resource
+			// check fires (every ResourceCheckInterval seconds) so we don't
+			// rebuild geometry every frame.
+			if (ResourceCheckTimer < KINDA_SMALL_NUMBER)
+			{
+				RebuildXRayOutlines();
+			}
+		}
+		else if (!bWantXRay && bXRayOutlinesActive)
+		{
+			ClearXRayOutlines();
+			bXRayOutlinesActive = false;
+		}
+	}
+
 	UpdateMaterialState(DeltaTime);
 }
 
@@ -99,13 +123,10 @@ void ADigGhostActor::Tick(float DeltaTime)
 // ===================================================================
 
 void ADigGhostActor::UpdateGhost(const FVector& WorldPosition,
-                                  const FIntVector& GridPosition,
-                                  int32 Radius, int32 DepthPerAction)
+	const FIntVector& GridPosition,
+	int32 Radius, int32 DepthPerAction,
+	EDigBrushShape BrushShape)
 {
-	// Snap position to grid-aligned world position.
-	// The world position passed in should already be grid-snapped by
-	// BuildModeManager (same logic as BuildGhostActor), but we enforce
-	// grid alignment here as a safety net.
 	const FVector SnappedPos = FVector(
 		FMath::RoundToFloat(WorldPosition.X / GridCellSize) * GridCellSize,
 		FMath::RoundToFloat(WorldPosition.Y / GridCellSize) * GridCellSize,
@@ -115,10 +136,14 @@ void ADigGhostActor::UpdateGhost(const FVector& WorldPosition,
 	SetActorLocation(SnappedPos);
 	CurrentGridPos = GridPosition;
 
-	// Rebuild geometry only if dimensions changed.
-	const bool bDimensionsChanged = (Radius != CurrentRadius || DepthPerAction != CurrentDepth);
+	const bool bDimensionsChanged =
+		(Radius != CurrentRadius) ||
+		(DepthPerAction != CurrentDepth) ||
+		(BrushShape != CurrentBrushShape);
+
 	CurrentRadius = FMath::Max(Radius, 1);
 	CurrentDepth = FMath::Max(DepthPerAction, 1);
+	CurrentBrushShape = BrushShape;
 
 	if (bDimensionsChanged)
 	{
@@ -144,7 +169,6 @@ void ADigGhostActor::SetGhostState(EDigGhostState NewState)
 		SetGhostVisible(true);
 	}
 
-	// Immediately apply the new color (don't wait for next tick).
 	if (GhostMaterial)
 	{
 		const FLinearColor Color = GetColorForState();
@@ -155,48 +179,65 @@ void ADigGhostActor::SetGhostState(EDigGhostState NewState)
 
 void ADigGhostActor::SetGhostVisible(bool bVisible)
 {
-	// ------------------------------------------------------------------
-	// We ONLY allow rendering if:
-	// 1. The system wants us visible
-	// 2. We actually have a valid material
-	//
-	// This prevents the "giant black box" bug when BaseMaterial is missing.
-	// ------------------------------------------------------------------
 	const bool bCanRender = bVisible && GhostMaterial != nullptr;
 
-	// Hide/show the entire actor in-game
 	SetActorHiddenInGame(!bCanRender);
-
-	// Only tick when visible (saves performance + avoids unnecessary updates)
 	SetActorTickEnabled(bVisible);
 
-	// Explicitly control mesh visibility as well
-	// (important because component visibility != actor hidden state)
 	if (WireframeMesh)
 	{
 		WireframeMesh->SetVisibility(bCanRender, true);
 	}
+
+	// Clear X-ray outlines when hiding the ghost entirely.
+	if (!bVisible && bXRayOutlinesActive)
+	{
+		ClearXRayOutlines();
+		bXRayOutlinesActive = false;
+	}
 }
 
 // ===================================================================
-// Wireframe geometry generation
+// Wireframe geometry generation — shape router
 // ===================================================================
 
 void ADigGhostActor::RebuildWireframeGeometry()
 {
 	WireframeMesh->ClearAllMeshSections();
 
-	// Calculate volume dimensions in grid cells.
-	const int32 Width = (CurrentRadius * 2) - 1;  // Radius=1 → 1 cell, Radius=2 → 3 cells
-	const int32 Height = Width;                     // Square footprint
-	const int32 Depth = CurrentDepth;
-
 	TArray<FVector> Vertices;
 	TArray<int32> Triangles;
 	TArray<FVector> Normals;
 	TArray<FVector2D> UVs;
 
-	GenerateBoxWireframe(Width, Height, Depth, Vertices, Triangles, Normals, UVs);
+	const int32 Width = (CurrentRadius * 2) - 1;
+	const int32 Height = Width;
+	const int32 Depth = CurrentDepth;
+
+	switch (CurrentBrushShape)
+	{
+	case EDigBrushShape::Box:
+		GenerateBoxWireframe(Width, Height, Depth, Vertices, Triangles, Normals, UVs);
+		break;
+
+	case EDigBrushShape::Sphere:
+	{
+		// Sphere radius = max of XY extent and depth extent (matches ComputeBrushParameters).
+		const float XYExtent = (Width * GridCellSize) * 0.5f;
+		const float ZExtent = (Depth * GridCellSize) * 0.5f;
+		const float Radius = FMath::Max(XYExtent, ZExtent);
+		GenerateSphereWireframe(Radius, Vertices, Triangles, Normals, UVs);
+		break;
+	}
+
+	case EDigBrushShape::Cylinder:
+	{
+		const float CylRadius = (Width * GridCellSize) * 0.5f;
+		const float CylHalfHeight = (Depth * GridCellSize) * 0.5f;
+		GenerateCylinderWireframe(CylRadius, CylHalfHeight, Vertices, Triangles, Normals, UVs);
+		break;
+	}
+	}
 
 	if (Vertices.Num() > 0 && Triangles.Num() > 0)
 	{
@@ -204,15 +245,8 @@ void ADigGhostActor::RebuildWireframeGeometry()
 		VertexColors.Init(FColor::White, Vertices.Num());
 
 		WireframeMesh->CreateMeshSection(
-			0,
-			Vertices,
-			Triangles,
-			Normals,
-			UVs,
-			VertexColors,
-			/*Tangents=*/ TArray<FProcMeshTangent>(),
-			/*bCreateCollision=*/ false
-		);
+			0, Vertices, Triangles, Normals, UVs, VertexColors,
+			TArray<FProcMeshTangent>(), false);
 
 		if (GhostMaterial)
 		{
@@ -221,6 +255,10 @@ void ADigGhostActor::RebuildWireframeGeometry()
 	}
 }
 
+// ===================================================================
+// Box wireframe (original implementation, preserved)
+// ===================================================================
+
 void ADigGhostActor::GenerateBoxWireframe(
 	int32 Width, int32 Height, int32 Depth,
 	TArray<FVector>& OutVerts,
@@ -228,90 +266,226 @@ void ADigGhostActor::GenerateBoxWireframe(
 	TArray<FVector>& OutNormals,
 	TArray<FVector2D>& OutUVs) const
 {
-	// We render a thin-walled box (not true wireframe — ProceduralMesh doesn't
-	// support line topology). Instead we generate a box with slightly inset faces
-	// and a translucent material, which reads as a wireframe volume in practice.
-	//
-	// The box is centered at local origin, extending:
-	//   X: -HalfX to +HalfX
-	//   Y: -HalfY to +HalfY
-	//   Z: 0 (top face) to -TotalDepth (bottom face)
-	//
-	// This means the actor's location corresponds to the TOP of the dig volume.
-
 	const float HalfX = (Width * GridCellSize) * 0.5f;
 	const float HalfY = (Height * GridCellSize) * 0.5f;
 	const float TotalZ = Depth * GridCellSize;
 
-	// Slight inset to make edges visible against terrain.
 	const float Inset = GridCellSize * 0.02f;
 
-	// 8 corners of the outer box.
-	const FVector C0(-HalfX + Inset, -HalfY + Inset, -Inset);           // Top-front-left
-	const FVector C1( HalfX - Inset, -HalfY + Inset, -Inset);           // Top-front-right
-	const FVector C2( HalfX - Inset,  HalfY - Inset, -Inset);           // Top-back-right
-	const FVector C3(-HalfX + Inset,  HalfY - Inset, -Inset);           // Top-back-left
-	const FVector C4(-HalfX + Inset, -HalfY + Inset, -TotalZ + Inset);  // Bottom-front-left
-	const FVector C5( HalfX - Inset, -HalfY + Inset, -TotalZ + Inset);  // Bottom-front-right
-	const FVector C6( HalfX - Inset,  HalfY - Inset, -TotalZ + Inset);  // Bottom-back-right
-	const FVector C7(-HalfX + Inset,  HalfY - Inset, -TotalZ + Inset);  // Bottom-back-left
-
-	// Generate 6 faces (24 vertices, 12 triangles).
-	// Each face has 4 verts and 2 tris.
+	const FVector C0(-HalfX + Inset, -HalfY + Inset, -Inset);
+	const FVector C1(HalfX - Inset, -HalfY + Inset, -Inset);
+	const FVector C2(HalfX - Inset, HalfY - Inset, -Inset);
+	const FVector C3(-HalfX + Inset, HalfY - Inset, -Inset);
+	const FVector C4(-HalfX + Inset, -HalfY + Inset, -TotalZ + Inset);
+	const FVector C5(HalfX - Inset, -HalfY + Inset, -TotalZ + Inset);
+	const FVector C6(HalfX - Inset, HalfY - Inset, -TotalZ + Inset);
+	const FVector C7(-HalfX + Inset, HalfY - Inset, -TotalZ + Inset);
 
 	auto AddQuad = [&](const FVector& V0, const FVector& V1,
-	                    const FVector& V2, const FVector& V3,
-	                    const FVector& Normal)
-	{
-		const int32 Base = OutVerts.Num();
+		const FVector& V2, const FVector& V3,
+		const FVector& Normal)
+		{
+			const int32 Base = OutVerts.Num();
 
-		OutVerts.Add(V0);
-		OutVerts.Add(V1);
-		OutVerts.Add(V2);
-		OutVerts.Add(V3);
+			OutVerts.Add(V0);
+			OutVerts.Add(V1);
+			OutVerts.Add(V2);
+			OutVerts.Add(V3);
 
-		OutNormals.Add(Normal);
-		OutNormals.Add(Normal);
-		OutNormals.Add(Normal);
-		OutNormals.Add(Normal);
+			OutNormals.Add(Normal);
+			OutNormals.Add(Normal);
+			OutNormals.Add(Normal);
+			OutNormals.Add(Normal);
 
-		OutUVs.Add(FVector2D(0.0f, 0.0f));
-		OutUVs.Add(FVector2D(1.0f, 0.0f));
-		OutUVs.Add(FVector2D(1.0f, 1.0f));
-		OutUVs.Add(FVector2D(0.0f, 1.0f));
+			OutUVs.Add(FVector2D(0.0f, 0.0f));
+			OutUVs.Add(FVector2D(1.0f, 0.0f));
+			OutUVs.Add(FVector2D(1.0f, 1.0f));
+			OutUVs.Add(FVector2D(0.0f, 1.0f));
 
-		// Two triangles: 0-1-2, 0-2-3
-		OutTris.Add(Base + 0);
-		OutTris.Add(Base + 1);
-		OutTris.Add(Base + 2);
+			OutTris.Add(Base + 0);
+			OutTris.Add(Base + 1);
+			OutTris.Add(Base + 2);
 
-		OutTris.Add(Base + 0);
-		OutTris.Add(Base + 2);
-		OutTris.Add(Base + 3);
-	};
+			OutTris.Add(Base + 0);
+			OutTris.Add(Base + 2);
+			OutTris.Add(Base + 3);
+		};
 
 	OutVerts.Reserve(24);
 	OutTris.Reserve(36);
 	OutNormals.Reserve(24);
 	OutUVs.Reserve(24);
 
-	// Top face (Z up)
-	AddQuad(C0, C1, C2, C3, FVector::UpVector);
+	AddQuad(C0, C1, C2, C3, FVector::UpVector);           // Top
+	AddQuad(C7, C6, C5, C4, -FVector::UpVector);          // Bottom
+	AddQuad(C4, C5, C1, C0, -FVector::ForwardVector);     // Front
+	AddQuad(C3, C2, C6, C7, FVector::ForwardVector);      // Back
+	AddQuad(C4, C0, C3, C7, -FVector::RightVector);       // Left
+	AddQuad(C1, C5, C6, C2, FVector::RightVector);        // Right
+}
 
-	// Bottom face (Z down)
-	AddQuad(C7, C6, C5, C4, -FVector::UpVector);
+// ===================================================================
+// Sphere wireframe (UV sphere for translucent preview)
+// ===================================================================
 
-	// Front face (-Y)
-	AddQuad(C4, C5, C1, C0, -FVector::ForwardVector);
+void ADigGhostActor::GenerateSphereWireframe(
+	float Radius,
+	TArray<FVector>& OutVerts,
+	TArray<int32>& OutTris,
+	TArray<FVector>& OutNormals,
+	TArray<FVector2D>& OutUVs) const
+{
+	// UV sphere with CircleSegments longitude and half that for latitude.
+	// Centered at local origin, offset downward by Radius so the top
+	// of the sphere sits at Z=0 (consistent with box ghost placement).
+	const int32 LongSegs = FMath::Max(CircleSegments, 8);
+	const int32 LatSegs = FMath::Max(LongSegs / 2, 4);
 
-	// Back face (+Y)
-	AddQuad(C3, C2, C6, C7, FVector::ForwardVector);
+	const FVector Offset(0.0f, 0.0f, -Radius);
 
-	// Left face (-X)
-	AddQuad(C4, C0, C3, C7, -FVector::RightVector);
+	const int32 NumVerts = (LatSegs + 1) * (LongSegs + 1);
+	OutVerts.Reserve(NumVerts);
+	OutNormals.Reserve(NumVerts);
+	OutUVs.Reserve(NumVerts);
 
-	// Right face (+X)
-	AddQuad(C1, C5, C6, C2, FVector::RightVector);
+	for (int32 Lat = 0; Lat <= LatSegs; ++Lat)
+	{
+		const float Theta = PI * static_cast<float>(Lat) / static_cast<float>(LatSegs);
+		const float SinTheta = FMath::Sin(Theta);
+		const float CosTheta = FMath::Cos(Theta);
+
+		for (int32 Lon = 0; Lon <= LongSegs; ++Lon)
+		{
+			const float Phi = 2.0f * PI * static_cast<float>(Lon) / static_cast<float>(LongSegs);
+			const float SinPhi = FMath::Sin(Phi);
+			const float CosPhi = FMath::Cos(Phi);
+
+			const FVector Normal(SinTheta * CosPhi, SinTheta * SinPhi, CosTheta);
+			OutVerts.Add(Normal * Radius + Offset);
+			OutNormals.Add(Normal);
+			OutUVs.Add(FVector2D(
+				static_cast<float>(Lon) / static_cast<float>(LongSegs),
+				static_cast<float>(Lat) / static_cast<float>(LatSegs)));
+		}
+	}
+
+	// Triangles.
+	OutTris.Reserve(LatSegs * LongSegs * 6);
+	for (int32 Lat = 0; Lat < LatSegs; ++Lat)
+	{
+		for (int32 Lon = 0; Lon < LongSegs; ++Lon)
+		{
+			const int32 A = Lat * (LongSegs + 1) + Lon;
+			const int32 B = A + (LongSegs + 1);
+
+			OutTris.Add(A);
+			OutTris.Add(B);
+			OutTris.Add(A + 1);
+
+			OutTris.Add(A + 1);
+			OutTris.Add(B);
+			OutTris.Add(B + 1);
+		}
+	}
+}
+
+// ===================================================================
+// Cylinder wireframe (cap + barrel for shaft preview)
+// ===================================================================
+
+void ADigGhostActor::GenerateCylinderWireframe(
+	float Radius, float HalfHeight,
+	TArray<FVector>& OutVerts,
+	TArray<int32>& OutTris,
+	TArray<FVector>& OutNormals,
+	TArray<FVector2D>& OutUVs) const
+{
+	// Cylinder centered at local origin, extending from Z=0 (top) to
+	// Z = -2*HalfHeight (bottom), matching the box ghost convention.
+	const int32 Segs = FMath::Max(CircleSegments, 8);
+
+	const float TopZ = 0.0f;
+	const float BottomZ = -2.0f * HalfHeight;
+
+	// ------------------------------------------------------------------
+	// 1. Barrel (side faces)
+	// ------------------------------------------------------------------
+	const int32 BarrelBase = OutVerts.Num();
+
+	for (int32 i = 0; i <= Segs; ++i)
+	{
+		const float Angle = 2.0f * PI * static_cast<float>(i) / static_cast<float>(Segs);
+		const float CosA = FMath::Cos(Angle);
+		const float SinA = FMath::Sin(Angle);
+
+		const FVector Normal(CosA, SinA, 0.0f);
+		const float U = static_cast<float>(i) / static_cast<float>(Segs);
+
+		// Top ring vertex.
+		OutVerts.Add(FVector(CosA * Radius, SinA * Radius, TopZ));
+		OutNormals.Add(Normal);
+		OutUVs.Add(FVector2D(U, 0.0f));
+
+		// Bottom ring vertex.
+		OutVerts.Add(FVector(CosA * Radius, SinA * Radius, BottomZ));
+		OutNormals.Add(Normal);
+		OutUVs.Add(FVector2D(U, 1.0f));
+	}
+
+	for (int32 i = 0; i < Segs; ++i)
+	{
+		const int32 T0 = BarrelBase + i * 2;
+		const int32 B0 = T0 + 1;
+		const int32 T1 = T0 + 2;
+		const int32 B1 = T0 + 3;
+
+		OutTris.Add(T0); OutTris.Add(B0); OutTris.Add(T1);
+		OutTris.Add(T1); OutTris.Add(B0); OutTris.Add(B1);
+	}
+
+	// ------------------------------------------------------------------
+	// 2. Top cap (fan from center)
+	// ------------------------------------------------------------------
+	auto AddCap = [&](float Z, const FVector& CapNormal)
+		{
+			const int32 CenterIdx = OutVerts.Num();
+			OutVerts.Add(FVector(0.0f, 0.0f, Z));
+			OutNormals.Add(CapNormal);
+			OutUVs.Add(FVector2D(0.5f, 0.5f));
+
+			const int32 RingStart = OutVerts.Num();
+			for (int32 i = 0; i <= Segs; ++i)
+			{
+				const float Angle = 2.0f * PI * static_cast<float>(i) / static_cast<float>(Segs);
+				const float CosA = FMath::Cos(Angle);
+				const float SinA = FMath::Sin(Angle);
+
+				OutVerts.Add(FVector(CosA * Radius, SinA * Radius, Z));
+				OutNormals.Add(CapNormal);
+				OutUVs.Add(FVector2D(CosA * 0.5f + 0.5f, SinA * 0.5f + 0.5f));
+			}
+
+			for (int32 i = 0; i < Segs; ++i)
+			{
+				if (CapNormal.Z > 0.0f)
+				{
+					// Top cap: CCW when viewed from above.
+					OutTris.Add(CenterIdx);
+					OutTris.Add(RingStart + i);
+					OutTris.Add(RingStart + i + 1);
+				}
+				else
+				{
+					// Bottom cap: CW when viewed from above.
+					OutTris.Add(CenterIdx);
+					OutTris.Add(RingStart + i + 1);
+					OutTris.Add(RingStart + i);
+				}
+			}
+		};
+
+	AddCap(TopZ, FVector::UpVector);
+	AddCap(BottomZ, -FVector::UpVector);
 }
 
 // ===================================================================
@@ -325,15 +499,18 @@ void ADigGhostActor::UpdateMaterialState(float DeltaTime)
 		return;
 	}
 
-	// Pulse animation.
-	PulseTimer += DeltaTime * PulseFrequency * 2.0f * PI;
+	// Use faster pulse frequency when a resource node is detected nearby.
+	const float EffectivePulseFreq = (CurrentState == EDigGhostState::ResourceDetected)
+		? ResourcePulseFrequency
+		: PulseFrequency;
+
+	PulseTimer += DeltaTime * EffectivePulseFreq * 2.0f * PI;
 	if (PulseTimer > 2.0f * PI)
 	{
 		PulseTimer -= 2.0f * PI;
 	}
 
-	// Sinusoidal pulse between PulseMinAlpha and PulseMaxAlpha.
-	const float PulseT = (FMath::Sin(PulseTimer) + 1.0f) * 0.5f; // 0..1
+	const float PulseT = (FMath::Sin(PulseTimer) + 1.0f) * 0.5f;
 	const float Alpha = FMath::Lerp(PulseMinAlpha, PulseMaxAlpha, PulseT);
 
 	const FLinearColor BaseColor = GetColorForState();
@@ -345,17 +522,223 @@ FLinearColor ADigGhostActor::GetColorForState() const
 {
 	switch (CurrentState)
 	{
-	case EDigGhostState::Valid:
-		return ValidColor;
-
-	case EDigGhostState::Invalid:
-		return InvalidColor;
-
-	case EDigGhostState::ResourceDetected:
-		return ResourceColor;
-
+	case EDigGhostState::Valid:            return ValidColor;
+	case EDigGhostState::Invalid:          return InvalidColor;
+	case EDigGhostState::ResourceDetected: return ResourceColor;
 	case EDigGhostState::Hidden:
-	default:
-		return FLinearColor::Transparent;
+	default:                               return FLinearColor::Transparent;
+	}
+}
+
+// ===================================================================
+// Resource detection
+// ===================================================================
+
+UResourceSpawnSubsystem* ADigGhostActor::GetResourceSpawnSubsystem()
+{
+	if (CachedResourceSpawn)
+	{
+		return CachedResourceSpawn;
+	}
+
+	UWorld* World = GetWorld();
+	if (World)
+	{
+		CachedResourceSpawn = World->GetSubsystem<UResourceSpawnSubsystem>();
+	}
+
+	return CachedResourceSpawn;
+}
+
+void ADigGhostActor::CheckForNearbyResources(float DeltaTime)
+{
+	ResourceCheckTimer += DeltaTime;
+
+	if (ResourceCheckTimer < ResourceCheckInterval)
+	{
+		return;
+	}
+
+	ResourceCheckTimer = 0.0f;
+
+	UResourceSpawnSubsystem* ResourceSpawn = GetResourceSpawnSubsystem();
+	if (!ResourceSpawn)
+	{
+		// No subsystem available — stay in current state.
+		// If we were ResourceDetected without a subsystem, fall back to Valid.
+		if (CurrentState == EDigGhostState::ResourceDetected)
+		{
+			SetGhostState(EDigGhostState::Valid);
+		}
+		return;
+	}
+
+	const FVector GhostWorldPos = GetActorLocation();
+	const bool bNearResource = ResourceSpawn->HasNodeInRadius(GhostWorldPos, ResourceDetectionRadius);
+
+	if (bNearResource && CurrentState == EDigGhostState::Valid)
+	{
+		SetGhostState(EDigGhostState::ResourceDetected);
+	}
+	else if (!bNearResource && CurrentState == EDigGhostState::ResourceDetected)
+	{
+		SetGhostState(EDigGhostState::Valid);
+	}
+}
+
+// ===================================================================
+// X-Ray resource outlines (Batch 3)
+// ===================================================================
+
+UPlayerBuildContext* ADigGhostActor::GetPlayerBuildContext()
+{
+	if (CachedBuildContext)
+	{
+		return CachedBuildContext;
+	}
+
+	UWorld* World = GetWorld();
+	if (World)
+	{
+		CachedBuildContext = World->GetSubsystem<UPlayerBuildContext>();
+	}
+
+	return CachedBuildContext;
+}
+
+void ADigGhostActor::RebuildXRayOutlines()
+{
+	if (!XRayMesh)
+	{
+		return;
+	}
+
+	XRayMesh->ClearAllMeshSections();
+
+	UResourceSpawnSubsystem* ResourceSpawn = GetResourceSpawnSubsystem();
+	if (!ResourceSpawn)
+	{
+		return;
+	}
+
+	const FVector GhostWorldPos = GetActorLocation();
+	TArray<FSpawnedResourceNode> NearbyNodes = ResourceSpawn->GetNodesInRadius(
+		GhostWorldPos, ResourceDetectionRadius);
+
+	if (NearbyNodes.Num() == 0)
+	{
+		return;
+	}
+
+	TArray<FVector> AllVerts;
+	TArray<int32> AllTris;
+	TArray<FVector> AllNormals;
+	TArray<FVector2D> AllUVs;
+
+	// Reserve rough estimates.
+	constexpr int32 VertsPerSphere = 100;
+	constexpr int32 TrisPerSphere = 150;
+	AllVerts.Reserve(NearbyNodes.Num() * VertsPerSphere);
+	AllTris.Reserve(NearbyNodes.Num() * TrisPerSphere);
+	AllNormals.Reserve(NearbyNodes.Num() * VertsPerSphere);
+	AllUVs.Reserve(NearbyNodes.Num() * VertsPerSphere);
+
+	constexpr float SphereRadius = 75.0f; // World units — slightly smaller than a voxel.
+
+	for (const FSpawnedResourceNode& Node : NearbyNodes)
+	{
+		// Only show hidden (non-exposed) nodes — that's the whole point
+		// of X-ray vision. Already-exposed nodes are visible on the surface.
+		if (Node.bExposed || Node.bDepleted)
+		{
+			continue;
+		}
+
+		// XRayMesh uses absolute world positioning, so pass world-space center.
+		GenerateXRaySphere(Node.WorldPosition, SphereRadius,
+			AllVerts, AllTris, AllNormals, AllUVs);
+	}
+
+	if (AllVerts.Num() > 0 && AllTris.Num() > 0)
+	{
+		TArray<FColor> VertexColors;
+		VertexColors.Init(FColor::White, AllVerts.Num());
+
+		XRayMesh->CreateMeshSection(
+			0, AllVerts, AllTris, AllNormals, AllUVs, VertexColors,
+			TArray<FProcMeshTangent>(), false);
+
+		if (XRayMaterial)
+		{
+			XRayMesh->SetMaterial(0, XRayMaterial);
+		}
+
+		XRayMesh->SetVisibility(true, true);
+
+		// Enable rendering through occluding geometry via custom depth stencil.
+		XRayMesh->SetRenderCustomDepth(true);
+		XRayMesh->SetCustomDepthStencilValue(1);
+	}
+}
+
+void ADigGhostActor::ClearXRayOutlines()
+{
+	if (XRayMesh)
+	{
+		XRayMesh->ClearAllMeshSections();
+		XRayMesh->SetVisibility(false, true);
+		XRayMesh->SetRenderCustomDepth(false);
+	}
+}
+
+void ADigGhostActor::GenerateXRaySphere(
+	const FVector& WorldCenter, float Radius,
+	TArray<FVector>& OutVerts,
+	TArray<int32>& OutTris,
+	TArray<FVector>& OutNormals,
+	TArray<FVector2D>& OutUVs) const
+{
+	// Low-poly UV sphere (8 segments) — enough to read as a sphere outline.
+	constexpr int32 LongSegs = 8;
+	constexpr int32 LatSegs = 6;
+
+	const int32 BaseVertIndex = OutVerts.Num();
+
+	for (int32 Lat = 0; Lat <= LatSegs; ++Lat)
+	{
+		const float Theta = PI * static_cast<float>(Lat) / static_cast<float>(LatSegs);
+		const float SinTheta = FMath::Sin(Theta);
+		const float CosTheta = FMath::Cos(Theta);
+
+		for (int32 Lon = 0; Lon <= LongSegs; ++Lon)
+		{
+			const float Phi = 2.0f * PI * static_cast<float>(Lon) / static_cast<float>(LongSegs);
+			const float SinPhi = FMath::Sin(Phi);
+			const float CosPhi = FMath::Cos(Phi);
+
+			const FVector Normal(SinTheta * CosPhi, SinTheta * SinPhi, CosTheta);
+			OutVerts.Add(Normal * Radius + WorldCenter);
+			OutNormals.Add(Normal);
+			OutUVs.Add(FVector2D(
+				static_cast<float>(Lon) / static_cast<float>(LongSegs),
+				static_cast<float>(Lat) / static_cast<float>(LatSegs)));
+		}
+	}
+
+	for (int32 Lat = 0; Lat < LatSegs; ++Lat)
+	{
+		for (int32 Lon = 0; Lon < LongSegs; ++Lon)
+		{
+			const int32 A = BaseVertIndex + Lat * (LongSegs + 1) + Lon;
+			const int32 B = A + (LongSegs + 1);
+
+			OutTris.Add(A);
+			OutTris.Add(B);
+			OutTris.Add(A + 1);
+
+			OutTris.Add(A + 1);
+			OutTris.Add(B);
+			OutTris.Add(B + 1);
+		}
 	}
 }

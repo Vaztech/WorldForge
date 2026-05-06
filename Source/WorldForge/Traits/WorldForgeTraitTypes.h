@@ -72,6 +72,11 @@ struct WORLDFORGE_API FWorldForgeTraitDefinition : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
 	float MoodModifier = 0.0f;
 
+	// Per-step morale drift.
+	// Positive slowly improves mood over time, negative slowly drains mood.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+	float MoraleDeltaPerStep = 0.0f;
+
 	// Social modifier applied by social/job scoring later.
 	// Positive = more socially capable, negative = more socially withdrawn.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)

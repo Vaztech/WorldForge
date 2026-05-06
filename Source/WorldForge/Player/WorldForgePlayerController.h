@@ -1,6 +1,6 @@
 // WorldForgePlayerController.h
 // Replaces BP_WorldForgePlayerController entirely.
-// Owns IMC_BuildMode at priority 1. Routes all build input to BuildModeManager.
+// Owns IMC_BuildMode at priority 1. Routes build/global input to C++.
 // Camera ownership/view target is also enforced here in C++.
 
 #pragma once
@@ -15,6 +15,8 @@ class UInputAction;
 class UBuildModeManager;
 class UBuildModeWidget;
 class AWorldForgeCamera;
+class USimulationTimeManager;
+class AWorldForgeMiniMapHUD;
 
 UCLASS()
 class WORLDFORGE_API AWorldForgePlayerController : public APlayerController
@@ -41,45 +43,75 @@ protected:
     virtual void SetupInputComponent() override;
     virtual void PlayerTick(float DeltaTime) override;
 
-    UPROPERTY(EditDefaultsOnly, Category = "Input|Build")
+    // ================================
+    // Input Mapping
+    // ================================
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input|WorldForge")
     TSoftObjectPtr<UInputMappingContext> BuildMappingContext;
 
-    UPROPERTY(EditDefaultsOnly, Category = "Input|Build")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input|WorldForge")
     int32 BuildMappingPriority = 1;
 
-    UPROPERTY(EditDefaultsOnly, Category = "Input|Build")
+    // ================================
+    // Build Input
+    // ================================
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input|WorldForge|Build")
     TObjectPtr<UInputAction> IA_BuildClick;
 
-    UPROPERTY(EditDefaultsOnly, Category = "Input|Build")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input|WorldForge|Build")
     TObjectPtr<UInputAction> IA_BuildSecondary;
 
-    UPROPERTY(EditDefaultsOnly, Category = "Input|Build")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input|WorldForge|Build")
     TObjectPtr<UInputAction> IA_BuildRotate;
 
-    UPROPERTY(EditDefaultsOnly, Category = "Input|Build")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input|WorldForge|Build")
     TObjectPtr<UInputAction> IA_BuildConfirm;
 
-    UPROPERTY(EditDefaultsOnly, Category = "Input|Build")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input|WorldForge|Build")
     TObjectPtr<UInputAction> IA_BuildCancel;
 
-    UPROPERTY(EditDefaultsOnly, Category = "Input|Build")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input|WorldForge|Build")
     TObjectPtr<UInputAction> IA_BuildToggle;
 
-    UPROPERTY(EditDefaultsOnly, Category = "Input|Build")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input|WorldForge|Build")
     TObjectPtr<UInputAction> IA_BuildUndo;
 
-    // ----- Phase 1: Dig Mode Input -----
+    // ================================
+    // Global Input
+    // ================================
+    // Space = pause/unpause simulation.
+    // M     = show/hide HUD minimap.
 
-    UPROPERTY(EditDefaultsOnly, Category = "Input|Build|Dig")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input|WorldForge|Global")
+    TObjectPtr<UInputAction> IA_TogglePause;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input|WorldForge|Global")
+    TObjectPtr<UInputAction> IA_ToggleMiniMap;
+
+    // ================================
+    // Debug / Legacy Tool Input
+    // ================================
+    // Dig is no longer intended as a player-facing separate mode.
+    // The future player-facing tool should be unified under Mine/Excavate.
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input|WorldForge|Debug")
     TObjectPtr<UInputAction> IA_ToggleDigMode;
 
-    // ----- Phase 4 Stub: Mine Mode Input -----
-
-    UPROPERTY(EditDefaultsOnly, Category = "Input|Build|Mine")
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input|WorldForge|Debug")
     TObjectPtr<UInputAction> IA_ToggleMineMode;
 
-    UPROPERTY(EditDefaultsOnly, Category = "UI")
+    // ================================
+    // UI
+    // ================================
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UI|WorldForge")
     TSubclassOf<UBuildModeWidget> BuildWidgetClass;
+
+    // ================================
+    // Cached runtime refs
+    // ================================
 
     UPROPERTY(Transient)
     TObjectPtr<UBuildModeManager> BuildModeManager;
@@ -87,10 +119,8 @@ protected:
     UPROPERTY(Transient)
     TObjectPtr<UBuildModeWidget> BuildWidgetInstance;
 
-    UPROPERTY(EditDefaultsOnly, Category = "Input|Build", meta = (ClampMin = "0.05", ClampMax = "1.0"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input|WorldForge|Build", meta = (ClampMin = "0.05", ClampMax = "1.0"))
     float BuildClickDebounceSeconds = 0.2f;
-
-    // ----- Phase 1: Dig Mode Methods -----
 
     UFUNCTION()
     void ToggleDigMode();
@@ -99,6 +129,10 @@ protected:
     void ToggleMineMode();
 
 private:
+    // ================================
+    // Input handlers
+    // ================================
+
     void OnBuildClickStarted(const FInputActionValue& Value);
     void OnBuildClickReleased(const FInputActionValue& Value);
     void OnBuildSecondary(const FInputActionValue& Value);
@@ -108,9 +142,31 @@ private:
     void OnBuildToggle(const FInputActionValue& Value);
     void OnBuildUndo(const FInputActionValue& Value);
 
+    void OnPauseToggle(const FInputActionValue& Value);
+    void OnMiniMapToggle(const FInputActionValue& Value);
+
+    // Legacy fallback key handlers.
+    // These help while Enhanced Input mappings are being cleaned up.
+    void OnPauseKeyPressed();
+    void OnMiniMapKeyPressed();
+
+    // Shared handlers used by both Enhanced Input and fallback key input.
+    void ExecutePauseToggle();
+    void ExecuteMiniMapToggle();
+
+    // ================================
+    // State helpers
+    // ================================
+
     bool IsAnyBuildModeActive() const;
     bool IsCustomDrawActive() const;
     void RefreshBuildInputSuppression();
+
+    USimulationTimeManager* GetSimulationTimeManager() const;
+    AWorldForgeMiniMapHUD* GetMiniMapHUD() const;
+
+    void SetBuildWidgetVisible(bool bVisible);
+    void ToggleMiniMapVisibility();
 
     bool AcquireAndApplyCameraViewTarget(bool bLogResult);
 
@@ -123,4 +179,10 @@ private:
     bool bCameraViewTargetApplied = false;
 
     double LastBuildClickTime = 0.0;
+
+    // Prevents duplicate Enhanced Input + fallback key events from toggling twice.
+    double LastPauseToggleTime = -1000.0;
+    double LastMiniMapToggleTime = -1000.0;
+
+    static constexpr double ToggleDebounceSeconds = 0.12;
 };

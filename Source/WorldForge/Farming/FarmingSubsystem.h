@@ -1,0 +1,197 @@
+// Source/WorldForge/Farming/FarmingSubsystem.h
+//
+// UWorldSubsystem managing farm zones, crop records, and sim tick processing.
+// Owns FWorldForgeFarmZone records. Delegates all BP interaction to
+// WildHarvestAdapter (never touches BP actors directly).
+//
+// Called from ProcessorManager::RunSimulationStep() via TickFarmZones().
+// Posts farming jobs to JobQueueManager via EventBus dispatch.
+//
+// Important initialization note:
+// Unreal does not guarantee sibling WorldSubsystem initialization order.
+// FarmingSubsystem may initialize before WildHarvestAdapter, so this class
+// uses safe late-binding helpers instead of assuming cached pointers are valid
+// during Initialize().
+// ════════════════════════════════════════════════════════════════════
+
+#pragma once
+
+#include "CoreMinimal.h"
+#include "Subsystems/WorldSubsystem.h"
+#include "FarmingTypes.h"
+#include "FarmingSubsystem.generated.h"
+
+class UWildHarvestAdapter;
+class UEventBus;
+
+/**
+ * FarmingSubsystem — manages all farm zones in the colony.
+ *
+ * Responsibilities:
+ *   1. Create / modify / disband farm zones (from Build Mode)
+ *   2. Tick all active zones each sim step:
+ *      - Poll crop states via WildHarvestAdapter
+ *      - Post Plant / Water / Harvest / Clear jobs
+ *      - Update aggregate zone stats
+ *   3. Handle job completion callbacks from ProductionProcessor
+ *   4. Broadcast farming events via EventBus
+ *
+ * Key principle:
+ *   FarmingSubsystem decides WHEN and WHY.
+ *   WildHarvestAdapter decides HOW (BP interaction).
+ */
+UCLASS()
+class WORLDFORGE_API UFarmingSubsystem : public UWorldSubsystem
+{
+    GENERATED_BODY()
+
+public:
+    virtual void Initialize(FSubsystemCollectionBase& Collection) override;
+    virtual void Deinitialize() override;
+
+    // ─── Zone Management ────────────────────────────────────────
+
+    /**
+     * Create a new farm zone. Called from BuildModeManager when
+     * the player confirms a farm zone designation.
+     *
+     * @param SettlementID  Owning settlement
+     * @param Origin        Top-left tile (settlement-local grid)
+     * @param SizeX         Width in tiles
+     * @param SizeY         Height in tiles
+     * @param Category      Crop category for this zone
+     * @param CropRow       Specific crop row (empty = default for category)
+     * @param bAutoReplant  Whether to auto-replant after harvest
+     * @return              The new zone's ID, or INDEX_NONE on failure
+     */
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Farming")
+    int32 CreateFarmZone(
+        int32 SettlementID,
+        FIntPoint Origin,
+        int32 SizeX,
+        int32 SizeY,
+        ECropCategory Category,
+        FName CropRow,
+        bool bAutoReplant = true);
+
+    /**
+     * Disband (soft-delete) a farm zone.
+     * Sets state to Disbanded and despawns crop actors through the adapter.
+     */
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Farming")
+    void DisbandFarmZone(int32 ZoneID);
+
+    /** Pause/unpause a farm zone. Paused zones don't post new jobs. */
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Farming")
+    void SetFarmZonePaused(int32 ZoneID, bool bPaused);
+
+    /** Change the crop for an existing zone. Clears all planted tiles. */
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Farming")
+    void ChangeFarmZoneCrop(int32 ZoneID, ECropCategory NewCategory, FName NewCropRow);
+
+    // ─── Sim Tick ───────────────────────────────────────────────
+
+    /**
+     * Main per-step update. Called from ProcessorManager::RunSimulationStep().
+     * Iterates all active zones, polls crop states, and posts jobs.
+     */
+    void TickFarmZones(int32 StepNumber);
+
+    // ─── Job Completion Callbacks ───────────────────────────────
+    // Called by ProductionProcessor when a colonist finishes a farming job.
+
+    /** A colonist completed a Plant job at the given tile. */
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Farming")
+    void OnPlantCompleted(int32 ZoneID, FIntPoint TilePos);
+
+    /** A colonist completed a Water job at the given tile. */
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Farming")
+    void OnWaterCompleted(int32 ZoneID, FIntPoint TilePos);
+
+    /** A colonist completed a Harvest job at the given tile. */
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Farming")
+    void OnHarvestCompleted(int32 ZoneID, FIntPoint TilePos, int32 YieldAmount);
+
+    // ─── Queries ────────────────────────────────────────────────
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Farming")
+    const TArray<FWorldForgeFarmZone>& GetAllZones() const { return FarmZones; }
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Farming")
+    bool GetZoneByID(int32 ZoneID, FWorldForgeFarmZone& OutZone) const;
+
+    /** Get zones belonging to a specific settlement. */
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Farming")
+    TArray<FWorldForgeFarmZone> GetZonesForSettlement(int32 SettlementID) const;
+
+    /** Check if a tile position is inside any active farm zone. */
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Farming")
+    bool IsTileInFarmZone(FIntPoint TilePos, int32 SettlementID) const;
+
+    // ─── Save / Load ────────────────────────────────────────────
+
+    const TArray<FWorldForgeFarmZone>& GetAllZoneRecords() const { return FarmZones; }
+    void RestoreZoneRecords(const TArray<FWorldForgeFarmZone>& InZones);
+
+private:
+    UPROPERTY()
+    TArray<FWorldForgeFarmZone> FarmZones;
+
+    int32 NextZoneID = 1;
+
+    /**
+     * Cached subsystem pointer.
+     *
+     * This may be null during Initialize() because WildHarvestAdapter can
+     * initialize after FarmingSubsystem. Use GetWildHarvestAdapterSafe()
+     * whenever farming actually needs adapter access.
+     */
+    UPROPERTY()
+    TObjectPtr<UWildHarvestAdapter> Adapter;
+
+    /**
+     * Cached EventBus pointer.
+     *
+     * EventBus usually initializes before FarmingSubsystem in current logs,
+     * but we still late-bind safely to avoid future subsystem-order bugs.
+     */
+    UPROPERTY()
+    TObjectPtr<UEventBus> EventBus;
+
+    /** Water threshold — tiles below this need Water jobs. */
+    float WaterThreshold = 0.3f;
+
+    /** Prevents the same tile from posting water jobs every sim step. */
+    int32 WaterJobCooldownSteps = 50;
+
+    /** Prevents duplicate plant jobs when BP state briefly reports BareSoil/None. */
+    int32 PlantJobCooldownSteps = 10;
+
+    /** Prevents duplicate harvest jobs while harvest is already queued/in progress. */
+    int32 HarvestJobCooldownSteps = 10;
+
+    /**
+     * Safely resolves WildHarvestAdapter.
+     *
+     * This fixes the current PIE pattern:
+     *   [FarmingSubsystem] Initialized. Adapter=null
+     *   [WildHarvestAdapter] Initialized.
+     *
+     * FarmingSubsystem should not stay broken just because the adapter
+     * initialized later.
+     */
+    UWildHarvestAdapter* GetWildHarvestAdapterSafe();
+
+    /**
+     * Safely resolves EventBus.
+     *
+     * Keeps job posting robust if subsystem initialization order changes.
+     */
+    UEventBus* GetEventBusSafe();
+
+    /** Find a mutable zone by ID. Returns nullptr if not found. */
+    FWorldForgeFarmZone* FindZoneMutable(int32 ZoneID);
+
+    /** Find a const zone by ID. Returns nullptr if not found. */
+    const FWorldForgeFarmZone* FindZone(int32 ZoneID) const;
+};

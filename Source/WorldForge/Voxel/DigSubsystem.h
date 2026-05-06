@@ -1,8 +1,13 @@
 // DigSubsystem.h
-// WorldForge — Phase 1: Digging Foundation
-// UWorldSubsystem responsible for terrain excavation.
-// Delegates voxel removal to VoxelWorldManager, queries ResourceNodeSubsystem
-// for node reveals (Phase 2+), and dispatches results via EventBus.
+// WorldForge — Digging Foundation
+//
+// UDigSubsystem owns terrain excavation gameplay logic.
+// It samples dig volumes, calls the public VoxelWorldManager edit API,
+// records removed block data for undo/resource yield, detects resource node
+// reveals, and dispatches dig events through EventBus.
+//
+// VoxelWorldManager owns the actual runtime/SDF terrain modification layer.
+// DigSubsystem does not call private brush helpers directly.
 
 #pragma once
 
@@ -13,6 +18,7 @@
 
 class UVoxelWorldManager;
 class UEventBus;
+class UResourceSpawnSubsystem;
 
 /**
  * Settings that control a single dig operation.
@@ -23,38 +29,69 @@ struct WORLDFORGE_API FDigParams
 {
 	GENERATED_BODY()
 
-	/** Grid position to dig at (center of the dig volume). */
+	/** Grid position to dig at, centered on the intended dig volume. */
 	UPROPERTY(BlueprintReadWrite)
 	FIntVector TargetGridPos = FIntVector::ZeroValue;
 
 	/**
 	 * Radius of the dig in grid cells.
-	 * 1 = single block, 2 = 3x3x1 slab, etc.
-	 * Actual shape is a vertical column of blocks within this XY radius.
+	 *
+	 * 1 = single block footprint.
+	 * 2 = 3x3 footprint.
+	 * Higher values expand the X/Y area depending on BrushShape.
 	 */
 	UPROPERTY(BlueprintReadWrite)
 	int32 Radius = 1;
 
 	/**
-	 * How many layers deep to dig in a single action.
-	 * 1 = remove one layer, 2 = two layers, etc.
+	 * How many vertical layers to dig in a single action.
+	 *
+	 * Surface digs carve downward from the resolved surface/anchor.
+	 * Underground digs carve from the exact target Z so horizontal tunneling
+	 * does not snap back to the surface.
 	 */
 	UPROPERTY(BlueprintReadWrite)
 	int32 DepthPerAction = 1;
+
+	/**
+	 * Dig brush shape used for sampling and debug visualization.
+	 *
+	 * Current public-API path samples/removes discrete grid blocks, while
+	 * VoxelWorldManager owns the actual SDF/runtime modification behavior.
+	 *
+	 * - Sphere:   Smooth/small excavation style.
+	 * - Cylinder: Vertical shaft style.
+	 * - Box:      Clean axis-aligned room/tunnel style.
+	 */
+	UPROPERTY(BlueprintReadWrite)
+	EDigBrushShape BrushShape = EDigBrushShape::Box;
+
+	/**
+	 * SDF/debug falloff in world units.
+	 *
+	 * Higher values = softer visual/debug transition.
+	 * 0 or negative = use default behavior.
+	 */
+	UPROPERTY(BlueprintReadWrite)
+	float FalloffOverride = -1.0f;
 };
 
 /**
- * World subsystem that owns all terrain excavation logic.
+ * World subsystem that owns terrain excavation logic.
  *
- * Responsibilities:
- * - Validate dig targets (can't dig air, can't dig below world floor)
- * - Remove voxel blocks via VoxelWorldManager
- * - Calculate depth reached
- * - Query ResourceNodeSubsystem for node reveals (Phase 2 — stubbed initially)
- * - Dispatch FDigResult via EventBus
- * - Provide undo support (restore removed blocks)
+ * Current public-API path:
+ * - Samples solid blocks in the requested dig volume.
+ * - Removes blocks through VoxelWorldManager::RemoveBlockAt().
+ * - Restores blocks through VoxelWorldManager::RestoreBlockAt().
+ * - Tracks removed block positions/types for undo and resource yield.
+ * - Detects nearby resource node reveals after digging.
+ * - Dispatches FDigResult through EventBus.
  *
- * Does NOT own input handling or ghost preview — that's BuildModeManager.
+ * Important:
+ * VoxelWorldManager owns the actual runtime/SDF terrain modification layer.
+ * DigSubsystem does not call private brush helpers directly.
+ *
+ * Does NOT own input handling or ghost preview — that is BuildModeManager.
  */
 UCLASS()
 class WORLDFORGE_API UDigSubsystem : public UWorldSubsystem
@@ -74,22 +111,34 @@ public:
 	/**
 	 * Execute a dig operation at the specified grid position.
 	 *
-	 * Removes blocks within the radius/depth, calculates results,
-	 * dispatches OnTerrainDug via EventBus, and returns the result
-	 * for the caller (BuildModeManager) to push onto the undo stack.
+	 * Current flow:
+	 * 1. Compute brush/debug parameters from FDigParams.
+	 * 2. Sample solid blocks in the intended dig volume.
+	 * 3. Remove sampled blocks through VoxelWorldManager::RemoveBlockAt().
+	 * 4. Record actually removed blocks in FDigResult.
+	 * 5. Check for newly exposed resource nodes.
+	 * 6. Broadcast OnTerrainDug through EventBus.
 	 *
-	 * @param Params  Dig parameters (position, radius, depth).
+	 * Surface behavior:
+	 * - If the target is air/invalid, the dig resolves to a nearby surface block.
+	 *
+	 * Underground behavior:
+	 * - If the target is already solid, the dig keeps the exact target Z.
+	 * - This allows horizontal cave/tunnel digging along X/Y without creating
+	 *   unwanted vertical columns from the surface.
+	 *
+	 * @param Params  Dig parameters: position, radius, depth, and brush shape.
 	 * @return        FDigResult describing what was removed and revealed.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "WorldForge|Dig")
 	FDigResult DigAt(const FDigParams& Params);
 
 	/**
-	 * Undo a previous dig by restoring all removed blocks.
-	 * Called by BuildModeManager when the player undoes a dig action.
+	 * Undo a previous dig by restoring the removed block entries recorded in
+	 * the original FDigResult.
 	 *
-	 * @param Result  The FDigResult from the original dig (stored in undo stack).
-	 * @return        True if all blocks were successfully restored.
+	 * @param Result  The FDigResult from the original dig, stored in the undo stack.
+	 * @return        True if at least one block was restored.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "WorldForge|Dig")
 	bool UndoDig(const FDigResult& Result);
@@ -99,53 +148,84 @@ public:
 	// -------------------------------------------------------------------
 
 	/**
-	 * Check if a grid position can be dug (contains a solid block, within world bounds).
+	 * Check whether a grid position can be dug.
+	 *
+	 * Direct underground solid targets are allowed.
+	 * If the target is not solid, this falls back to finding a nearby surface block.
 	 */
 	UFUNCTION(BlueprintPure, Category = "WorldForge|Dig")
 	bool CanDigAt(const FIntVector& GridPos) const;
 
 	/**
-	 * Get the current terrain depth at an XY column (surface to first air gap).
-	 * Returns the number of solid blocks from the surface downward.
+	 * Get the current terrain depth at an XY column.
 	 */
 	UFUNCTION(BlueprintPure, Category = "WorldForge|Dig")
 	int32 GetSurfaceDepthAt(const FIntPoint& GridXY) const;
 
 	/**
 	 * Get the depth of a specific grid position relative to the terrain surface
-	 * at that XY column. Returns 0 if at surface, negative if above, positive if below.
+	 * at that XY column.
+	 *
+	 * 0 = surface.
+	 * Positive values = underground.
 	 */
 	UFUNCTION(BlueprintPure, Category = "WorldForge|Dig")
 	int32 GetRelativeDepth(const FIntVector& GridPos) const;
 
 private:
 	// -------------------------------------------------------------------
-	// Internal helpers
+	// Brush computation
 	// -------------------------------------------------------------------
 
 	/**
-	 * Collect all grid positions within the dig volume defined by Params.
-	 * Filters to only solid blocks that are within world bounds.
+	 * Compute world-space brush/debug parameters from dig params.
+	 *
+	 * This mirrors the same surface-vs-underground behavior used by
+	 * SampleBlocksInVolume():
+	 *
+	 * - Solid target: keep exact target Z for cave/tunnel digging.
+	 * - Air/invalid target: snap to nearby surface for normal surface digging.
+	 *
+	 * @param Params      Input dig parameters.
+	 * @param OutRecord   Populated with shape, center, radius, half-extents, and falloff.
+	 *                    A pseudo BrushID is assigned after successful removal.
+	 * @return            True if parameters are valid.
 	 */
-	TArray<FIntVector> GatherDigTargets(const FDigParams& Params) const;
+	bool ComputeBrushParameters(const FDigParams& Params, FDigBrushRecord& OutRecord) const;
+
+	// -------------------------------------------------------------------
+	// Block sampling
+	// -------------------------------------------------------------------
 
 	/**
-	 * Remove a single block and return its type.
-	 * Returns an empty tag if the block was already air.
+	 * Sample all solid blocks inside the intended dig volume.
+	 *
+	 * Called before removal so block types can be tracked for undo,
+	 * resource yield, and future mining rules.
+	 *
+	 * Key behavior:
+	 * - Surface digs follow local surface height per X/Y column.
+	 * - Underground digs keep the target Z plane so tunnels dig horizontally
+	 *   instead of carving vertical shafts.
+	 *
+	 * @param Params  Dig parameters defining the volume.
+	 * @return        Array of block entries with grid positions and terrain types.
 	 */
-	FRemovedBlockEntry RemoveSingleBlock(const FIntVector& GridPos);
+	TArray<FRemovedBlockEntry> SampleBlocksInVolume(const FDigParams& Params) const;
 
 	/**
-	 * Query ResourceNodeSubsystem for any nodes at the given positions
-	 * that should now be revealed. (Phase 2 stub — returns empty array initially.)
+	 * Check whether any hidden resource nodes are close enough to the newly
+	 * dug blocks to become exposed.
 	 */
-	TArray<FRevealedNodeEntry> CheckForNodeReveals(const TArray<FIntVector>& DugPositions, int32 MaxDepth);
+	TArray<FRevealedNodeEntry> CheckForNodeReveals(
+		const TArray<FIntVector>& DugPositions,
+		int32 MaxDepth);
 
 	/**
-	 * Calculate the deepest depth reached by any block in the removed set,
-	 * relative to the terrain surface at each block's XY column.
+	 * Calculate the deepest depth reached by any removed block, relative to
+	 * the terrain surface at each block's XY column.
 	 */
-	int32 CalculateMaxDepthReached(const TArray<FRemovedBlockEntry>& Removed) const;
+	int32 CalculateMaxDepthReached(const TArray<FRemovedBlockEntry>& Sampled) const;
 
 	/** Dispatch FDigResult through EventBus. */
 	void BroadcastDigResult(const FDigResult& Result);
@@ -160,9 +240,22 @@ private:
 	UPROPERTY()
 	TObjectPtr<UEventBus> CachedEventBus;
 
+	UPROPERTY()
+	TObjectPtr<UResourceSpawnSubsystem> CachedResourceSpawn;
+
+	/**
+	 * Public-API dig path does not receive a real private SDF BrushID from
+	 * VoxelWorldManager. This counter gives each successful dig result a stable
+	 * pseudo ID so WasEffective()/undo-stack logic can treat it as valid.
+	 */
+	int64 NextDigResultID = 1;
+
 	/** Resolve and cache VoxelWorldManager. Returns nullptr if not available. */
 	UVoxelWorldManager* GetVoxelManager() const;
 
 	/** Resolve and cache EventBus. Returns nullptr if not available. */
 	UEventBus* GetEventBus() const;
+
+	/** Resolve and cache ResourceSpawnSubsystem. Returns nullptr if not available. */
+	UResourceSpawnSubsystem* GetResourceSpawnSubsystem() const;
 };
