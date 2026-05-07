@@ -1,5 +1,6 @@
 #include "BuildModeManager.h"
 #include "BuildGhostActor.h"
+#include "TileGridOverlayActor.h"
 #include "PlayerBuildContext.h"
 #include "VoxelWorldManager.h"
 #include "VoxelConstructionSystem.h"
@@ -75,12 +76,14 @@ namespace
 void UBuildModeManager::Initialize(FSubsystemCollectionBase& Collection)
 {
     Super::Initialize(Collection);
+    InitializeGridOverlay();
     UE_LOG(LogTemp, Log, TEXT("[BuildMode] Manager initialized."));
 }
 
 void UBuildModeManager::Deinitialize()
 {
     ExitDigMode();
+    DestroyGridOverlay();
     DestroyGhost();
     Super::Deinitialize();
 }
@@ -328,6 +331,7 @@ void UBuildModeManager::EnterPrefabMode(FGameplayTag BuildingTag)
     bDragStartedFromBlock = false;
 
     SpawnGhost();
+    ActivateGridOverlayForMode(EBuildToolMode::Place);
 
     UE_LOG(LogTemp, Log, TEXT("[BuildMode] Entered Prefab mode: %s"), *BuildingTag.ToString());
     OnBuildModeChanged.Broadcast(CurrentMode);
@@ -373,6 +377,7 @@ void UBuildModeManager::EnterCustomDrawMode(FGameplayTag MaterialTag)
     }
 
     SpawnGhost();
+    ActivateGridOverlayForMode(EBuildToolMode::Place);
 
     UE_LOG(LogTemp, Log, TEXT("[BuildMode] Entered CustomDraw mode: %s"), *MaterialTag.ToString());
     OnBuildModeChanged.Broadcast(CurrentMode);
@@ -414,6 +419,7 @@ void UBuildModeManager::ExitBuildMode()
     DragStartVoxel = FIntVector::ZeroValue;
     bDragStartedFromBlock = false;
 
+    DeactivateGridOverlay();
     DestroyGhost();
 
     UE_LOG(LogTemp, Log, TEXT("[BuildMode] Exited build mode."));
@@ -461,7 +467,12 @@ void UBuildModeManager::HandlePrimaryClick()
 
     if (CurrentToolMode == EBuildToolMode::Mine)
     {
-        ExecuteMineDesignation();
+        bJustCommitted = false;
+        bIsDraggingBuild = true;
+        bHasDragStart = true;
+        DragStartVoxel = CurrentHoveredVoxel;
+        LastPlacedDragVoxel = FIntVector(INT32_MIN);
+        AddOrToggleCurrentTileSelection(true);
         return;
     }
 
@@ -515,17 +526,46 @@ void UBuildModeManager::HandlePrimaryClick()
     {
         UE_LOG(LogTemp, Warning, TEXT("[BuildMode] HandlePrimaryClick -> CustomDraw"));
 
-        if (SelectedCells3D.Contains(CurrentHoveredVoxel))
+        if (SelectedCells3D.Contains(CurrentHoveredVoxel) || SelectedCells.Contains(CurrentHoveredCell))
         {
+            SelectedCells3D.Remove(CurrentHoveredVoxel);
+            SelectedCells.Remove(CurrentHoveredCell);
+
+            if (CurrentToolMode == EBuildToolMode::Farm)
+            {
+                FarmPaintedWorldCells.Remove(CurrentHoveredCell);
+            }
+
+            if (GridOverlay)
+            {
+                GridOverlay->RemoveSelectedCell(CurrentHoveredVoxel);
+            }
+
+            if (UPlayerBuildContext* Ctx = GetBuildContext())
+            {
+                Ctx->ClearSelection();
+                for (const FIntPoint& Cell : SelectedCells)
+                {
+                    Ctx->AddCell(Cell);
+                }
+            }
+
+            OnCellCountChanged.Broadcast(
+                CurrentToolMode == EBuildToolMode::Farm
+                ? FarmPaintedWorldCells.Num()
+                : SelectedCells.Num());
+
             UE_LOG(
                 LogTemp,
-                Warning,
-                TEXT("[BuildMode] HandlePrimaryClick -> CustomDraw skipped: cell already selected (%d,%d,%d)"),
+                Log,
+                TEXT("[BuildMode] Removed selected cell (%d,%d,%d). Remaining=%d"),
                 CurrentHoveredVoxel.X,
                 CurrentHoveredVoxel.Y,
-                CurrentHoveredVoxel.Z
-            );
+                CurrentHoveredVoxel.Z,
+                SelectedCells.Num());
 
+            UpdateGhost();
+            UpdateGridOverlay();
             return;
         }
 
@@ -569,11 +609,16 @@ void UBuildModeManager::HandlePrimaryClick()
         SelectedCells3D.Add(CurrentHoveredVoxel);
         SelectedCells.Add(CurrentHoveredCell);
 
+        if (GridOverlay)
+        {
+            GridOverlay->AddSelectedCell(CurrentHoveredVoxel, CurrentHoveredTerrainZ);
+        }
+
         // Farm mode stores world cells separately so Confirm cannot lose them
         // if legacy/custom draw selection arrays get cleared before CommitFarmZone().
         if (CurrentToolMode == EBuildToolMode::Farm)
         {
-            const FIntPoint FarmWorldCell(CurrentHoveredVoxel.X, CurrentHoveredVoxel.Y);
+            const FIntPoint FarmWorldCell = CurrentHoveredCell;
             FarmPaintedWorldCells.Add(FarmWorldCell);
 
             UE_LOG(
@@ -622,6 +667,7 @@ void UBuildModeManager::HandlePrimaryClick()
         ));
 
         UpdateGhost();
+        UpdateGridOverlay();
     }
 }
 
@@ -725,6 +771,22 @@ void UBuildModeManager::HandleConfirm()
         return;
     }
 
+    if (CurrentToolMode == EBuildToolMode::Mine)
+    {
+        if (CommitMineDesignations())
+        {
+            bJustCommitted = true;
+            bIsDraggingBuild = false;
+            LastPlacedDragVoxel = FIntVector(INT32_MIN);
+            bHasDragStart = false;
+            DragStartVoxel = FIntVector::ZeroValue;
+            bDragStartedFromBlock = false;
+            ClearTileSelectionState();
+            UpdateGridOverlay();
+        }
+        return;
+    }
+
     if (CurrentToolMode == EBuildToolMode::Farm)
     {
         UE_LOG(LogTemp, Warning,
@@ -778,6 +840,7 @@ void UBuildModeManager::HandleCancel()
     {
         CurrentToolMode = EBuildToolMode::None;
         CurrentMode = EBuildMode::None;
+        DeactivateGridOverlay();
         DestroyGhost();
         BroadcastSelectionChanged();
         BroadcastFeedback(TEXT("Mine mode exited."));
@@ -838,6 +901,7 @@ void UBuildModeManager::EnterFarmMode()
     }
 
     SpawnGhost();
+    ActivateGridOverlayForMode(EBuildToolMode::Farm);
 
     UE_LOG(LogTemp, Log, TEXT("[BuildMode] Entered Farm mode."));
     OnBuildModeChanged.Broadcast(CurrentMode);
@@ -852,6 +916,7 @@ void UBuildModeManager::EnterMineMode()
     {
         CurrentToolMode = EBuildToolMode::None;
         CurrentMode = EBuildMode::None;
+        DeactivateGridOverlay();
         DestroyGhost();
         BroadcastSelectionChanged();
         BroadcastFeedback(TEXT("Mine mode exited."));
@@ -880,6 +945,7 @@ void UBuildModeManager::EnterMineMode()
     bDragStartedFromBlock = false;
 
     SpawnGhost();
+    ActivateGridOverlayForMode(EBuildToolMode::Mine);
 
     UE_LOG(LogTemp, Log, TEXT("[BuildMode] Entered Mine mode."));
     OnBuildModeChanged.Broadcast(CurrentMode);
@@ -897,6 +963,7 @@ void UBuildModeManager::EnterDigMode()
     }
 
     ExitBuildMode();
+    DeactivateGridOverlay();
     DestroyGhost();
 
     UWorld* W = GetWorld();
@@ -1258,25 +1325,34 @@ void UBuildModeManager::UpdateFromMouse(APlayerController* PC)
         return;
     }
 
-    // Mine is a designation tool, not a build mode. It still needs live hover
-    // targeting so clicks can create MiningSubsystem designations.
+    // Mine uses the same 2D overlay selection as build/farm, but keeps
+    // CurrentHoveredVoxel as the true mine/dig target for the mining subsystem.
     if (CurrentToolMode == EBuildToolMode::Mine)
     {
         FIntVector GridPos = FIntVector::ZeroValue;
         FVector WorldPos = FVector::ZeroVector;
         const bool bHit = RaycastDigTarget(GridPos, WorldPos);
+        UVoxelWorldManager* VM = GetVoxelManager();
 
-        if (bHit)
+        if (bHit && VM)
         {
             CurrentHoveredVoxel = GridPos;
-            CurrentHoveredCell = FIntPoint(GridPos.X, GridPos.Y);
+            CurrentHoveredCell = VM->WorldToTerrainCell(WorldPos);
             LastValidVoxel = GridPos;
             bHasLastValidVoxel = true;
             bHoveredCellValid = true;
             LastHitZ = WorldPos.Z;
+            CurrentHoveredTerrainZ = WorldPos.Z;
 
             OnHoveredCellChanged.Broadcast(CurrentHoveredCell);
+
+            if (bIsDraggingBuild && bHasDragStart)
+            {
+                AddOrToggleCurrentTileSelection(false);
+            }
+
             UpdateGhost();
+            UpdateGridOverlay();
         }
         else
         {
@@ -1287,6 +1363,8 @@ void UBuildModeManager::UpdateFromMouse(APlayerController* PC)
                 GhostActor->SetGhostState(EBuildGhostState::Invalid);
                 UpdateGhost();
             }
+
+            UpdateGridOverlay();
         }
 
         return;
@@ -1319,6 +1397,7 @@ void UBuildModeManager::UpdateFromMouse(APlayerController* PC)
             CurrentHoveredCell = FIntPoint(CurrentHoveredVoxel.X, CurrentHoveredVoxel.Y);
             bHoveredCellValid = true;
             UpdateGhost();
+            UpdateGridOverlay();
         }
         else
         {
@@ -1329,6 +1408,7 @@ void UBuildModeManager::UpdateFromMouse(APlayerController* PC)
                 GhostActor->SetGhostState(EBuildGhostState::Invalid);
                 UpdateGhost();
             }
+            UpdateGridOverlay();
         }
         return;
     }
@@ -1414,11 +1494,13 @@ void UBuildModeManager::UpdateFromMouse(APlayerController* PC)
     CurrentHoveredCell = FIntPoint(NewVoxel.X, NewVoxel.Y);
     bHoveredCellValid = true;
     LastHitZ = HitLocation.Z;
+    CurrentHoveredTerrainZ = HitLocation.Z;
 
     if (bChanged)
     {
         OnHoveredCellChanged.Broadcast(CurrentHoveredCell);
         UpdateGhost();
+        UpdateGridOverlay();
     }
 
     if (!bIsDraggingBuild || CurrentMode != EBuildMode::CustomDraw || !bHasDragStart)
@@ -1547,7 +1629,37 @@ void UBuildModeManager::UpdateFromMouse(APlayerController* PC)
 
     SelectedCells3D = LineCells3D;
     SelectedCells = LineCells2D;
+
+    if (CurrentToolMode == EBuildToolMode::Farm)
+    {
+        FarmPaintedWorldCells.Reset();
+        for (const FIntPoint& Cell : SelectedCells)
+        {
+            FarmPaintedWorldCells.Add(Cell);
+        }
+    }
+
     LastPlacedDragVoxel = CurrentHoveredVoxel;
+
+    // Batch-sync the overlay with the rebuilt drag selection.
+    if (GridOverlay)
+    {
+        TMap<FIntVector, float> BatchCells;
+        UVoxelWorldManager* OverlayVM = GetVoxelManager();
+
+        for (const FIntVector& Cell : SelectedCells3D)
+        {
+            float CellZ = CurrentHoveredTerrainZ;
+            if (OverlayVM)
+            {
+                const FVector CellWorld = OverlayVM->GridToWorld(FIntPoint(Cell.X, Cell.Y), Cell.Z);
+                CellZ = CellWorld.Z;
+            }
+            BatchCells.Add(Cell, CellZ);
+        }
+
+        GridOverlay->SetSelectedCells(BatchCells);
+    }
 
     if (UPlayerBuildContext* Ctx = GetBuildContext())
     {
@@ -1558,8 +1670,12 @@ void UBuildModeManager::UpdateFromMouse(APlayerController* PC)
         }
     }
 
-    OnCellCountChanged.Broadcast(SelectedCells.Num());
+    OnCellCountChanged.Broadcast(
+        CurrentToolMode == EBuildToolMode::Farm
+        ? FarmPaintedWorldCells.Num()
+        : SelectedCells.Num());
     UpdateGhost();
+    UpdateGridOverlay();
 }
 
 bool UBuildModeManager::RaycastToTerrain(
@@ -2004,6 +2120,295 @@ void UBuildModeManager::UpdateGhost()
         GhostActor->UpdateCustomDrawCells3D(SelectedCells3D, CurrentHoveredVoxel, VM);
         GhostActor->SetGhostState(EBuildGhostState::Valid);
     }
+}
+
+
+void UBuildModeManager::InitializeGridOverlay()
+{
+    if (GridOverlay)
+    {
+        return; // Already alive — no-op.
+    }
+
+    UWorld* W = GetWorld();
+    if (!W)
+    {
+        return;
+    }
+
+    FActorSpawnParameters Params;
+    Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+    GridOverlay = W->SpawnActor<ATileGridOverlayActor>(
+        ATileGridOverlayActor::StaticClass(),
+        FTransform::Identity,
+        Params);
+
+    if (!GridOverlay)
+    {
+        UE_LOG(LogTemp, Error, TEXT("[BuildMode] Failed to spawn TileGridOverlayActor."));
+        return;
+    }
+
+    // ── Register per-mode styles ──
+
+    // Build / CustomDraw / Prefab — blue + hammer
+    {
+        FGridOverlayStyle Style;
+        Style.TileColor        = FLinearColor(0.15f, 0.4f, 0.9f, 0.30f);
+        Style.BorderColor      = FLinearColor(0.3f,  0.6f, 1.0f, 0.75f);
+        Style.HoverColor       = FLinearColor(0.5f,  0.7f, 1.0f, 0.55f);
+        Style.DragPreviewColor = FLinearColor(0.4f,  0.5f, 0.9f, 0.20f);
+        Style.IconTexture      = BuildIconTexture;
+        Style.IconScale        = 0.45f;
+        GridOverlay->RegisterModeStyle(EBuildToolMode::Place, Style);
+    }
+
+    // Farm — green + wheat
+    {
+        FGridOverlayStyle Style;
+        Style.TileColor        = FLinearColor(0.2f,  0.7f, 0.15f, 0.30f);
+        Style.BorderColor      = FLinearColor(0.3f,  0.85f, 0.2f, 0.75f);
+        Style.HoverColor       = FLinearColor(0.4f,  0.9f,  0.3f, 0.55f);
+        Style.DragPreviewColor = FLinearColor(0.3f,  0.8f,  0.2f, 0.20f);
+        Style.IconTexture      = FarmIconTexture;
+        Style.IconScale        = 0.45f;
+        GridOverlay->RegisterModeStyle(EBuildToolMode::Farm, Style);
+    }
+
+    // Mine — grey + pickaxe
+    {
+        FGridOverlayStyle Style;
+        Style.TileColor        = FLinearColor(0.5f,  0.5f, 0.5f, 0.30f);
+        Style.BorderColor      = FLinearColor(0.65f, 0.65f, 0.65f, 0.75f);
+        Style.HoverColor       = FLinearColor(0.8f,  0.8f, 0.7f, 0.55f);
+        Style.DragPreviewColor = FLinearColor(0.6f,  0.6f, 0.5f, 0.20f);
+        Style.IconTexture      = MineIconTexture;
+        Style.IconScale        = 0.40f;
+        GridOverlay->RegisterModeStyle(EBuildToolMode::Mine, Style);
+    }
+
+    // Dig — orange, no icon (dig ghost handles its own visuals)
+    {
+        FGridOverlayStyle Style;
+        Style.TileColor        = FLinearColor(0.9f, 0.6f, 0.1f, 0.30f);
+        Style.BorderColor      = FLinearColor(1.0f, 0.7f, 0.2f, 0.75f);
+        Style.HoverColor       = FLinearColor(1.0f, 0.8f, 0.3f, 0.55f);
+        Style.DragPreviewColor = FLinearColor(0.9f, 0.7f, 0.2f, 0.20f);
+        Style.IconTexture      = PrefabIconTexture; // optional, nullptr OK
+        Style.IconScale        = 0.0f;
+        GridOverlay->RegisterModeStyle(EBuildToolMode::Dig, Style);
+    }
+
+    // Start hidden — will be shown when a mode is entered.
+    GridOverlay->HideOverlay();
+
+    UE_LOG(LogTemp, Log, TEXT("[BuildMode] GridOverlay spawned and styles registered."));
+}
+
+void UBuildModeManager::DestroyGridOverlay()
+{
+    if (GridOverlay)
+    {
+        GridOverlay->Destroy();
+        GridOverlay = nullptr;
+    }
+}
+
+void UBuildModeManager::UpdateGridOverlay()
+{
+    if (!GridOverlay)
+    {
+        return;
+    }
+
+    // Push hover state.
+    if (bHoveredCellValid)
+    {
+        GridOverlay->SetHoveredCell(CurrentHoveredVoxel, CurrentHoveredTerrainZ);
+    }
+    else
+    {
+        GridOverlay->ClearHover();
+    }
+}
+
+void UBuildModeManager::ActivateGridOverlayForMode(EBuildToolMode ToolMode)
+{
+    if (!GridOverlay)
+    {
+        InitializeGridOverlay();
+    }
+
+    if (!GridOverlay)
+    {
+        return;
+    }
+
+    GridOverlay->ClearSelection();
+    GridOverlay->ClearDragPreview();
+    GridOverlay->ClearHover();
+    GridOverlay->SetActiveMode(ToolMode);
+    GridOverlay->ShowOverlay();
+}
+
+void UBuildModeManager::DeactivateGridOverlay()
+{
+    if (!GridOverlay)
+    {
+        return;
+    }
+
+    GridOverlay->HideOverlay();
+    GridOverlay->ClearSelection();
+    GridOverlay->ClearDragPreview();
+    GridOverlay->ClearHover();
+}
+
+FIntVector UBuildModeManager::WorldToVoxel(const FVector& WorldPos, float VoxelSize)
+{
+    return FIntVector(
+        FMath::FloorToInt(WorldPos.X / VoxelSize),
+        FMath::FloorToInt(WorldPos.Y / VoxelSize),
+        FMath::FloorToInt(WorldPos.Z / VoxelSize)
+    );
+}
+
+FIntPoint UBuildModeManager::VoxelToTerrainCell(const FIntVector& VoxelCoord, int32 VoxelsPerCell)
+{
+    return FIntPoint(
+        FMath::FloorToInt32(VoxelCoord.X / static_cast<float>(VoxelsPerCell)),
+        FMath::FloorToInt32(VoxelCoord.Y / static_cast<float>(VoxelsPerCell))
+    );
+}
+
+void UBuildModeManager::ClearTileSelectionState()
+{
+    SelectedCells.Empty();
+    SelectedCells3D.Empty();
+    FarmPaintedWorldCells.Empty();
+
+    if (GridOverlay)
+    {
+        GridOverlay->ClearSelection();
+        GridOverlay->ClearDragPreview();
+    }
+
+    if (UPlayerBuildContext* Ctx = GetBuildContext())
+    {
+        Ctx->ClearSelection();
+    }
+
+    OnCellCountChanged.Broadcast(0);
+}
+
+void UBuildModeManager::AddOrToggleCurrentTileSelection(bool bToggleExisting)
+{
+    if (!bHoveredCellValid)
+    {
+        return;
+    }
+
+    const bool bAlreadySelected2D = SelectedCells.Contains(CurrentHoveredCell);
+    const bool bAlreadySelected3D = SelectedCells3D.Contains(CurrentHoveredVoxel);
+
+    if (bToggleExisting && (bAlreadySelected2D || bAlreadySelected3D))
+    {
+        SelectedCells.Remove(CurrentHoveredCell);
+        SelectedCells3D.Remove(CurrentHoveredVoxel);
+        FarmPaintedWorldCells.Remove(CurrentHoveredCell);
+
+        if (GridOverlay)
+        {
+            GridOverlay->RemoveSelectedCell(CurrentHoveredVoxel);
+        }
+    }
+    else
+    {
+        SelectedCells.AddUnique(CurrentHoveredCell);
+        SelectedCells3D.AddUnique(CurrentHoveredVoxel);
+
+        if (CurrentToolMode == EBuildToolMode::Farm)
+        {
+            FarmPaintedWorldCells.Add(CurrentHoveredCell);
+        }
+
+        if (GridOverlay)
+        {
+            GridOverlay->AddSelectedCell(CurrentHoveredVoxel, CurrentHoveredTerrainZ);
+        }
+    }
+
+    if (UPlayerBuildContext* Ctx = GetBuildContext())
+    {
+        Ctx->ClearSelection();
+        for (const FIntPoint& Cell : SelectedCells)
+        {
+            Ctx->AddCell(Cell);
+        }
+    }
+
+    OnCellCountChanged.Broadcast(
+        CurrentToolMode == EBuildToolMode::Farm
+        ? FarmPaintedWorldCells.Num()
+        : SelectedCells.Num());
+
+    UpdateGhost();
+    UpdateGridOverlay();
+}
+
+bool UBuildModeManager::CommitMineDesignations()
+{
+    if (CurrentToolMode != EBuildToolMode::Mine)
+    {
+        return false;
+    }
+
+    if (SelectedCells3D.Num() == 0 && bHoveredCellValid)
+    {
+        AddOrToggleCurrentTileSelection(false);
+    }
+
+    if (SelectedCells3D.Num() == 0)
+    {
+        BroadcastFeedback(TEXT("No mine tiles selected."));
+        return false;
+    }
+
+    UMiningSubsystem* MiningSub = GetMiningSubsystem();
+    if (!MiningSub)
+    {
+        BroadcastFeedback(TEXT("Mining system unavailable."));
+        return false;
+    }
+
+    int32 CreatedCount = 0;
+    for (const FIntVector& MineVoxel : SelectedCells3D)
+    {
+        int32 OutDesignationID = INDEX_NONE;
+        const bool bCreated = MiningSub->CreateMiningDesignation(
+            GetEffectiveSettlementID(),
+            MineVoxel,
+            0,
+            OutDesignationID);
+
+        if (bCreated && OutDesignationID != INDEX_NONE)
+        {
+            ++CreatedCount;
+        }
+    }
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[BuildMode] Mine designations committed. Created=%d Requested=%d Settlement=%d"),
+        CreatedCount,
+        SelectedCells3D.Num(),
+        GetEffectiveSettlementID());
+
+    BroadcastFeedback(FString::Printf(
+        TEXT("Mining designated: %d tile(s)."),
+        CreatedCount));
+
+    return CreatedCount > 0;
 }
 
 void UBuildModeManager::BroadcastSelectionChanged()

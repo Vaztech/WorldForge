@@ -11,6 +11,7 @@
 
 class ABuildGhostActor;
 class ADigGhostActor;
+class ATileGridOverlayActor;
 class APlayerController;
 class UPlayerBuildContext;
 class UVoxelWorldManager;
@@ -67,6 +68,9 @@ public:
 
     UFUNCTION(BlueprintPure, Category = "WorldForge|Build")
     int32 GetFarmPaintedCellCount() const { return FarmPaintedWorldCells.Num(); }
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Build|TileSelection")
+    int32 GetTileSelectionCount() const { return SelectedCells.Num(); }
 
     UFUNCTION(BlueprintPure, Category = "WorldForge|Build")
     FGameplayTag GetSelectedBuildingTag() const { return SelectedBuildingTag; }
@@ -222,6 +226,11 @@ private:
     bool bHoveredCellValid = false;
     float LastHitZ = 0.0f;
 
+    // World-space terrain Z at the current hovered voxel.
+    // Fed directly to GridOverlay so it can Z-sample tile placement
+    // without redundant line traces.
+    float CurrentHoveredTerrainZ = 0.0f;
+
     // Suppresses repeated confirm input immediately after a successful commit.
     bool bJustCommitted = false;
 
@@ -257,6 +266,27 @@ private:
 
     UPROPERTY()
     TObjectPtr<ABuildGhostActor> GhostActor = nullptr;
+
+    // ── Grid Overlay (replaces TileSelectionOverlayActor) ──
+
+    UPROPERTY()
+    TObjectPtr<ATileGridOverlayActor> GridOverlay = nullptr;
+
+    // Per-mode icon textures. Assign in a Blueprint subclass of this
+    // subsystem or via InitializeGridOverlay() with LoadObject paths.
+    // 128×128 or 256×256 white-on-transparent PNG recommended.
+
+    UPROPERTY(EditDefaultsOnly, Category = "Build|Overlay")
+    TObjectPtr<UTexture2D> BuildIconTexture;      // hammer
+
+    UPROPERTY(EditDefaultsOnly, Category = "Build|Overlay")
+    TObjectPtr<UTexture2D> FarmIconTexture;        // wheat
+
+    UPROPERTY(EditDefaultsOnly, Category = "Build|Overlay")
+    TObjectPtr<UTexture2D> MineIconTexture;        // pickaxe
+
+    UPROPERTY(EditDefaultsOnly, Category = "Build|Overlay")
+    TObjectPtr<UTexture2D> PrefabIconTexture;      // wrench (optional, nullptr OK)
 
     // ----- Legacy / Debug Dig Ghost -----
 
@@ -299,8 +329,44 @@ private:
     void DestroyGhost();
     void UpdateGhost();
 
+    // ── Grid Overlay lifecycle ──
+    // These replace the old SpawnTileSelectionOverlay / DestroyTileSelectionOverlay /
+    // UpdateTileSelectionOverlay family. The new overlay is a single actor that
+    // persists across mode changes — mode switch just recolors + swaps icons.
+
+    /** Spawn the GridOverlay actor and register all per-mode styles.
+     *  Called once from Initialize(). Safe to call again (no-ops if alive). */
+    void InitializeGridOverlay();
+
+    /** Destroy the GridOverlay actor. Called from Deinitialize(). */
+    void DestroyGridOverlay();
+
+    /** Push current hover / selection state to the GridOverlay.
+     *  Called every frame from UpdateFromMouse() when a mode is active. */
+    void UpdateGridOverlay();
+
+    /** Activate the overlay for the given tool mode (sets mode, shows). */
+    void ActivateGridOverlayForMode(EBuildToolMode ToolMode);
+
+    /** Hide overlay and clear all visual state. */
+    void DeactivateGridOverlay();
+
+    void ClearTileSelectionState();
+    void AddOrToggleCurrentTileSelection(bool bToggleExisting);
+    bool CommitMineDesignations();
+
     void BroadcastSelectionChanged();
     void BroadcastFeedback(const FString& Message);
+
+    // ================================
+    // Coordinate helpers
+    // ================================
+
+    /** Convert a world-space position to a voxel coordinate (floor-divide by VoxelSize). */
+    static FIntVector WorldToVoxel(const FVector& WorldPos, float VoxelSize = 100.0f);
+
+    /** Convert voxel coordinates to terrain cell (for FarmingSubsystem compat). */
+    static FIntPoint VoxelToTerrainCell(const FIntVector& VoxelCoord, int32 VoxelsPerCell = 32);
 
     // ================================
     // Trace helpers
