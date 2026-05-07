@@ -119,6 +119,10 @@ struct FFarmTileRecord
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
     bool bHarvestJobPending = false;
 
+    /** True when this harvested tile is waiting for the player to manually replant it. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    bool bAwaitingManualReplant = false;
+
     /** Last sim step a Plant job was posted for this tile. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
     int32 LastPlantJobStep = INDEX_NONE;
@@ -206,6 +210,10 @@ struct FWorldForgeFarmZone
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
     bool bAutoReplant = true;
 
+    /** Seed item required when planting this zone's selected crop category. Invalid tag preserves legacy no-seed behavior. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    FGameplayTag SeedItemTag;
+
     /** Per-tile records.  Indexed linearly: index = Y * SizeX + X. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
     TArray<FFarmTileRecord> Tiles;
@@ -264,6 +272,7 @@ struct FWorldForgeFarmZone
                 Tile.bPlantJobPending = false;
                 Tile.bWaterJobPending = false;
                 Tile.bHarvestJobPending = false;
+                Tile.bAwaitingManualReplant = false;
                 Tile.LastPlantJobStep = INDEX_NONE;
                 Tile.LastWaterJobStep = INDEX_NONE;
                 Tile.LastHarvestJobStep = INDEX_NONE;

@@ -89,6 +89,18 @@ public:
     UFUNCTION(BlueprintCallable, Category = "WorldForge|Farming")
     void ChangeFarmZoneCrop(int32 ZoneID, ECropCategory NewCategory, FName NewCropRow);
 
+    /** Enable/disable automatic replanting for an existing farm zone. */
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Farming")
+    void SetAutoReplant(int32 ZoneID, bool bEnable);
+
+    /** Re-queue a single harvested tile that is waiting for manual replant. */
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Farming")
+    bool ManualReplantTile(int32 ZoneID, FIntPoint TilePos);
+
+    /** Re-queue every harvested tile in a zone that is waiting for manual replant. */
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Farming")
+    int32 ManualReplantZone(int32 ZoneID);
+
     // ─── Sim Tick ───────────────────────────────────────────────
 
     /**
@@ -186,6 +198,12 @@ private:
 
     /** Find a mutable zone by ID. Returns nullptr if not found. */
     FWorldForgeFarmZone* FindZoneMutable(int32 ZoneID);
+
+    /** Resolve the seed item tag for a crop category. Returns invalid if seed tags are not configured. */
+    FGameplayTag GetSeedTagForCategory(ECropCategory Category);
+
+    /** True if this zone can currently post plant jobs based on available seed stock. */
+    bool HasSeedsForZone(const FWorldForgeFarmZone& Zone) const;
 
     /** Find a const zone by ID. Returns nullptr if not found. */
     const FWorldForgeFarmZone* FindZone(int32 ZoneID) const;

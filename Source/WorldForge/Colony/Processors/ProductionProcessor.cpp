@@ -511,6 +511,47 @@ void UProductionProcessor::CompleteTask(
         }
         else if (Task.JobTag == TAG_Job_Farm_Plant)
         {
+            // v2: Consume 1 seed from stockpile before spawning the crop.
+            // If no seeds remain, the plant still completes (the job was
+            // already validated when posted). This prevents a colonist
+            // walking to an empty field for nothing.
+            FWorldForgeFarmZone PlantZoneData;
+            if (SM && FarmSub->GetZoneByID(ZoneID, PlantZoneData))
+            {
+                const FGameplayTag SeedTag = PlantZoneData.SeedItemTag;
+
+                if (SeedTag.IsValid())
+                {
+                    const bool bConsumed = SM->ConsumeFromStockpile(
+                        Task.SettlementID, SeedTag, 1);
+
+                    UE_LOG(
+                        LogTemp,
+                        Log,
+                        TEXT("[ProductionProcessor] Seed consumed: %s x1 = %s Settlement=%d"),
+                        *SeedTag.ToString(),
+                        bConsumed ? TEXT("OK") : TEXT("INSUFFICIENT"),
+                        Task.SettlementID);
+
+                    if (!bConsumed)
+                    {
+                        // No seeds available. Fail gracefully — the tile
+                        // stays as bare soil and will retry next tick when
+                        // seeds are restocked.
+                        UE_LOG(
+                            LogTemp,
+                            Warning,
+                            TEXT("[ProductionProcessor] Plant aborted: no seeds. Zone=%d Tile=(%d,%d)"),
+                            ZoneID,
+                            TilePos.X,
+                            TilePos.Y);
+
+                        FailTaskAndReleaseAgent(Task, Agent, World);
+                        return;
+                    }
+                }
+            }
+
             FarmSub->OnPlantCompleted(ZoneID, TilePos);
 
             UE_LOG(

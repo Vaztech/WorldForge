@@ -61,6 +61,7 @@ namespace
         Tile.bPlantJobPending = false;
         Tile.bWaterJobPending = false;
         Tile.bHarvestJobPending = false;
+        Tile.bAwaitingManualReplant = false;
         Tile.LastPrepSoilJobStep = INDEX_NONE;
         Tile.LastPlantJobStep = INDEX_NONE;
         Tile.LastWaterJobStep = INDEX_NONE;
@@ -214,6 +215,9 @@ int32 UFarmingSubsystem::CreateFarmZone(
 
     Zone.InitTiles();
 
+    // v2: Resolve and cache the seed tag for this crop category.
+    Zone.SeedItemTag = GetSeedTagForCategory(Category);
+
     const int32 NewID = Zone.ZoneID;
     FarmZones.Add(MoveTemp(Zone));
 
@@ -325,6 +329,7 @@ void UFarmingSubsystem::ChangeFarmZoneCrop(
 
     Zone->CropCategory = NewCategory;
     Zone->CropRowName = NewCropRow;
+    Zone->SeedItemTag = GetSeedTagForCategory(NewCategory);
     Zone->PlantedCount = 0;
     Zone->ReadyCount = 0;
     Zone->DeadCount = 0;
@@ -457,8 +462,10 @@ void UFarmingSubsystem::TickFarmZones(int32 StepNumber)
                     Tile.HarvestedStep = StepNumber;
                 }
 
-                if (Zone.bAutoReplant &&
-                    (StepNumber - Tile.HarvestedStep) >= WF_FarmHarvestedVisualHoldSteps)
+                const bool bVisualHoldExpired =
+                    (StepNumber - Tile.HarvestedStep) >= WF_FarmHarvestedVisualHoldSteps;
+
+                if (bVisualHoldExpired)
                 {
                     AActor* HarvestedActor = Tile.CropActor.Get();
 
@@ -467,7 +474,32 @@ void UFarmingSubsystem::TickFarmZones(int32 StepNumber)
                         SafeAdapter->DespawnCropPatch(HarvestedActor);
                     }
 
+                    // v2: After visual hold, decide replant policy.
+                    // Preserve soil prep state so the field stays "prepared".
+                    const bool bWasPrepared = Tile.bSoilPrepared;
+                    const int32 PrevSoilStep = Tile.SoilPreparedStep;
+
                     WF_ResetFarmTileRuntimeState(Tile);
+
+                    // Field stays prepared — only the crop is gone.
+                    Tile.bSoilPrepared = bWasPrepared;
+                    Tile.SoilPreparedStep = PrevSoilStep;
+                    Tile.GrowthStage = bWasPrepared
+                        ? ECropGrowthStage::BareSoil
+                        : ECropGrowthStage::None;
+
+                    if (Zone.bAutoReplant)
+                    {
+                        // Auto-replant: tile goes straight back into the
+                        // plant queue (seed check happens in BareSoil handler).
+                        Tile.bAwaitingManualReplant = false;
+                    }
+                    else
+                    {
+                        // Manual replant: tile waits until player issues
+                        // ManualReplantTile() or ManualReplantZone().
+                        Tile.bAwaitingManualReplant = true;
+                    }
                 }
                 else
                 {
@@ -653,6 +685,19 @@ void UFarmingSubsystem::TickFarmZones(int32 StepNumber)
                         }
                     }
 
+                    break;
+                }
+
+                // v2: Skip plant posting if tile is waiting for manual replant.
+                if (Tile.bAwaitingManualReplant)
+                {
+                    break;
+                }
+
+                // v2: Seed-gated planting — only post Plant job if stockpile
+                // has at least 1 seed for this crop category.
+                if (!HasSeedsForZone(Zone))
+                {
                     break;
                 }
 
@@ -1217,6 +1262,10 @@ void UFarmingSubsystem::OnHarvestCompleted(
         Tile.LastGrowthAdvanceStep = INDEX_NONE;
         Tile.HarvestedStep = INDEX_NONE;
 
+        // v2: Pre-set replant intent. TickFarmZones will finalize
+        // once the visual hold expires.
+        Tile.bAwaitingManualReplant = !Zone->bAutoReplant;
+
         break;
     }
 
@@ -1335,6 +1384,189 @@ void UFarmingSubsystem::RestoreZoneRecords(
         TEXT("[FarmingSubsystem] Restored %d zone records. NextID=%d"),
         FarmZones.Num(),
         NextZoneID);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// v2: Replant Policy
+// ═══════════════════════════════════════════════════════════════════
+
+void UFarmingSubsystem::SetAutoReplant(int32 ZoneID, bool bEnable)
+{
+    FWorldForgeFarmZone* Zone = FindZoneMutable(ZoneID);
+    if (!Zone)
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[FarmingSubsystem] SetAutoReplant ignored: ZoneID=%d not found."),
+            ZoneID);
+
+        return;
+    }
+
+    Zone->bAutoReplant = bEnable;
+
+    // If enabling auto-replant, clear manual-wait flags on all
+    // harvested tiles so they re-enter the plant queue immediately.
+    if (bEnable)
+    {
+        for (FFarmTileRecord& Tile : Zone->Tiles)
+        {
+            if (Tile.bAwaitingManualReplant)
+            {
+                Tile.bAwaitingManualReplant = false;
+            }
+        }
+    }
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[FarmingSubsystem] Zone %d auto-replant=%s"),
+        ZoneID,
+        bEnable ? TEXT("true") : TEXT("false"));
+}
+
+bool UFarmingSubsystem::ManualReplantTile(int32 ZoneID, FIntPoint TilePos)
+{
+    FWorldForgeFarmZone* Zone = FindZoneMutable(ZoneID);
+    if (!Zone)
+    {
+        return false;
+    }
+
+    for (FFarmTileRecord& Tile : Zone->Tiles)
+    {
+        if (Tile.TilePos == TilePos && Tile.bAwaitingManualReplant)
+        {
+            Tile.bAwaitingManualReplant = false;
+
+            // If the tile still has a harvested actor, despawn it now
+            // so the next tick sees bare soil and posts a Plant job.
+            UWildHarvestAdapter* SafeAdapter = GetWildHarvestAdapterSafe();
+            AActor* OldActor = Tile.CropActor.Get();
+
+            if (IsValid(SafeAdapter) && IsValid(OldActor) && !OldActor->IsActorBeingDestroyed())
+            {
+                SafeAdapter->DespawnCropPatch(OldActor);
+            }
+
+            const bool bWasPrepared = Tile.bSoilPrepared;
+            const int32 PrevSoilStep = Tile.SoilPreparedStep;
+
+            Tile.CropActor = nullptr;
+            Tile.bPlanted = false;
+            Tile.bPlantJobPending = false;
+            Tile.bWaterJobPending = false;
+            Tile.bHarvestJobPending = false;
+            Tile.WaterLevel = 0.0f;
+            Tile.SimGrowthStageIndex = INDEX_NONE;
+            Tile.LastGrowthAdvanceStep = INDEX_NONE;
+            Tile.PlantedStep = INDEX_NONE;
+            Tile.HarvestedStep = INDEX_NONE;
+
+            Tile.bSoilPrepared = bWasPrepared;
+            Tile.SoilPreparedStep = PrevSoilStep;
+            Tile.GrowthStage = bWasPrepared
+                ? ECropGrowthStage::BareSoil
+                : ECropGrowthStage::None;
+
+            UE_LOG(LogTemp, Log,
+                TEXT("[FarmingSubsystem] ManualReplantTile Zone=%d Tile=(%d,%d) SoilPrepared=%s"),
+                ZoneID,
+                TilePos.X,
+                TilePos.Y,
+                bWasPrepared ? TEXT("true") : TEXT("false"));
+
+            return true;
+        }
+    }
+
+    return false;
+}
+
+int32 UFarmingSubsystem::ManualReplantZone(int32 ZoneID)
+{
+    FWorldForgeFarmZone* Zone = FindZoneMutable(ZoneID);
+    if (!Zone)
+    {
+        return 0;
+    }
+
+    int32 Count = 0;
+
+    for (FFarmTileRecord& Tile : Zone->Tiles)
+    {
+        if (Tile.bAwaitingManualReplant)
+        {
+            if (ManualReplantTile(ZoneID, Tile.TilePos))
+            {
+                ++Count;
+            }
+        }
+    }
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[FarmingSubsystem] ManualReplantZone Zone=%d ResetTiles=%d"),
+        ZoneID,
+        Count);
+
+    return Count;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// v2: Seed Resolution
+// ═══════════════════════════════════════════════════════════════════
+
+FGameplayTag UFarmingSubsystem::GetSeedTagForCategory(ECropCategory Category)
+{
+    // Use soft gameplay-tag lookup instead of native TAG_Item_Seed_* constants.
+    // This keeps farming compiling even before the seed tags are promoted to native tags.
+    const bool bErrorIfNotFound = false;
+
+    switch (Category)
+    {
+    case ECropCategory::Grains:
+        return FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Item.Seed.Grain")), bErrorIfNotFound);
+
+    case ECropCategory::Berries:
+        return FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Item.Seed.Berry")), bErrorIfNotFound);
+
+    case ECropCategory::Herbs:
+        return FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Item.Seed.Herb")), bErrorIfNotFound);
+
+    case ECropCategory::Mushrooms:
+        return FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Item.Seed.Mushroom")), bErrorIfNotFound);
+
+    case ECropCategory::RootVegetables:
+        return FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Item.Seed.RootVegetable")), bErrorIfNotFound);
+
+    case ECropCategory::SaladGarden:
+        return FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Item.Seed.SaladGarden")), bErrorIfNotFound);
+
+    default:
+        return FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Item.Seed.Grain")), bErrorIfNotFound);
+    }
+}
+
+bool UFarmingSubsystem::HasSeedsForZone(const FWorldForgeFarmZone& Zone) const
+{
+    if (!Zone.SeedItemTag.IsValid())
+    {
+        // No seed tag means seed system is not configured for this zone.
+        // Fall back to allowing planting (backward compat).
+        return true;
+    }
+
+    UWorld* World = GetWorld();
+    if (!World)
+    {
+        return false;
+    }
+
+    const USettlementManager* SM = World->GetSubsystem<USettlementManager>();
+    if (!SM)
+    {
+        return false;
+    }
+
+    return SM->HasStockpile(Zone.SettlementID, Zone.SeedItemTag, 1);
 }
 
 // ═══════════════════════════════════════════════════════════════════

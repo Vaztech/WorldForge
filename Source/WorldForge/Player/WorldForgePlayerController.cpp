@@ -8,7 +8,7 @@
 
 #include "Player/BuildModeManager.h"
 #include "Player/BuildModeTypes.h"
-#include "UI/BuildModeWidget.h"
+
 
 #include "Blueprint/UserWidget.h"
 #include "InputCoreTypes.h"
@@ -74,17 +74,23 @@ AWorldForgePlayerController::AWorldForgePlayerController()
         UE_LOG(LogWorldForgePC, Warning, TEXT("[WorldForgePC] Native fallback failed to find IMC_BuildMode."));
     }
 
-    static ConstructorHelpers::FClassFinder<UBuildModeWidget> BuildWidgetFinder(
-        TEXT("/Game/WorldForge/WidgetsBlueprints/WBP_BuildMode"));
+    // ---------------------------------------------------------------------
+    // Build widget class is intentionally NOT hard-loaded here.
+    //
+    // WBP_BuildMode is currently producing WidgetTree / Outer load errors.
+    // ConstructorHelpers::FClassFinder would force-load that Blueprint during
+    // controller class construction and trigger the asset load failure before
+    // the editor has a chance to open cleanly.
+    //
+    // Assign BuildWidgetClass in BP_WorldForgePlayerController Class Defaults
+    // after WBP_BuildMode is repaired, recompiled, or replaced.
+    // ---------------------------------------------------------------------
+    BuildWidgetClass = nullptr;
 
-    if (BuildWidgetFinder.Succeeded())
-    {
-        BuildWidgetClass = BuildWidgetFinder.Class;
-    }
-    else
-    {
-        UE_LOG(LogWorldForgePC, Warning, TEXT("[WorldForgePC] Native fallback failed to find WBP_BuildMode."));
-    }
+    UE_LOG(
+        LogWorldForgePC,
+        Log,
+        TEXT("[WorldForgePC] Native hard-load for WBP_BuildMode disabled. Assign BuildWidgetClass in Blueprint defaults after repairing the widget."));
 }
 
 void AWorldForgePlayerController::BeginPlay()
@@ -131,7 +137,7 @@ void AWorldForgePlayerController::BeginPlay()
 
     if (BuildWidgetClass)
     {
-        BuildWidgetInstance = CreateWidget<UBuildModeWidget>(this, BuildWidgetClass);
+        BuildWidgetInstance = CreateWidget<UUserWidget>(this, BuildWidgetClass);
 
         if (BuildWidgetInstance)
         {
@@ -140,6 +146,8 @@ void AWorldForgePlayerController::BeginPlay()
             bBuildWidgetVisible = false;
 
             UE_LOG(LogWorldForgePC, Log, TEXT("[WorldForgePC] WBP_BuildMode created (hidden)."));
+
+            
         }
     }
     else

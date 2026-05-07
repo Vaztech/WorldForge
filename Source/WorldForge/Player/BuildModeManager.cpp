@@ -1816,6 +1816,7 @@ bool UBuildModeManager::CommitFarmZone()
     const ECropCategory Category = ECropCategory::Grains;
     const FName CropRow = FName(TEXT("LP_Wheat"));
 
+    // v2: Auto-replant OFF by default. Requires Crop Rotation tech unlock.
     const int32 ZoneID = FarmingSub->CreateFarmZone(
         SettlementID,
         LocalOrigin,
@@ -1823,7 +1824,7 @@ bool UBuildModeManager::CommitFarmZone()
         SizeY,
         Category,
         CropRow,
-        true);
+        false);
 
     if (ZoneID == INDEX_NONE)
     {
@@ -1858,7 +1859,7 @@ bool UBuildModeManager::CommitFarmZone()
     UpdateGhost();
 
     BroadcastFeedback(FString::Printf(
-        TEXT("Farm zone created: %dx%d wheat field."),
+        TEXT("Farm zone created: %dx%d wheat field. Auto-replant: OFF."),
         SizeX,
         SizeY));
 

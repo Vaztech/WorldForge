@@ -8,12 +8,12 @@
 #include "CoreMinimal.h"
 #include "GameFramework/PlayerController.h"
 #include "InputActionValue.h"
+#include "Blueprint/UserWidget.h"
 #include "WorldForgePlayerController.generated.h"
 
 class UInputMappingContext;
 class UInputAction;
 class UBuildModeManager;
-class UBuildModeWidget;
 class AWorldForgeCamera;
 class USimulationTimeManager;
 class AWorldForgeMiniMapHUD;
@@ -81,8 +81,6 @@ protected:
     // ================================
     // Global Input
     // ================================
-    // Space = pause/unpause simulation.
-    // M     = show/hide HUD minimap.
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input|WorldForge|Global")
     TObjectPtr<UInputAction> IA_TogglePause;
@@ -93,8 +91,6 @@ protected:
     // ================================
     // Debug / Legacy Tool Input
     // ================================
-    // Dig is no longer intended as a player-facing separate mode.
-    // The future player-facing tool should be unified under Mine/Excavate.
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input|WorldForge|Debug")
     TObjectPtr<UInputAction> IA_ToggleDigMode;
@@ -106,8 +102,11 @@ protected:
     // UI
     // ================================
 
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UI|WorldForge")
-    TSubclassOf<UBuildModeWidget> BuildWidgetClass;
+    UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "WorldForge|UI")
+    TSubclassOf<UUserWidget> BuildWidgetClass;
+
+    UPROPERTY(BlueprintReadOnly, Category = "WorldForge|UI")
+    TObjectPtr<UUserWidget> BuildWidgetInstance;
 
     // ================================
     // Cached runtime refs
@@ -115,9 +114,6 @@ protected:
 
     UPROPERTY(Transient)
     TObjectPtr<UBuildModeManager> BuildModeManager;
-
-    UPROPERTY(Transient)
-    TObjectPtr<UBuildModeWidget> BuildWidgetInstance;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input|WorldForge|Build", meta = (ClampMin = "0.05", ClampMax = "1.0"))
     float BuildClickDebounceSeconds = 0.2f;
@@ -146,7 +142,6 @@ private:
     void OnMiniMapToggle(const FInputActionValue& Value);
 
     // Legacy fallback key handlers.
-    // These help while Enhanced Input mappings are being cleaned up.
     void OnPauseKeyPressed();
     void OnMiniMapKeyPressed();
 

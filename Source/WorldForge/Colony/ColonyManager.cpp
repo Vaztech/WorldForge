@@ -11,6 +11,7 @@
 #include "WorldForgeTags.h"
 #include "Player/WorldForgeCamera.h"
 #include "WorldMapSubsystem.h"
+#include "Embark/EmbarkLoadoutSubsystem.h"
 
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
@@ -425,9 +426,9 @@ void AColonyManager::SetupAgents()
         NewAgent.State = EAgentState::Idle;
         NewAgent.RaceTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Race.Dwarf")));
 
-// Roll starting personality/gameplay traits for this colonist.
-// Future us: this same generator can later be reused for NPCs, animals,
-// children, inherited traits, and world-spawned entities.
+        // Roll starting personality/gameplay traits for this colonist.
+        // Future us: this same generator can later be reused for NPCs, animals,
+        // children, inherited traits, and world-spawned entities.
         NewAgent.TraitTags = UWorldForgeTraitGenerator::RollRandomTraitsForNewEntity(
             NewAgent.RaceTag,
             NewAgent.AgentID + 12345,
@@ -487,9 +488,34 @@ void AColonyManager::SetupInitialResources()
         return;
     }
 
+    // Tiny legacy fallback stockpile so old tests still work even if embark loadout fails.
     SettlementMgr->AddToStockpile(SettlementID, TAG_Item_Food, 5);
     SettlementMgr->AddToStockpile(SettlementID, TAG_Item_Wood, 2);
     SettlementMgr->AddToStockpile(SettlementID, TAG_Item_Stone, 2);
+
+    UWorld* World = GetWorld();
+    if (!World)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[ColonyManager] Embark loadout skipped: World is null."));
+        return;
+    }
+
+    UEmbarkLoadoutSubsystem* EmbarkLoadout = World->GetSubsystem<UEmbarkLoadoutSubsystem>();
+    if (!EmbarkLoadout)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[ColonyManager] Embark loadout skipped: UEmbarkLoadoutSubsystem missing."));
+        return;
+    }
+
+    const bool bApplied = EmbarkLoadout->ApplyDebugStarterLoadout(SettlementID);
+
+    UE_LOG(
+        LogTemp,
+        Log,
+        TEXT("[ColonyManager] Embark starter loadout applied=%s SettlementID=%d"),
+        bApplied ? TEXT("true") : TEXT("false"),
+        SettlementID
+    );
 }
 
 void AColonyManager::StartSimulation()
