@@ -75,6 +75,26 @@ public:
         bool bAutoReplant = true);
 
     /**
+     * Create a new farm zone from exact settlement-local cells.
+     *
+     * This is the long-term player-selection path:
+     * - 1 clicked cell creates 1 farm tile
+     * - 3 separate clicked cells create 3 farm tiles
+     * - 2x5 drag creates exactly 10 farm tiles
+     *
+     * FarmGridOrigin is the absolute voxel/grid origin used to convert local farm
+     * cells back into world grid cells for crop visual placement.
+     * Origin/SizeX/SizeY are cached as the bounding box for debug/UI only.
+     */
+    int32 CreateFarmZoneFromCells(
+        int32 SettlementID,
+        FIntPoint FarmGridOrigin,
+        const TSet<FIntPoint>& LocalCells,
+        ECropCategory Category,
+        FName CropRow,
+        bool bAutoReplant = true);
+
+    /**
      * Disband (soft-delete) a farm zone.
      * Sets state to Disbanded and despawns crop actors through the adapter.
      */

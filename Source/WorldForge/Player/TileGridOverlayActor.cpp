@@ -7,6 +7,7 @@
 #include "Engine/StaticMesh.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "Engine/World.h"
+#include "Engine/DataTable.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogGridOverlay, Log, All);
 
@@ -20,16 +21,38 @@ ATileGridOverlayActor::ATileGridOverlayActor()
 
 	RootComponent = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
 
-	// --- Tile HISM (selected + drag cells) ---
-	TileMeshHISM = CreateDefaultSubobject<UHierarchicalInstancedStaticMeshComponent>(TEXT("TileMeshHISM"));
-	TileMeshHISM->SetupAttachment(RootComponent);
-	TileMeshHISM->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	TileMeshHISM->SetCastShadow(false);
-	TileMeshHISM->NumCustomDataFloats = 5; // R, G, B, A, BorderAlpha
-	TileMeshHISM->SetGenerateOverlapEvents(false);
-	TileMeshHISM->bDisableCollision = true;
+	auto ConfigureTileHISM = [this](UHierarchicalInstancedStaticMeshComponent* HISM)
+		{
+			if (!HISM)
+			{
+				return;
+			}
 
-	// --- Icon HISM (per-selected-cell mode icon) ---
+			HISM->SetupAttachment(RootComponent);
+			HISM->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+			HISM->SetCastShadow(false);
+			HISM->NumCustomDataFloats = 5; // R, G, B, A, BorderAlpha
+			HISM->SetGenerateOverlapEvents(false);
+			HISM->bDisableCollision = true;
+		};
+
+	// --- Neutral base grid cells around hover ---
+	BaseGridHISM = CreateDefaultSubobject<UHierarchicalInstancedStaticMeshComponent>(TEXT("BaseGridHISM"));
+	ConfigureTileHISM(BaseGridHISM);
+
+	// --- Tile HISM (active selected cells only) ---
+	TileMeshHISM = CreateDefaultSubobject<UHierarchicalInstancedStaticMeshComponent>(TEXT("TileMeshHISM"));
+	ConfigureTileHISM(TileMeshHISM);
+
+	// --- Drag-preview HISM (mouse-held preview only) ---
+	DragPreviewMeshHISM = CreateDefaultSubobject<UHierarchicalInstancedStaticMeshComponent>(TEXT("DragPreviewMeshHISM"));
+	ConfigureTileHISM(DragPreviewMeshHISM);
+
+	// --- Persistent confirmed designation tile layer ---
+	ConfirmedTileMeshHISM = CreateDefaultSubobject<UHierarchicalInstancedStaticMeshComponent>(TEXT("ConfirmedTileMeshHISM"));
+	ConfigureTileHISM(ConfirmedTileMeshHISM);
+
+	// --- Icon HISM (active preview/selection mode only) ---
 	IconMeshHISM = CreateDefaultSubobject<UHierarchicalInstancedStaticMeshComponent>(TEXT("IconMeshHISM"));
 	IconMeshHISM->SetupAttachment(RootComponent);
 	IconMeshHISM->SetCollisionEnabled(ECollisionEnabled::NoCollision);
@@ -54,44 +77,110 @@ void ATileGridOverlayActor::BeginPlay()
 {
 	Super::BeginPlay();
 
+	// Keep the overlay close to the voxel surface now that rendering is verified.
+	// The values below are intentionally small enough to read as a surface grid
+	// while still avoiding most voxel-terrain z-fighting.
+	ZOffset = FMath::Max(ZOffset, 25.0f);
+	IconZOffset = FMath::Max(IconZOffset, 6.0f);
+	VisibleGridRadius = FMath::Max(VisibleGridRadius, 1);
+
 	EnsurePlaneMesh();
+
+	if (!TileMaterialBase)
+	{
+		TileMaterialBase = LoadObject<UMaterialInterface>(
+			nullptr,
+			TEXT("/Game/WorldForge/Visual/UI/M_GridTile.M_GridTile"));
+
+		UE_LOG(LogGridOverlay, Warning,
+			TEXT("TileMaterialBase fallback load: %s"),
+			TileMaterialBase ? TEXT("OK") : TEXT("FAILED"));
+	}
+
+	if (!IconMaterialBase)
+	{
+		IconMaterialBase = LoadObject<UMaterialInterface>(
+			nullptr,
+			TEXT("/Game/WorldForge/Visual/UI/M_GridIcon.M_GridIcon"));
+
+		UE_LOG(LogGridOverlay, Warning,
+			TEXT("IconMaterialBase fallback load: %s"),
+			IconMaterialBase ? TEXT("OK") : TEXT("FAILED"));
+	}
+
+	if (!HoverMaterialBase)
+	{
+		HoverMaterialBase = LoadObject<UMaterialInterface>(
+			nullptr,
+			TEXT("/Game/WorldForge/Visual/UI/M_GridHover.M_GridHover"));
+
+		UE_LOG(LogGridOverlay, Warning,
+			TEXT("HoverMaterialBase fallback load: %s"),
+			HoverMaterialBase ? TEXT("OK") : TEXT("FAILED"));
+	}
+
+	if (!DesignationStyleTable)
+	{
+		DesignationStyleTable = LoadObject<UDataTable>(
+			nullptr,
+			TEXT("/Game/WorldForge/Visual/UI/DT_GridDesignationStyles.DT_GridDesignationStyles"));
+	}
 
 	// Assign mesh to all components
 	if (CellPlaneMesh)
 	{
-		TileMeshHISM->SetStaticMesh(CellPlaneMesh);
-		IconMeshHISM->SetStaticMesh(CellPlaneMesh);
-		HoverMeshComp->SetStaticMesh(CellPlaneMesh);
+		if (BaseGridHISM) { BaseGridHISM->SetStaticMesh(CellPlaneMesh); }
+		if (TileMeshHISM) { TileMeshHISM->SetStaticMesh(CellPlaneMesh); }
+		if (DragPreviewMeshHISM) { DragPreviewMeshHISM->SetStaticMesh(CellPlaneMesh); }
+		if (ConfirmedTileMeshHISM) { ConfirmedTileMeshHISM->SetStaticMesh(CellPlaneMesh); }
+		if (IconMeshHISM) { IconMeshHISM->SetStaticMesh(CellPlaneMesh); }
+		if (HoverMeshComp) { HoverMeshComp->SetStaticMesh(CellPlaneMesh); }
 	}
 
-	// Create MIDs for icon + hover
+	if (TileMaterialBase)
+	{
+		if (BaseGridHISM) { BaseGridHISM->SetMaterial(0, TileMaterialBase); }
+		if (TileMeshHISM) { TileMeshHISM->SetMaterial(0, TileMaterialBase); }
+		if (DragPreviewMeshHISM) { DragPreviewMeshHISM->SetMaterial(0, TileMaterialBase); }
+		if (ConfirmedTileMeshHISM) { ConfirmedTileMeshHISM->SetMaterial(0, TileMaterialBase); }
+	}
+
 	if (IconMaterialBase)
 	{
 		IconMID = UMaterialInstanceDynamic::Create(IconMaterialBase, this);
 		IconMeshHISM->SetMaterial(0, IconMID);
 	}
+
 	if (HoverMaterialBase)
 	{
 		HoverMID = UMaterialInstanceDynamic::Create(HoverMaterialBase, this);
 		HoverMeshComp->SetMaterial(0, HoverMID);
 	}
-	if (TileMaterialBase)
-	{
-		TileMeshHISM->SetMaterial(0, TileMaterialBase);
-	}
+
+	LoadDesignationStylesFromDataTable();
 
 	// Start hidden
 	SetActorHiddenInGame(true);
 	bOverlayVisible = false;
 
-	UE_LOG(LogGridOverlay, Log, TEXT("TileGridOverlayActor ready. CellSize=%.0f ZOffset=%.1f"), CellSizeUU, ZOffset);
+	UE_LOG(LogGridOverlay, Log,
+		TEXT("TileGridOverlayActor ready. CellSize=%.0f ZOffset=%.1f VisibleGridRadius=%d"),
+		CellSizeUU,
+		ZOffset,
+		VisibleGridRadius);
 }
 
 void ATileGridOverlayActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	BaseGridCells.Empty();
 	SelectedCells.Empty();
 	SelectedIcons.Empty();
 	DragCells.Empty();
+	ConfirmedDesignationCells.Empty();
+	ConfirmedCellTerrainZ.Empty();
+	ConfirmedTileInstances.Empty();
+	IconHISMsByDesignation.Empty();
+	IconMIDsByDesignation.Empty();
 	Super::EndPlay(EndPlayReason);
 }
 
@@ -110,6 +199,10 @@ void ATileGridOverlayActor::SetActiveMode(EBuildToolMode Mode)
 	if (CurrentMode == Mode) return;
 
 	CurrentMode = Mode;
+
+	// DataTable styles are authoritative if present. This call is cheap after load
+	// and prevents default hardcoded styles from overwriting editor data.
+	LoadDesignationStylesFromDataTable();
 
 	if (const FGridOverlayStyle* Found = RegisteredStyles.Find(Mode))
 	{
@@ -133,8 +226,11 @@ void ATileGridOverlayActor::SetActiveMode(EBuildToolMode Mode)
 	// Recolor all existing instances
 	RebuildAllInstances();
 
-	UE_LOG(LogGridOverlay, Log, TEXT("Mode changed to %d. Selected=%d DragPreview=%d"),
-		static_cast<int32>(Mode), SelectedCells.Num(), DragCells.Num());
+	UE_LOG(LogGridOverlay, Log, TEXT("Designation changed to %d. Selected=%d DragPreview=%d BaseGrid=%d"),
+		static_cast<int32>(ToolModeToDesignationType(Mode)),
+		SelectedCells.Num(),
+		DragCells.Num(),
+		BaseGridCells.Num());
 }
 
 void ATileGridOverlayActor::SetCellSizeUU(float InSize)
@@ -152,6 +248,8 @@ void ATileGridOverlayActor::SetHoveredCell(const FIntVector& VoxelCoord, float T
 {
 	HoveredCellCoord = VoxelCoord;
 	bHoverActive = true;
+
+	RebuildBaseGridAround(VoxelCoord, TerrainZ);
 
 	const FTransform CellXform = MakeCellTransform(VoxelCoord, TerrainZ);
 	HoverMeshComp->SetWorldTransform(CellXform);
@@ -180,7 +278,7 @@ void ATileGridOverlayActor::AddSelectedCell(const FIntVector& VoxelCoord, float 
 	{
 		const FTransform IconXform = MakeIconTransform(VoxelCoord, TerrainZ);
 		const int32 IconIdx = IconMeshHISM->AddInstance(IconXform, /*bWorldSpace=*/true);
-		SetInstanceColor(IconMeshHISM, IconIdx, ActiveStyle.TileColor);
+		SetInstanceColor(IconMeshHISM, IconIdx, ActiveStyle.IconTint);
 		SelectedIcons.Add(VoxelCoord, IconIdx);
 	}
 
@@ -225,7 +323,7 @@ void ATileGridOverlayActor::SetSelectedCells(const TMap<FIntVector, float>& Cell
 		{
 			const FTransform IconXform = MakeIconTransform(Pair.Key, Pair.Value);
 			const int32 IconIdx = IconMeshHISM->AddInstance(IconXform, /*bWorldSpace=*/true);
-			SetInstanceColor(IconMeshHISM, IconIdx, ActiveStyle.TileColor);
+			SetInstanceColor(IconMeshHISM, IconIdx, ActiveStyle.IconTint);
 			SelectedIcons.Add(Pair.Key, IconIdx);
 		}
 	}
@@ -277,7 +375,267 @@ void ATileGridOverlayActor::SetDragPreviewCells(const TMap<FIntVector, float>& C
 
 void ATileGridOverlayActor::ClearDragPreview()
 {
-	ClearHISMLayer(TileMeshHISM, DragCells);
+	ClearHISMLayer(DragPreviewMeshHISM, DragCells);
+}
+
+void ATileGridOverlayActor::ClearBaseGrid()
+{
+	ClearHISMLayer(BaseGridHISM, BaseGridCells);
+
+	if (BaseGridHISM)
+	{
+		BaseGridHISM->MarkRenderStateDirty();
+	}
+
+	UE_LOG(LogGridOverlay, Verbose, TEXT("Base grid cleared."));
+}
+
+// ─────────────────────────────────────────────────────────────
+// Persistent confirmed designations
+// ─────────────────────────────────────────────────────────────
+
+EGridDesignationType ATileGridOverlayActor::ToolModeToDesignationType(EBuildToolMode Mode) const
+{
+	switch (Mode)
+	{
+	case EBuildToolMode::Place:
+		return EGridDesignationType::Build;
+	case EBuildToolMode::Mine:
+		return EGridDesignationType::Mine;
+	case EBuildToolMode::Farm:
+		return EGridDesignationType::Farm;
+	case EBuildToolMode::Dig:
+		return EGridDesignationType::Mine;
+	case EBuildToolMode::Remove:
+		return EGridDesignationType::Erase;
+	default:
+		return EGridDesignationType::None;
+	}
+}
+
+FGridOverlayStyle ATileGridOverlayActor::GetStyleForDesignation(EGridDesignationType DesignationType) const
+{
+	EBuildToolMode Mode = EBuildToolMode::None;
+
+	switch (DesignationType)
+	{
+	case EGridDesignationType::Build:
+		Mode = EBuildToolMode::Place;
+		break;
+	case EGridDesignationType::Mine:
+		Mode = EBuildToolMode::Mine;
+		break;
+	case EGridDesignationType::Farm:
+		Mode = EBuildToolMode::Farm;
+		break;
+	case EGridDesignationType::Erase:
+		Mode = EBuildToolMode::Remove;
+		break;
+	default:
+		break;
+	}
+
+	if (const FGridOverlayStyle* FoundStyle = RegisteredStyles.Find(Mode))
+	{
+		return *FoundStyle;
+	}
+
+	return ActiveStyle;
+}
+
+void ATileGridOverlayActor::AddConfirmedDesignationCell(
+	const FIntVector& VoxelCoord,
+	float TerrainZ,
+	EGridDesignationType DesignationType)
+{
+	if (DesignationType == EGridDesignationType::None)
+	{
+		return;
+	}
+
+	FGridDesignationCellVisual CellVisual;
+	CellVisual.VoxelCoord = VoxelCoord;
+	CellVisual.TerrainZ = TerrainZ;
+	CellVisual.DesignationType = DesignationType;
+	CellVisual.VisualState = EGridDesignationVisualState::Confirmed;
+
+	ConfirmedDesignationCells.Add(VoxelCoord, CellVisual);
+	ConfirmedCellTerrainZ.Add(VoxelCoord, TerrainZ);
+
+	AddConfirmedVisualInstance(CellVisual);
+	SetActorHiddenInGame(false);
+	bOverlayVisible = true;
+
+	UE_LOG(LogGridOverlay, Log,
+		TEXT("Confirmed designation cell (%d,%d,%d) Type=%d ConfirmedTotal=%d"),
+		VoxelCoord.X,
+		VoxelCoord.Y,
+		VoxelCoord.Z,
+		static_cast<int32>(DesignationType),
+		ConfirmedDesignationCells.Num());
+}
+
+void ATileGridOverlayActor::SetConfirmedDesignationCells(
+	EGridDesignationType DesignationType,
+	const TMap<FIntVector, float>& CellsWithTerrainZ)
+{
+	if (DesignationType == EGridDesignationType::None)
+	{
+		return;
+	}
+
+	for (const TPair<FIntVector, float>& Pair : CellsWithTerrainZ)
+	{
+		AddConfirmedDesignationCell(Pair.Key, Pair.Value, DesignationType);
+	}
+
+	UE_LOG(LogGridOverlay, Log,
+		TEXT("Batch confirmed %d cells for designation %d"),
+		CellsWithTerrainZ.Num(),
+		static_cast<int32>(DesignationType));
+}
+
+void ATileGridOverlayActor::CommitSelectedCellsAsConfirmed(EGridDesignationType DesignationType)
+{
+	if (DesignationType == EGridDesignationType::None)
+	{
+		DesignationType = ToolModeToDesignationType(CurrentMode);
+	}
+
+	if (DesignationType == EGridDesignationType::None)
+	{
+		return;
+	}
+
+	TMap<FIntVector, float> Snapshot;
+
+	for (const TPair<FIntVector, int32>& Pair : SelectedCells)
+	{
+		FTransform Xform;
+		if (TileMeshHISM && TileMeshHISM->GetInstanceTransform(Pair.Value, Xform, true))
+		{
+			Snapshot.Add(Pair.Key, Xform.GetLocation().Z - ZOffset);
+		}
+		else
+		{
+			Snapshot.Add(Pair.Key, SelfSampleTerrainZ(Pair.Key));
+		}
+	}
+
+	SetConfirmedDesignationCells(DesignationType, Snapshot);
+}
+
+void ATileGridOverlayActor::ClearConfirmedDesignationCells(EGridDesignationType DesignationType)
+{
+	if (DesignationType == EGridDesignationType::None)
+	{
+		return;
+	}
+
+	TArray<FIntVector> ToRemove;
+
+	for (const TPair<FIntVector, FGridDesignationCellVisual>& Pair : ConfirmedDesignationCells)
+	{
+		if (Pair.Value.DesignationType == DesignationType)
+		{
+			ToRemove.Add(Pair.Key);
+		}
+	}
+
+	for (const FIntVector& Coord : ToRemove)
+	{
+		ConfirmedDesignationCells.Remove(Coord);
+		ConfirmedCellTerrainZ.Remove(Coord);
+	}
+
+	RebuildAllInstances();
+}
+
+void ATileGridOverlayActor::ClearAllConfirmedDesignationCells()
+{
+	ConfirmedDesignationCells.Empty();
+	ConfirmedCellTerrainZ.Empty();
+	RebuildAllInstances();
+}
+
+void ATileGridOverlayActor::AddConfirmedVisualInstance(const FGridDesignationCellVisual& CellVisual)
+{
+	if (!ConfirmedTileMeshHISM || !CellPlaneMesh)
+	{
+		return;
+	}
+
+	const FGridOverlayStyle Style = GetStyleForDesignation(CellVisual.DesignationType);
+	const FTransform CellXform = MakeCellTransform(CellVisual.VoxelCoord, CellVisual.TerrainZ);
+	const int32 TileIdx = ConfirmedTileMeshHISM->AddInstance(CellXform, true);
+	SetInstanceColor(ConfirmedTileMeshHISM, TileIdx, Style.TileColor);
+	ConfirmedTileMeshHISM->SetCustomDataValue(TileIdx, 4, Style.BorderColor.A, true);
+	ConfirmedTileInstances.Add(CellVisual.VoxelCoord, TileIdx);
+
+	if (Style.IconTexture && IconMaterialBase)
+	{
+		if (UHierarchicalInstancedStaticMeshComponent* IconHISM = GetOrCreateIconHISM(CellVisual.DesignationType, Style))
+		{
+			const float WorldX = (static_cast<float>(CellVisual.VoxelCoord.X) + 0.5f) * CellSizeUU;
+			const float WorldY = (static_cast<float>(CellVisual.VoxelCoord.Y) + 0.5f) * CellSizeUU;
+			const float WorldZ = CellVisual.TerrainZ + ZOffset + IconZOffset;
+			const float IconWorldSize = CellSizeUU * FMath::Clamp(Style.IconScale, 0.05f, 1.0f);
+			const float MeshScale = IconWorldSize / 100.0f;
+
+			const FTransform IconXform(
+				FRotator::ZeroRotator,
+				FVector(WorldX, WorldY, WorldZ),
+				FVector(MeshScale, MeshScale, 1.0f));
+
+			const int32 IconIdx = IconHISM->AddInstance(IconXform, true);
+			SetInstanceColor(IconHISM, IconIdx, Style.IconTint);
+		}
+	}
+}
+
+UHierarchicalInstancedStaticMeshComponent* ATileGridOverlayActor::GetOrCreateIconHISM(
+	EGridDesignationType DesignationType,
+	const FGridOverlayStyle& Style)
+{
+	if (DesignationType == EGridDesignationType::None || !IconMaterialBase)
+	{
+		return nullptr;
+	}
+
+	if (TObjectPtr<UHierarchicalInstancedStaticMeshComponent>* Found = IconHISMsByDesignation.Find(DesignationType))
+	{
+		return Found->Get();
+	}
+
+	const FName ComponentName(*FString::Printf(TEXT("IconHISM_%d"), static_cast<int32>(DesignationType)));
+	UHierarchicalInstancedStaticMeshComponent* NewHISM = NewObject<UHierarchicalInstancedStaticMeshComponent>(this, ComponentName);
+	if (!NewHISM)
+	{
+		return nullptr;
+	}
+
+	NewHISM->SetupAttachment(RootComponent);
+	NewHISM->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	NewHISM->SetCastShadow(false);
+	NewHISM->NumCustomDataFloats = 4;
+	NewHISM->SetGenerateOverlapEvents(false);
+	NewHISM->bDisableCollision = true;
+	if (CellPlaneMesh)
+	{
+		NewHISM->SetStaticMesh(CellPlaneMesh);
+	}
+	NewHISM->RegisterComponent();
+
+	UMaterialInstanceDynamic* NewMID = UMaterialInstanceDynamic::Create(IconMaterialBase, this);
+	if (NewMID)
+	{
+		NewMID->SetTextureParameterValue(FName("IconTex"), Style.IconTexture);
+		NewHISM->SetMaterial(0, NewMID);
+		IconMIDsByDesignation.Add(DesignationType, NewMID);
+	}
+
+	IconHISMsByDesignation.Add(DesignationType, NewHISM);
+	return NewHISM;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -288,14 +646,60 @@ void ATileGridOverlayActor::ShowOverlay()
 {
 	bOverlayVisible = true;
 	SetActorHiddenInGame(false);
-	HoverMeshComp->SetVisibility(bHoverActive);
+
+	if (BaseGridHISM) { BaseGridHISM->SetVisibility(true, true); }
+	if (TileMeshHISM) { TileMeshHISM->SetVisibility(true, true); }
+	if (DragPreviewMeshHISM) { DragPreviewMeshHISM->SetVisibility(true, true); }
+	if (ConfirmedTileMeshHISM) { ConfirmedTileMeshHISM->SetVisibility(true, true); }
+	if (IconMeshHISM) { IconMeshHISM->SetVisibility(true, true); }
+
+	for (TPair<EGridDesignationType, TObjectPtr<UHierarchicalInstancedStaticMeshComponent>>& Pair : IconHISMsByDesignation)
+	{
+		if (Pair.Value)
+		{
+			Pair.Value->SetVisibility(true, true);
+		}
+	}
+
+	if (HoverMeshComp)
+	{
+		HoverMeshComp->SetVisibility(bHoverActive);
+	}
 }
 
 void ATileGridOverlayActor::HideOverlay()
 {
 	bOverlayVisible = false;
+
+	// HideOverlay is a full transient overlay shutdown. It clears the temporary
+	// targeting layers so a giant neutral base grid cannot remain after confirm,
+	// cancel, or tool exit. Persistent confirmed designations are controlled by
+	// ShowOverlay()/EndSelectionTool and are not cleared here.
+	ClearHover();
+	ClearDragPreview();
+	ClearSelection();
+	ClearBaseGrid();
+
 	SetActorHiddenInGame(true);
-	HoverMeshComp->SetVisibility(false);
+
+	if (BaseGridHISM) { BaseGridHISM->SetVisibility(false, true); }
+	if (TileMeshHISM) { TileMeshHISM->SetVisibility(false, true); }
+	if (DragPreviewMeshHISM) { DragPreviewMeshHISM->SetVisibility(false, true); }
+	if (ConfirmedTileMeshHISM) { ConfirmedTileMeshHISM->SetVisibility(false, true); }
+	if (IconMeshHISM) { IconMeshHISM->SetVisibility(false, true); }
+
+	for (TPair<EGridDesignationType, TObjectPtr<UHierarchicalInstancedStaticMeshComponent>>& Pair : IconHISMsByDesignation)
+	{
+		if (Pair.Value)
+		{
+			Pair.Value->SetVisibility(false, true);
+		}
+	}
+
+	if (HoverMeshComp)
+	{
+		HoverMeshComp->SetVisibility(false);
+	}
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -340,14 +744,23 @@ FTransform ATileGridOverlayActor::MakeIconTransform(const FIntVector& VoxelCoord
 // Internal: HISM instance management
 // ─────────────────────────────────────────────────────────────
 
-void ATileGridOverlayActor::SetInstanceColor(UHierarchicalInstancedStaticMeshComponent* HISM, int32 InstanceIndex, const FLinearColor& Color)
+void ATileGridOverlayActor::SetInstanceColor(
+	UHierarchicalInstancedStaticMeshComponent* HISM,
+	int32 InstanceIndex,
+	const FLinearColor& Color)
 {
-	if (!HISM || InstanceIndex < 0) return;
+	if (!HISM || InstanceIndex < 0)
+	{
+		return;
+	}
 
-	HISM->SetCustomDataValue(InstanceIndex, 0, Color.R);
-	HISM->SetCustomDataValue(InstanceIndex, 1, Color.G);
-	HISM->SetCustomDataValue(InstanceIndex, 2, Color.B);
-	HISM->SetCustomDataValue(InstanceIndex, 3, Color.A);
+	HISM->SetCustomDataValue(InstanceIndex, 0, Color.R, false);
+	HISM->SetCustomDataValue(InstanceIndex, 1, Color.G, false);
+	HISM->SetCustomDataValue(InstanceIndex, 2, Color.B, false);
+
+	// Mark render state dirty on the final write so the material actually
+	// receives the per-instance color/opacity this frame.
+	HISM->SetCustomDataValue(InstanceIndex, 3, Color.A, true);
 }
 
 int32 ATileGridOverlayActor::AddCellToHISM(
@@ -356,13 +769,18 @@ int32 ATileGridOverlayActor::AddCellToHISM(
 	const FLinearColor& Color,
 	TMap<FIntVector, int32>& TrackingMap)
 {
-	const FTransform CellXform = MakeCellTransform(VoxelCoord, TerrainZ);
-	const int32 Idx = TileMeshHISM->AddInstance(CellXform, /*bWorldSpace=*/true);
-	SetInstanceColor(TileMeshHISM, Idx, Color);
+	UHierarchicalInstancedStaticMeshComponent* TargetHISM =
+		(&TrackingMap == &DragCells) ? DragPreviewMeshHISM : TileMeshHISM;
 
-	// Also write border alpha into custom data slot 4
-	SetInstanceColor(TileMeshHISM, Idx, Color); // slots 0-3
-	TileMeshHISM->SetCustomDataValue(Idx, 4, ActiveStyle.BorderColor.A);
+	if (!TargetHISM)
+	{
+		return INDEX_NONE;
+	}
+
+	const FTransform CellXform = MakeCellTransform(VoxelCoord, TerrainZ);
+	const int32 Idx = TargetHISM->AddInstance(CellXform, /*bWorldSpace=*/true);
+	SetInstanceColor(TargetHISM, Idx, Color);
+	TargetHISM->SetCustomDataValue(Idx, 4, ActiveStyle.BorderColor.A, true);
 
 	TrackingMap.Add(VoxelCoord, Idx);
 	return Idx;
@@ -378,8 +796,18 @@ void ATileGridOverlayActor::RemoveCellFromHISM(const FIntVector& VoxelCoord, TMa
 
 	const int32 RemovedIdx = *FoundIdx;
 
-	UHierarchicalInstancedStaticMeshComponent* TargetHISM =
-		(&TrackingMap == &SelectedIcons) ? IconMeshHISM : TileMeshHISM;
+	// Never compare TMap values directly. UE deletes TMap::operator==, and map
+	// comparison is not needed here anyway. The reference passed into this function
+	// is one of our owned tracking maps, so choose the target HISM by map address.
+	UHierarchicalInstancedStaticMeshComponent* TargetHISM = TileMeshHISM;
+	if (&TrackingMap == &SelectedIcons)
+	{
+		TargetHISM = IconMeshHISM;
+	}
+	else if (&TrackingMap == &DragCells)
+	{
+		TargetHISM = DragPreviewMeshHISM;
+	}
 
 	if (!TargetHISM)
 	{
@@ -387,8 +815,8 @@ void ATileGridOverlayActor::RemoveCellFromHISM(const FIntVector& VoxelCoord, TMa
 		return;
 	}
 
-	// HISM::RemoveInstance swaps the last instance into the removed slot.
-	// Capture the last index from the actual target component before removal.
+	// HISM::RemoveInstance swaps the last instance into the removed slot. Capture
+	// the last index before removal so we can repair the moved instance's map entry.
 	const int32 LastIdx = TargetHISM->GetInstanceCount() - 1;
 
 	TargetHISM->RemoveInstance(RemovedIdx);
@@ -397,7 +825,7 @@ void ATileGridOverlayActor::RemoveCellFromHISM(const FIntVector& VoxelCoord, TMa
 	// Fix up the swapped instance's tracked index.
 	if (RemovedIdx != LastIdx && LastIdx >= 0)
 	{
-		for (auto& Pair : TrackingMap)
+		for (TPair<FIntVector, int32>& Pair : TrackingMap)
 		{
 			if (Pair.Value == LastIdx)
 			{
@@ -419,53 +847,177 @@ void ATileGridOverlayActor::ClearHISMLayer(
 	TrackingMap.Empty();
 }
 
+
+void ATileGridOverlayActor::LoadDesignationStylesFromDataTable()
+{
+	if (!DesignationStyleTable)
+	{
+		return;
+	}
+
+	static bool bLoggedTableLoad = false;
+
+	TArray<FGridDesignationStyleRow*> Rows;
+	DesignationStyleTable->GetAllRows<FGridDesignationStyleRow>(TEXT("GridDesignationStyles"), Rows);
+
+	for (const FGridDesignationStyleRow* Row : Rows)
+	{
+		if (!Row || Row->DesignationType == EGridDesignationType::None)
+		{
+			continue;
+		}
+
+		FGridOverlayStyle Style;
+		Style.NeutralGridColor = Row->NeutralGridColor;
+		Style.TileColor = Row->TileColor;
+		Style.BorderColor = Row->BorderColor;
+		Style.HoverColor = Row->HoverColor;
+		Style.DragPreviewColor = Row->DragPreviewColor;
+		Style.IconTexture = Row->IconTexture;
+		Style.IconTint = Row->IconTint;
+		Style.IconScale = Row->IconScale;
+
+		switch (Row->DesignationType)
+		{
+		case EGridDesignationType::Build:
+			RegisteredStyles.Add(EBuildToolMode::Place, Style);
+			break;
+		case EGridDesignationType::Mine:
+			RegisteredStyles.Add(EBuildToolMode::Mine, Style);
+			RegisteredStyles.Add(EBuildToolMode::Dig, Style);
+			break;
+		case EGridDesignationType::Farm:
+			RegisteredStyles.Add(EBuildToolMode::Farm, Style);
+			break;
+		case EGridDesignationType::Erase:
+			RegisteredStyles.Add(EBuildToolMode::Remove, Style);
+			break;
+		default:
+			break;
+		}
+	}
+
+	if (!bLoggedTableLoad)
+	{
+		bLoggedTableLoad = true;
+		UE_LOG(LogGridOverlay, Log,
+			TEXT("Loaded %d grid designation styles from DataTable %s"),
+			Rows.Num(),
+			*DesignationStyleTable->GetName());
+	}
+}
+
+void ATileGridOverlayActor::RebuildBaseGridAround(const FIntVector& CenterCoord, float TerrainZ)
+{
+	if (!BaseGridHISM || VisibleGridRadius <= 0)
+	{
+		return;
+	}
+
+	ClearHISMLayer(BaseGridHISM, BaseGridCells);
+
+	// Base grid is only a temporary targeting layer. Keep it driven by the
+	// DataTable so it reads as a light voxel-size grid instead of a giant sheet.
+	FLinearColor VisibleNeutralGridColor = ActiveStyle.NeutralGridColor;
+	const float VisibleBorderAlpha = ActiveStyle.BorderColor.A;
+
+	for (int32 X = CenterCoord.X - VisibleGridRadius; X <= CenterCoord.X + VisibleGridRadius; ++X)
+	{
+		for (int32 Y = CenterCoord.Y - VisibleGridRadius; Y <= CenterCoord.Y + VisibleGridRadius; ++Y)
+		{
+			const FIntVector GridCoord(X, Y, CenterCoord.Z);
+			const FTransform CellXform = MakeCellTransform(GridCoord, TerrainZ);
+			const int32 Idx = BaseGridHISM->AddInstance(CellXform, true);
+			SetInstanceColor(BaseGridHISM, Idx, VisibleNeutralGridColor);
+			BaseGridHISM->SetCustomDataValue(Idx, 4, VisibleBorderAlpha, true);
+			BaseGridCells.Add(GridCoord, Idx);
+		}
+	}
+
+	UE_LOG(LogGridOverlay, Warning,
+		TEXT("Base grid rebuilt. Center=(%d,%d,%d) Radius=%d Cells=%d TerrainZ=%.1f Alpha=%.2f Border=%.2f"),
+		CenterCoord.X,
+		CenterCoord.Y,
+		CenterCoord.Z,
+		VisibleGridRadius,
+		BaseGridCells.Num(),
+		TerrainZ,
+		VisibleNeutralGridColor.A,
+		VisibleBorderAlpha);
+}
+
+void ATileGridOverlayActor::RebuildConfirmedDesignationVisuals()
+{
+	if (ConfirmedTileMeshHISM)
+	{
+		ConfirmedTileMeshHISM->ClearInstances();
+	}
+	ConfirmedTileInstances.Empty();
+
+	for (TPair<EGridDesignationType, TObjectPtr<UHierarchicalInstancedStaticMeshComponent>>& Pair : IconHISMsByDesignation)
+	{
+		if (Pair.Value)
+		{
+			Pair.Value->ClearInstances();
+		}
+	}
+
+	for (const TPair<FIntVector, FGridDesignationCellVisual>& Pair : ConfirmedDesignationCells)
+	{
+		AddConfirmedVisualInstance(Pair.Value);
+	}
+}
+
 // ─────────────────────────────────────────────────────────────
 // Internal: Full rebuild
 // ─────────────────────────────────────────────────────────────
 
 void ATileGridOverlayActor::RebuildAllInstances()
 {
-	// Snapshot current coords + Z before clearing
+	// Snapshot current coords + Z before clearing selected/drag preview.
 	TMap<FIntVector, float> SelectedSnapshot;
-	for (const auto& Pair : SelectedCells)
+	for (const TPair<FIntVector, int32>& Pair : SelectedCells)
 	{
 		FTransform Xform;
-		if (TileMeshHISM->GetInstanceTransform(Pair.Value, Xform, /*bWorldSpace=*/true))
+		if (TileMeshHISM && TileMeshHISM->GetInstanceTransform(Pair.Value, Xform, true))
 		{
 			SelectedSnapshot.Add(Pair.Key, Xform.GetLocation().Z - ZOffset);
 		}
 	}
 
 	TMap<FIntVector, float> DragSnapshot;
-	for (const auto& Pair : DragCells)
+	for (const TPair<FIntVector, int32>& Pair : DragCells)
 	{
 		FTransform Xform;
-		if (TileMeshHISM->GetInstanceTransform(Pair.Value, Xform, /*bWorldSpace=*/true))
+		if (DragPreviewMeshHISM && DragPreviewMeshHISM->GetInstanceTransform(Pair.Value, Xform, true))
 		{
 			DragSnapshot.Add(Pair.Key, Xform.GetLocation().Z - ZOffset);
 		}
 	}
 
-	// Wipe everything
+	// Wipe transient selected/preview layers.
 	ClearHISMLayer(TileMeshHISM, SelectedCells);
-	ClearHISMLayer(TileMeshHISM, DragCells);
+	ClearHISMLayer(DragPreviewMeshHISM, DragCells);
 	ClearHISMLayer(IconMeshHISM, SelectedIcons);
 
-	// Re-add with current style colors
-	for (const auto& Pair : SelectedSnapshot)
+	// Rebuild persistent confirmed designation layer first.
+	RebuildConfirmedDesignationVisuals();
+
+	// Re-add transient selected cells with current active style.
+	for (const TPair<FIntVector, float>& Pair : SelectedSnapshot)
 	{
 		AddCellToHISM(Pair.Key, Pair.Value, ActiveStyle.TileColor, SelectedCells);
 
 		if (ActiveStyle.IconTexture)
 		{
 			const FTransform IconXform = MakeIconTransform(Pair.Key, Pair.Value);
-			const int32 IconIdx = IconMeshHISM->AddInstance(IconXform, /*bWorldSpace=*/true);
-			SetInstanceColor(IconMeshHISM, IconIdx, ActiveStyle.TileColor);
+			const int32 IconIdx = IconMeshHISM->AddInstance(IconXform, true);
+			SetInstanceColor(IconMeshHISM, IconIdx, ActiveStyle.IconTint);
 			SelectedIcons.Add(Pair.Key, IconIdx);
 		}
 	}
 
-	for (const auto& Pair : DragSnapshot)
+	for (const TPair<FIntVector, float>& Pair : DragSnapshot)
 	{
 		if (!SelectedCells.Contains(Pair.Key))
 		{

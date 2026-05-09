@@ -20,6 +20,8 @@ class USettlementManager;
 class UDigSubsystem;
 class UMiningSubsystem;
 class UFarmingSubsystem;
+class UGridSelectionSubsystem;
+class UTexture2D;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnBuildModeChanged, EBuildMode, NewMode);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnCellCountChanged, int32, CellCount);
@@ -70,7 +72,15 @@ public:
     int32 GetFarmPaintedCellCount() const { return FarmPaintedWorldCells.Num(); }
 
     UFUNCTION(BlueprintPure, Category = "WorldForge|Build|TileSelection")
-    int32 GetTileSelectionCount() const { return SelectedCells.Num(); }
+    int32 GetTileSelectionCount() const
+    {
+        if (CurrentToolMode == EBuildToolMode::Farm)
+        {
+            return FarmPaintedWorldCells.Num();
+        }
+
+        return SelectedCells3D.Num();
+    }
 
     UFUNCTION(BlueprintPure, Category = "WorldForge|Build")
     FGameplayTag GetSelectedBuildingTag() const { return SelectedBuildingTag; }
@@ -223,6 +233,10 @@ private:
     // from either terrain-derived Z or support-block face attachment.
     FIntVector CurrentHoveredVoxel = FIntVector::ZeroValue;
 
+    // True voxel-space coordinate used only by TileGridOverlayActor.
+    // Do not use this for farm zone / settlement-local logic.
+    FIntVector CurrentOverlayVoxel = FIntVector::ZeroValue;
+
     bool bHoveredCellValid = false;
     float LastHitZ = 0.0f;
 
@@ -280,13 +294,13 @@ private:
     TObjectPtr<UTexture2D> BuildIconTexture;      // hammer
 
     UPROPERTY(EditDefaultsOnly, Category = "Build|Overlay")
-    TObjectPtr<UTexture2D> FarmIconTexture;        // wheat
+    TObjectPtr<UTexture2D> FarmIconTexture;       // wheat
 
     UPROPERTY(EditDefaultsOnly, Category = "Build|Overlay")
-    TObjectPtr<UTexture2D> MineIconTexture;        // pickaxe
+    TObjectPtr<UTexture2D> MineIconTexture;       // pickaxe
 
     UPROPERTY(EditDefaultsOnly, Category = "Build|Overlay")
-    TObjectPtr<UTexture2D> PrefabIconTexture;      // wrench (optional, nullptr OK)
+    TObjectPtr<UTexture2D> PrefabIconTexture;     // wrench (optional, nullptr OK)
 
     // ----- Legacy / Debug Dig Ghost -----
 
@@ -310,6 +324,7 @@ private:
     UDigSubsystem* GetDigSubsystem();
     UMiningSubsystem* GetMiningSubsystem() const;
     UFarmingSubsystem* GetFarmingSubsystem() const;
+    UGridSelectionSubsystem* GetGridSelectionSubsystem() const;
 
     int32 GetEffectiveSettlementID() const;
 
@@ -351,6 +366,7 @@ private:
     /** Hide overlay and clear all visual state. */
     void DeactivateGridOverlay();
 
+    void SyncSelectionFromGridSelection();
     void ClearTileSelectionState();
     void AddOrToggleCurrentTileSelection(bool bToggleExisting);
     bool CommitMineDesignations();

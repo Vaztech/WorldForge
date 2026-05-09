@@ -236,6 +236,85 @@ int32 UFarmingSubsystem::CreateFarmZone(
     return NewID;
 }
 
+int32 UFarmingSubsystem::CreateFarmZoneFromCells(
+    int32 SettlementID,
+    FIntPoint FarmGridOrigin,
+    const TSet<FIntPoint>& LocalCells,
+    ECropCategory Category,
+    FName CropRow,
+    bool bAutoReplant)
+{
+    if (LocalCells.Num() <= 0)
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[FarmingSubsystem] CreateFarmZoneFromCells failed: no local cells."));
+
+        return INDEX_NONE;
+    }
+
+    // Reject exact-cell zones that overlap existing active zones. This checks
+    // exact membership rather than bounding boxes, so separate islands are safe.
+    for (const FWorldForgeFarmZone& ExistingZone : FarmZones)
+    {
+        if (ExistingZone.SettlementID != SettlementID ||
+            ExistingZone.ZoneState == EFarmZoneState::Disbanded)
+        {
+            continue;
+        }
+
+        for (const FIntPoint& LocalCell : LocalCells)
+        {
+            if (ExistingZone.ContainsLocalTile(LocalCell))
+            {
+                UE_LOG(LogTemp, Warning,
+                    TEXT("[FarmingSubsystem] CreateFarmZoneFromCells blocked: LocalCell=(%d,%d) overlaps existing Zone=%d Settlement=%d"),
+                    LocalCell.X,
+                    LocalCell.Y,
+                    ExistingZone.ZoneID,
+                    SettlementID);
+
+                return INDEX_NONE;
+            }
+        }
+    }
+
+    FWorldForgeFarmZone Zone;
+    Zone.ZoneID = NextZoneID++;
+    Zone.SettlementID = SettlementID;
+    Zone.CropCategory = Category;
+    Zone.CropRowName = CropRow;
+    Zone.ZoneState = EFarmZoneState::Active;
+    Zone.FarmGridOrigin = FarmGridOrigin;
+    Zone.bAutoReplant = bAutoReplant;
+    Zone.SeedItemTag = GetSeedTagForCategory(Category);
+    Zone.InitTilesFromCells(LocalCells);
+
+    const int32 NewID = Zone.ZoneID;
+    const int32 ExactTileCount = Zone.TotalTiles;
+    const FIntPoint BoundsOrigin = Zone.Origin;
+    const int32 BoundsSizeX = Zone.SizeX;
+    const int32 BoundsSizeY = Zone.SizeY;
+
+    FarmZones.Add(MoveTemp(Zone));
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[FarmingSubsystem] Created exact-cell farm zone %d: Settlement=%d Cells=%d FarmGridOrigin=(%d,%d) BoundsOrigin=(%d,%d) BoundsSize=%dx%d Category=%d CropRow=%s AutoReplant=%s"),
+        NewID,
+        SettlementID,
+        ExactTileCount,
+        FarmGridOrigin.X,
+        FarmGridOrigin.Y,
+        BoundsOrigin.X,
+        BoundsOrigin.Y,
+        BoundsSizeX,
+        BoundsSizeY,
+        static_cast<int32>(Category),
+        *CropRow.ToString(),
+        bAutoReplant ? TEXT("true") : TEXT("false"));
+
+    return NewID;
+}
+
 void UFarmingSubsystem::DisbandFarmZone(int32 ZoneID)
 {
     FWorldForgeFarmZone* Zone = FindZoneMutable(ZoneID);
@@ -938,30 +1017,28 @@ void UFarmingSubsystem::OnPlantCompleted(int32 ZoneID, FIntPoint TilePos)
         return;
     }
 
-    const USettlementManager* SettlementManager = World->GetSubsystem<USettlementManager>();
-    const FSettlementState* Settlement = SettlementManager
-        ? SettlementManager->GetSettlement(Zone->SettlementID)
-        : nullptr;
-
-    if (!Settlement)
-    {
-        UE_LOG(LogTemp, Warning,
-            TEXT("[FarmingSubsystem] OnPlantCompleted failed: Settlement=%d not found. ZoneID=%d Tile=(%d,%d)"),
-            Zone->SettlementID,
-            ZoneID,
-            TilePos.X,
-            TilePos.Y);
-
-        return;
-    }
-
-    const FIntPoint WorldCell = Settlement->WorldOrigin + TilePos;
+    // Option 2 farming:
+    // TilePos is a settlement-local voxel/grid offset. FarmGridOrigin is the
+    // absolute voxel/grid origin captured when the farm zone was committed.
+    // Do not derive this from Settlement->WorldOrigin here; that double-converts
+    // exact-grid farms and spawns crop visuals thousands of cells away.
+    const FIntPoint WorldGridCell = Zone->FarmGridOrigin + TilePos;
 
     FVector WorldPos = FVector::ZeroVector;
 
     if (const UVoxelWorldManager* VoxelWorldManager = World->GetSubsystem<UVoxelWorldManager>())
     {
-        const FVector CellCenterXY = VoxelWorldManager->TerrainCellToWorld(WorldCell, 0.0f, true);
+        int32 SurfaceVoxelZ = 0;
+        const bool bHasSurfaceZ = VoxelWorldManager->TryGetTerrainSurfaceVoxelZ(
+            WorldGridCell,
+            SurfaceVoxelZ);
+
+        const FVector CellCenterXY = bHasSurfaceZ
+            ? VoxelWorldManager->GridToWorld(WorldGridCell, SurfaceVoxelZ)
+            : FVector(
+                (static_cast<float>(WorldGridCell.X) + 0.5f) * 100.0f,
+                (static_cast<float>(WorldGridCell.Y) + 0.5f) * 100.0f,
+                0.0f);
 
         const FVector TraceStart = CellCenterXY + FVector(0.0f, 0.0f, 100000.0f);
         const FVector TraceEnd = CellCenterXY - FVector(0.0f, 0.0f, 100000.0f);
@@ -982,48 +1059,41 @@ void UFarmingSubsystem::OnPlantCompleted(int32 ZoneID, FIntPoint TilePos)
             WorldPos = Hit.ImpactPoint;
 
             UE_LOG(LogTemp, Log,
-                TEXT("[FarmingSubsystem] Crop surface raycast hit. Zone=%d LocalTile=(%d,%d) WorldCell=(%d,%d) Hit=%s Actor=%s"),
+                TEXT("[FarmingSubsystem] Crop surface raycast hit. Zone=%d LocalTile=(%d,%d) WorldGridCell=(%d,%d) Hit=%s Actor=%s"),
                 ZoneID,
                 TilePos.X,
                 TilePos.Y,
-                WorldCell.X,
-                WorldCell.Y,
+                WorldGridCell.X,
+                WorldGridCell.Y,
                 *WorldPos.ToString(),
                 Hit.GetActor() ? *Hit.GetActor()->GetName() : TEXT("None"));
         }
         else
         {
-            FVector SurfaceLocation = FVector::ZeroVector;
-
-            if (VoxelWorldManager->TryGetSurfaceWorldLocation(WorldCell, SurfaceLocation))
-            {
-                WorldPos = SurfaceLocation;
-            }
-            else
-            {
-                WorldPos = CellCenterXY;
-            }
+            WorldPos = CellCenterXY;
 
             UE_LOG(LogTemp, Warning,
-                TEXT("[FarmingSubsystem] Crop surface raycast missed. Fallback WorldPos=%s Zone=%d LocalTile=(%d,%d) WorldCell=(%d,%d)"),
+                TEXT("[FarmingSubsystem] Crop surface raycast missed. Fallback WorldPos=%s Zone=%d LocalTile=(%d,%d) WorldGridCell=(%d,%d)"),
                 *WorldPos.ToString(),
                 ZoneID,
                 TilePos.X,
                 TilePos.Y,
-                WorldCell.X,
-                WorldCell.Y);
+                WorldGridCell.X,
+                WorldGridCell.Y);
         }
     }
     else
     {
         WorldPos = FVector(
-            static_cast<float>(WorldCell.X) * 100.0f,
-            static_cast<float>(WorldCell.Y) * 100.0f,
+            (static_cast<float>(WorldGridCell.X) + 0.5f) * 100.0f,
+            (static_cast<float>(WorldGridCell.Y) + 0.5f) * 100.0f,
             0.0f);
 
         UE_LOG(LogTemp, Warning,
-            TEXT("[FarmingSubsystem] Crop placement fallback: VoxelWorldManager missing. WorldPos=%s"),
-            *WorldPos.ToString());
+            TEXT("[FarmingSubsystem] Crop placement fallback: VoxelWorldManager missing. WorldPos=%s WorldGridCell=(%d,%d)"),
+            *WorldPos.ToString(),
+            WorldGridCell.X,
+            WorldGridCell.Y);
     }
 
     for (FFarmTileRecord& Tile : Zone->Tiles)
@@ -1081,24 +1151,24 @@ void UFarmingSubsystem::OnPlantCompleted(int32 ZoneID, FIntPoint TilePos)
                 Tile.HarvestedStep = INDEX_NONE;
 
                 UE_LOG(LogTemp, Log,
-                    TEXT("[FarmingSubsystem] Plant completed. Zone=%d LocalTile=(%d,%d) WorldCell=(%d,%d) Crop=%s Actor=%s"),
+                    TEXT("[FarmingSubsystem] Plant completed. Zone=%d LocalTile=(%d,%d) WorldGridCell=(%d,%d) Crop=%s Actor=%s"),
                     ZoneID,
                     TilePos.X,
                     TilePos.Y,
-                    WorldCell.X,
-                    WorldCell.Y,
+                    WorldGridCell.X,
+                    WorldGridCell.Y,
                     *Zone->CropRowName.ToString(),
                     *CropActor->GetName());
             }
             else
             {
                 UE_LOG(LogTemp, Warning,
-                    TEXT("[FarmingSubsystem] OnPlantCompleted failed to spawn crop patch. Zone=%d LocalTile=(%d,%d) WorldCell=(%d,%d) Crop=%s"),
+                    TEXT("[FarmingSubsystem] OnPlantCompleted failed to spawn crop patch. Zone=%d LocalTile=(%d,%d) WorldGridCell=(%d,%d) Crop=%s"),
                     ZoneID,
                     TilePos.X,
                     TilePos.Y,
-                    WorldCell.X,
-                    WorldCell.Y,
+                    WorldGridCell.X,
+                    WorldGridCell.Y,
                     *Zone->CropRowName.ToString());
             }
 
@@ -1350,10 +1420,7 @@ bool UFarmingSubsystem::IsTileInFarmZone(
             continue;
         }
 
-        const FIntPoint LocalPos = TilePos - Zone.Origin;
-
-        if (LocalPos.X >= 0 && LocalPos.X < Zone.SizeX &&
-            LocalPos.Y >= 0 && LocalPos.Y < Zone.SizeY)
+        if (Zone.ContainsLocalTile(TilePos))
         {
             return true;
         }
@@ -1373,9 +1440,26 @@ void UFarmingSubsystem::RestoreZoneRecords(
 
     int32 MaxID = 0;
 
-    for (const FWorldForgeFarmZone& Zone : FarmZones)
+    for (FWorldForgeFarmZone& Zone : FarmZones)
     {
         MaxID = FMath::Max(MaxID, Zone.ZoneID);
+
+        // Backward compatibility: older saves may not have ExplicitLocalCells.
+        // Rebuild exact-cell membership from saved tile records or rectangle data.
+        if (Zone.ExplicitLocalCells.Num() == 0)
+        {
+            if (Zone.Tiles.Num() > 0)
+            {
+                for (const FFarmTileRecord& Tile : Zone.Tiles)
+                {
+                    Zone.ExplicitLocalCells.Add(Tile.TilePos);
+                }
+            }
+            else if (Zone.SizeX > 0 && Zone.SizeY > 0)
+            {
+                Zone.InitTiles();
+            }
+        }
     }
 
     NextZoneID = MaxID + 1;

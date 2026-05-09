@@ -8,6 +8,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "Player/BuildModeTypes.h"
+#include "Grid/GridDesignationTypes.h"
 #include "TileGridOverlayActor.generated.h"
 
 class UHierarchicalInstancedStaticMeshComponent;
@@ -15,6 +16,7 @@ class UStaticMeshComponent;
 class UMaterialInterface;
 class UMaterialInstanceDynamic;
 class UTexture2D;
+class UDataTable;
 
 // ─────────────────────────────────────────────────────────────
 // FGridOverlayStyle — visual config per placement mode
@@ -24,6 +26,10 @@ USTRUCT(BlueprintType)
 struct WORLDFORGE_API FGridOverlayStyle
 {
 	GENERATED_BODY()
+
+	/** Neutral visible base-grid color shown around the cursor. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Style")
+	FLinearColor NeutralGridColor = FLinearColor(1.f, 1.f, 1.f, 0.12f);
 
 	/** Tile fill color for selected cells (translucent). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Style")
@@ -45,6 +51,10 @@ struct WORLDFORGE_API FGridOverlayStyle
 	 *  nullptr = no icon rendered. Must be a square texture with alpha. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Style")
 	TObjectPtr<UTexture2D> IconTexture = nullptr;
+
+	/** Per-mode icon tint. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Style")
+	FLinearColor IconTint = FLinearColor(1.f, 1.f, 1.f, 1.f);
 
 	/** Icon scale relative to cell size (0.0–1.0). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Style", meta = (ClampMin = "0.05", ClampMax = "1.0"))
@@ -126,6 +136,27 @@ public:
 	void SetDragPreviewCells(const TMap<FIntVector, float>& CellsWithTerrainZ);
 	void ClearDragPreview();
 
+	/** Clear only the temporary neutral base-grid layer around the cursor.
+	 *  Confirmed designation cells/icons are not affected. */
+	void ClearBaseGrid();
+
+	// ── Persistent Confirmed Designations ───────────────────
+
+	void AddConfirmedDesignationCell(
+		const FIntVector& VoxelCoord,
+		float TerrainZ,
+		EGridDesignationType DesignationType);
+
+	void SetConfirmedDesignationCells(
+		EGridDesignationType DesignationType,
+		const TMap<FIntVector, float>& CellsWithTerrainZ);
+
+	void ClearConfirmedDesignationCells(EGridDesignationType DesignationType);
+	void ClearAllConfirmedDesignationCells();
+	void CommitSelectedCellsAsConfirmed(EGridDesignationType DesignationType);
+
+	bool HasConfirmedDesignationCells() const { return ConfirmedDesignationCells.Num() > 0; }
+
 	// ── Visibility ──────────────────────────────────────────
 
 	void ShowOverlay();
@@ -169,13 +200,21 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Overlay|Material")
 	TObjectPtr<UMaterialInterface> HoverMaterialBase;
 
+	/** Optional DataTable that drives overlay icon/color style by designation type. */
+	UPROPERTY(EditDefaultsOnly, Category = "Overlay|Styles")
+	TObjectPtr<UDataTable> DesignationStyleTable;
+
+	/** Number of cells around hover to draw as a faint base grid. */
+	UPROPERTY(EditDefaultsOnly, Category = "Overlay|Layout")
+	int32 VisibleGridRadius = 8;
+
 	/** Z offset above terrain surface to prevent Z-fighting (UU). */
 	UPROPERTY(EditDefaultsOnly, Category = "Overlay|Layout")
-	float ZOffset = 3.0f;
+	float ZOffset = 25.0f;
 
 	/** Extra Z offset for icon plane above tile plane. */
 	UPROPERTY(EditDefaultsOnly, Category = "Overlay|Layout")
-	float IconZOffset = 1.5f;
+	float IconZOffset = 6.0f;
 
 	/** Collision channel to trace against for self-sampling terrain Z. */
 	UPROPERTY(EditDefaultsOnly, Category = "Overlay|Trace")
@@ -184,9 +223,22 @@ protected:
 private:
 	// ── Components ──────────────────────────────────────────
 
-	/** Instanced tiles: selected + drag-preview cells. */
+	/** Instanced neutral base grid cells around the cursor. */
+	UPROPERTY(VisibleAnywhere, Category = "Overlay")
+	TObjectPtr<UHierarchicalInstancedStaticMeshComponent> BaseGridHISM;
+
+	/** Instanced selected cells for the current active tool session. */
 	UPROPERTY(VisibleAnywhere, Category = "Overlay")
 	TObjectPtr<UHierarchicalInstancedStaticMeshComponent> TileMeshHISM;
+
+	/** Instanced drag-preview cells while the mouse is held. Kept separate from
+	 *  selected cells so clearing preview cannot wipe active selections. */
+	UPROPERTY(VisibleAnywhere, Category = "Overlay")
+	TObjectPtr<UHierarchicalInstancedStaticMeshComponent> DragPreviewMeshHISM;
+
+	/** Instanced persistent confirmed designation cells. */
+	UPROPERTY(VisibleAnywhere, Category = "Overlay")
+	TObjectPtr<UHierarchicalInstancedStaticMeshComponent> ConfirmedTileMeshHISM;
 
 	/** Instanced icons: one per selected cell (not drag-preview). */
 	UPROPERTY(VisibleAnywhere, Category = "Overlay")
@@ -215,9 +267,22 @@ private:
 	TObjectPtr<UMaterialInstanceDynamic> HoverMID;
 
 	// Cell tracking: VoxelCoord → HISM instance index
+	TMap<FIntVector, int32> BaseGridCells;
 	TMap<FIntVector, int32> SelectedCells;
-	TMap<FIntVector, int32> SelectedIcons;   // parallel icon instances
+	TMap<FIntVector, int32> SelectedIcons;   // parallel icon instances for active preview/selection
 	TMap<FIntVector, int32> DragCells;
+
+	// Persistent confirmed designation state. Survives selection clears.
+	TMap<FIntVector, FGridDesignationCellVisual> ConfirmedDesignationCells;
+	TMap<FIntVector, float> ConfirmedCellTerrainZ;
+	TMap<FIntVector, int32> ConfirmedTileInstances;
+
+	// Separate icon HISM/MID per designation type so Build/Mine/Farm icons can coexist.
+	UPROPERTY()
+	TMap<EGridDesignationType, TObjectPtr<UHierarchicalInstancedStaticMeshComponent>> IconHISMsByDesignation;
+
+	UPROPERTY()
+	TMap<EGridDesignationType, TObjectPtr<UMaterialInstanceDynamic>> IconMIDsByDesignation;
 
 	FIntVector HoveredCellCoord = FIntVector(MAX_int32);
 
@@ -243,6 +308,14 @@ private:
 
 	/** Wipe a tracking map and its HISM instances. */
 	void ClearHISMLayer(UHierarchicalInstancedStaticMeshComponent* HISM, TMap<FIntVector, int32>& TrackingMap);
+
+	FGridOverlayStyle GetStyleForDesignation(EGridDesignationType DesignationType) const;
+	EGridDesignationType ToolModeToDesignationType(EBuildToolMode Mode) const;
+	void LoadDesignationStylesFromDataTable();
+	void RebuildBaseGridAround(const FIntVector& CenterCoord, float TerrainZ);
+	void RebuildConfirmedDesignationVisuals();
+	void AddConfirmedVisualInstance(const FGridDesignationCellVisual& CellVisual);
+	UHierarchicalInstancedStaticMeshComponent* GetOrCreateIconHISM(EGridDesignationType DesignationType, const FGridOverlayStyle& Style);
 
 	/** Full rebuild of tile + icon instances from current state. Called on mode change. */
 	void RebuildAllInstances();

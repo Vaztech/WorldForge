@@ -16,6 +16,8 @@
 #include "Mining/MiningSubsystem.h"
 #include "Farming/FarmingSubsystem.h"
 #include "Farming/FarmingTypes.h"
+#include "Grid/GridSelectionSubsystem.h"
+#include "Grid/GridDesignationTypes.h"
 
 
 namespace
@@ -76,13 +78,18 @@ namespace
 void UBuildModeManager::Initialize(FSubsystemCollectionBase& Collection)
 {
     Super::Initialize(Collection);
-    InitializeGridOverlay();
     UE_LOG(LogTemp, Log, TEXT("[BuildMode] Manager initialized."));
 }
 
 void UBuildModeManager::Deinitialize()
 {
     ExitDigMode();
+
+    if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
+    {
+        GridSelection->EndSelectionTool(true);
+    }
+
     DestroyGridOverlay();
     DestroyGhost();
     Super::Deinitialize();
@@ -135,6 +142,12 @@ UFarmingSubsystem* UBuildModeManager::GetFarmingSubsystem() const
 {
     UWorld* W = GetWorld();
     return W ? W->GetSubsystem<UFarmingSubsystem>() : nullptr;
+}
+
+UGridSelectionSubsystem* UBuildModeManager::GetGridSelectionSubsystem() const
+{
+    UWorld* W = GetWorld();
+    return W ? W->GetSubsystem<UGridSelectionSubsystem>() : nullptr;
 }
 
 int32 UBuildModeManager::GetEffectiveSettlementID() const
@@ -331,7 +344,10 @@ void UBuildModeManager::EnterPrefabMode(FGameplayTag BuildingTag)
     bDragStartedFromBlock = false;
 
     SpawnGhost();
-    ActivateGridOverlayForMode(EBuildToolMode::Place);
+    if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
+    {
+        GridSelection->BeginSelectionTool(EBuildToolMode::Place, EGridSelectionShape::Single);
+    }
 
     UE_LOG(LogTemp, Log, TEXT("[BuildMode] Entered Prefab mode: %s"), *BuildingTag.ToString());
     OnBuildModeChanged.Broadcast(CurrentMode);
@@ -377,7 +393,10 @@ void UBuildModeManager::EnterCustomDrawMode(FGameplayTag MaterialTag)
     }
 
     SpawnGhost();
-    ActivateGridOverlayForMode(EBuildToolMode::Place);
+    if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
+    {
+        GridSelection->BeginSelectionTool(EBuildToolMode::Place, EGridSelectionShape::Rectangle);
+    }
 
     UE_LOG(LogTemp, Log, TEXT("[BuildMode] Entered CustomDraw mode: %s"), *MaterialTag.ToString());
     OnBuildModeChanged.Broadcast(CurrentMode);
@@ -419,6 +438,10 @@ void UBuildModeManager::ExitBuildMode()
     DragStartVoxel = FIntVector::ZeroValue;
     bDragStartedFromBlock = false;
 
+    if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
+    {
+        GridSelection->EndSelectionTool(true);
+    }
     DeactivateGridOverlay();
     DestroyGhost();
 
@@ -446,16 +469,29 @@ void UBuildModeManager::SetBuildAgentID(int32 AgentID)
 
 void UBuildModeManager::SetDragBuildActive(bool bActive)
 {
+    const bool bWasDragging = bIsDraggingBuild;
     bIsDraggingBuild = bActive;
 
     if (!bActive)
     {
+        if (bWasDragging)
+        {
+            if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
+            {
+                if (GridSelection->EndDragSelection(true))
+                {
+                    SyncSelectionFromGridSelection();
+                }
+            }
+        }
+
         LastPlacedDragVoxel = FIntVector(INT32_MIN);
         bHasDragStart = false;
         DragStartVoxel = FIntVector::ZeroValue;
         bDragStartedFromBlock = false;
     }
 }
+
 
 void UBuildModeManager::HandlePrimaryClick()
 {
@@ -472,7 +508,24 @@ void UBuildModeManager::HandlePrimaryClick()
         bHasDragStart = true;
         DragStartVoxel = CurrentHoveredVoxel;
         LastPlacedDragVoxel = FIntVector(INT32_MIN);
-        AddOrToggleCurrentTileSelection(true);
+
+        if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
+        {
+            if (!GridSelection->HasValidHover())
+            {
+                if (APlayerController* PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr)
+                {
+                    GridSelection->TickSelectionFromMouse(PC);
+                }
+            }
+
+            if (!GridSelection->BeginDragSelection())
+            {
+                GridSelection->ToggleHoveredSelection();
+                SyncSelectionFromGridSelection();
+            }
+        }
+
         return;
     }
 
@@ -526,6 +579,29 @@ void UBuildModeManager::HandlePrimaryClick()
     {
         UE_LOG(LogTemp, Warning, TEXT("[BuildMode] HandlePrimaryClick -> CustomDraw"));
 
+        if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
+        {
+            if (!GridSelection->HasValidHover())
+            {
+                if (APlayerController* PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr)
+                {
+                    GridSelection->TickSelectionFromMouse(PC);
+                }
+            }
+
+            if (GridSelection->BeginDragSelection())
+            {
+                BroadcastFeedback(TEXT("Selection started. Release mouse to commit selected area."));
+                return;
+            }
+
+            if (GridSelection->ToggleHoveredSelection())
+            {
+                SyncSelectionFromGridSelection();
+                return;
+            }
+        }
+
         if (SelectedCells3D.Contains(CurrentHoveredVoxel) || SelectedCells.Contains(CurrentHoveredCell))
         {
             SelectedCells3D.Remove(CurrentHoveredVoxel);
@@ -538,7 +614,7 @@ void UBuildModeManager::HandlePrimaryClick()
 
             if (GridOverlay)
             {
-                GridOverlay->RemoveSelectedCell(CurrentHoveredVoxel);
+                GridOverlay->RemoveSelectedCell(CurrentOverlayVoxel);
             }
 
             if (UPlayerBuildContext* Ctx = GetBuildContext())
@@ -611,20 +687,22 @@ void UBuildModeManager::HandlePrimaryClick()
 
         if (GridOverlay)
         {
-            GridOverlay->AddSelectedCell(CurrentHoveredVoxel, CurrentHoveredTerrainZ);
+            GridOverlay->AddSelectedCell(CurrentOverlayVoxel, CurrentHoveredTerrainZ);
         }
 
         // Farm mode stores world cells separately so Confirm cannot lose them
         // if legacy/custom draw selection arrays get cleared before CommitFarmZone().
         if (CurrentToolMode == EBuildToolMode::Farm)
         {
-            const FIntPoint FarmWorldCell = CurrentHoveredCell;
+            // Fallback/non-grid path for farm selection also uses exact grid XY.
+            // Keep this consistent with SyncSelectionFromGridSelection().
+            const FIntPoint FarmWorldCell(CurrentOverlayVoxel.X, CurrentOverlayVoxel.Y);
             FarmPaintedWorldCells.Add(FarmWorldCell);
 
             UE_LOG(
                 LogTemp,
                 Warning,
-                TEXT("[BuildMode] Farm painted world cell (%d,%d). FarmPaintedWorldCells=%d SelectedCells=%d SelectedCells3D=%d"),
+                TEXT("[BuildMode] Farm painted exact grid cell (%d,%d). FarmPaintedWorldCells=%d SelectedCells=%d SelectedCells3D=%d"),
                 FarmWorldCell.X,
                 FarmWorldCell.Y,
                 FarmPaintedWorldCells.Num(),
@@ -775,13 +853,26 @@ void UBuildModeManager::HandleConfirm()
     {
         if (CommitMineDesignations())
         {
+            if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
+            {
+                GridSelection->CommitSelectedCellsToConfirmedOverlay(EGridDesignationType::Mine);
+                GridSelection->ClearPreviewCells();
+                GridSelection->ClearSelectedCells();
+                GridSelection->EndSelectionTool(false);
+            }
+
             bJustCommitted = true;
             bIsDraggingBuild = false;
             LastPlacedDragVoxel = FIntVector(INT32_MIN);
             bHasDragStart = false;
             DragStartVoxel = FIntVector::ZeroValue;
             bDragStartedFromBlock = false;
-            ClearTileSelectionState();
+
+            SelectedCells.Empty();
+            SelectedCells3D.Empty();
+            FarmPaintedWorldCells.Empty();
+
+            OnCellCountChanged.Broadcast(0);
             UpdateGridOverlay();
         }
         return;
@@ -797,6 +888,14 @@ void UBuildModeManager::HandleConfirm()
 
         if (CommitFarmZone())
         {
+            if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
+            {
+                GridSelection->CommitSelectedCellsToConfirmedOverlay(EGridDesignationType::Farm);
+                GridSelection->ClearPreviewCells();
+                GridSelection->ClearSelectedCells();
+                GridSelection->EndSelectionTool(false);
+            }
+
             bJustCommitted = true;
             bIsDraggingBuild = false;
             LastPlacedDragVoxel = FIntVector(INT32_MIN);
@@ -804,10 +903,11 @@ void UBuildModeManager::HandleConfirm()
             DragStartVoxel = FIntVector::ZeroValue;
             bDragStartedFromBlock = false;
 
-            // Farm designations are committed immediately. Leave build mode after a successful
-            // farm commit so the widget/button cannot accidentally toggle farm mode and cancel
-            // the selection on the next click.
-            ExitBuildMode();
+            SelectedCells.Empty();
+            SelectedCells3D.Empty();
+            FarmPaintedWorldCells.Empty();
+
+            OnCellCountChanged.Broadcast(0);
             BroadcastFeedback(TEXT("Farm zone committed."));
         }
 
@@ -818,12 +918,27 @@ void UBuildModeManager::HandleConfirm()
     {
         if (CommitCustomBuild())
         {
+            if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
+            {
+                GridSelection->CommitSelectedCellsToConfirmedOverlay(EGridDesignationType::Build);
+                GridSelection->ClearPreviewCells();
+                GridSelection->ClearSelectedCells();
+                GridSelection->EndSelectionTool(false);
+            }
+
             bJustCommitted = true;
             bIsDraggingBuild = false;
             LastPlacedDragVoxel = FIntVector(INT32_MIN);
             bHasDragStart = false;
             DragStartVoxel = FIntVector::ZeroValue;
             bDragStartedFromBlock = false;
+
+            SelectedCells.Empty();
+            SelectedCells3D.Empty();
+            FarmPaintedWorldCells.Empty();
+
+            OnCellCountChanged.Broadcast(0);
+            UpdateGridOverlay();
         }
     }
 }
@@ -840,6 +955,10 @@ void UBuildModeManager::HandleCancel()
     {
         CurrentToolMode = EBuildToolMode::None;
         CurrentMode = EBuildMode::None;
+        if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
+        {
+            GridSelection->EndSelectionTool(true);
+        }
         DeactivateGridOverlay();
         DestroyGhost();
         BroadcastSelectionChanged();
@@ -901,7 +1020,10 @@ void UBuildModeManager::EnterFarmMode()
     }
 
     SpawnGhost();
-    ActivateGridOverlayForMode(EBuildToolMode::Farm);
+    if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
+    {
+        GridSelection->BeginSelectionTool(EBuildToolMode::Farm, EGridSelectionShape::Rectangle);
+    }
 
     UE_LOG(LogTemp, Log, TEXT("[BuildMode] Entered Farm mode."));
     OnBuildModeChanged.Broadcast(CurrentMode);
@@ -916,6 +1038,10 @@ void UBuildModeManager::EnterMineMode()
     {
         CurrentToolMode = EBuildToolMode::None;
         CurrentMode = EBuildMode::None;
+        if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
+        {
+            GridSelection->EndSelectionTool(true);
+        }
         DeactivateGridOverlay();
         DestroyGhost();
         BroadcastSelectionChanged();
@@ -945,7 +1071,10 @@ void UBuildModeManager::EnterMineMode()
     bDragStartedFromBlock = false;
 
     SpawnGhost();
-    ActivateGridOverlayForMode(EBuildToolMode::Mine);
+    if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
+    {
+        GridSelection->BeginSelectionTool(EBuildToolMode::Mine, EGridSelectionShape::Rectangle);
+    }
 
     UE_LOG(LogTemp, Log, TEXT("[BuildMode] Entered Mine mode."));
     OnBuildModeChanged.Broadcast(CurrentMode);
@@ -963,6 +1092,10 @@ void UBuildModeManager::EnterDigMode()
     }
 
     ExitBuildMode();
+    if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
+    {
+        GridSelection->EndSelectionTool(true);
+    }
     DeactivateGridOverlay();
     DestroyGhost();
 
@@ -1325,6 +1458,14 @@ void UBuildModeManager::UpdateFromMouse(APlayerController* PC)
         return;
     }
 
+    if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
+    {
+        if (GridSelection->IsSelectionActive())
+        {
+            GridSelection->TickSelectionFromMouse(PC);
+        }
+    }
+
     // Mine uses the same 2D overlay selection as build/farm, but keeps
     // CurrentHoveredVoxel as the true mine/dig target for the mining subsystem.
     if (CurrentToolMode == EBuildToolMode::Mine)
@@ -1338,6 +1479,12 @@ void UBuildModeManager::UpdateFromMouse(APlayerController* PC)
         {
             CurrentHoveredVoxel = GridPos;
             CurrentHoveredCell = VM->WorldToTerrainCell(WorldPos);
+
+            // Overlay uses true voxel-space coordinates. Do not feed it
+            // terrain/farm cells because TileGridOverlayActor converts
+            // VoxelCoord.X/Y directly to world space using CellSizeUU.
+            CurrentOverlayVoxel = WorldToVoxel(WorldPos, 100.0f);
+
             LastValidVoxel = GridPos;
             bHasLastValidVoxel = true;
             bHoveredCellValid = true;
@@ -1346,11 +1493,7 @@ void UBuildModeManager::UpdateFromMouse(APlayerController* PC)
 
             OnHoveredCellChanged.Broadcast(CurrentHoveredCell);
 
-            if (bIsDraggingBuild && bHasDragStart)
-            {
-                AddOrToggleCurrentTileSelection(false);
-            }
-
+            // GridSelectionSubsystem owns drag preview/selection visuals.
             UpdateGhost();
             UpdateGridOverlay();
         }
@@ -1415,6 +1558,12 @@ void UBuildModeManager::UpdateFromMouse(APlayerController* PC)
 
     const FIntPoint TerrainCell = VM->WorldToTerrainCell(HitLocation);
 
+    // True voxel-space coordinate for the visual grid overlay.
+    CurrentOverlayVoxel = WorldToVoxel(HitLocation, 100.0f);
+    CurrentHoveredTerrainZ = HitLocation.Z;
+
+    // Existing gameplay coordinate path.
+    // Keep this because farming/building currently depend on terrain-cell X/Y.
     FIntVector NewVoxel = VM->WorldToGrid3D(HitLocation);
     NewVoxel.X = TerrainCell.X;
     NewVoxel.Y = TerrainCell.Y;
@@ -1506,6 +1655,15 @@ void UBuildModeManager::UpdateFromMouse(APlayerController* PC)
     if (!bIsDraggingBuild || CurrentMode != EBuildMode::CustomDraw || !bHasDragStart)
     {
         return;
+    }
+
+    if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
+    {
+        if (GridSelection->IsDraggingSelection())
+        {
+            // New grid system owns drag preview. Legacy per-frame line rebuild is disabled.
+            return;
+        }
     }
 
     TArray<FIntVector> LineCells3D;
@@ -1642,24 +1800,31 @@ void UBuildModeManager::UpdateFromMouse(APlayerController* PC)
     LastPlacedDragVoxel = CurrentHoveredVoxel;
 
     // Batch-sync the overlay with the rebuilt drag selection.
-    if (GridOverlay)
-    {
-        TMap<FIntVector, float> BatchCells;
-        UVoxelWorldManager* OverlayVM = GetVoxelManager();
+    //if (GridOverlay)
+    //{
+       // TMap<FIntVector, float> BatchCells;
+       // UVoxelWorldManager* OverlayVM = GetVoxelManager();
 
-        for (const FIntVector& Cell : SelectedCells3D)
-        {
-            float CellZ = CurrentHoveredTerrainZ;
-            if (OverlayVM)
-            {
-                const FVector CellWorld = OverlayVM->GridToWorld(FIntPoint(Cell.X, Cell.Y), Cell.Z);
-                CellZ = CellWorld.Z;
-            }
-            BatchCells.Add(Cell, CellZ);
-        }
+       // for (const FIntVector& Cell : SelectedCells3D)
+       // {
+         //   FIntVector OverlayCell = Cell;
+          //  float CellZ = CurrentHoveredTerrainZ;
 
-        GridOverlay->SetSelectedCells(BatchCells);
-    }
+          //  if (OverlayVM)
+          //  {
+                // SelectedCells3D stores legacy gameplay cells for build/farm
+                // compatibility. Convert those cells to world space, then back
+                // to true voxel-space for TileGridOverlayActor rendering.
+              //  const FVector CellWorld = OverlayVM->GridToWorld(FIntPoint(Cell.X, Cell.Y), Cell.Z);
+              //  OverlayCell = WorldToVoxel(CellWorld, 100.0f);
+               // CellZ = CellWorld.Z;
+           // }
+
+          //  BatchCells.Add(OverlayCell, CellZ);
+        //}
+
+        //GridOverlay->SetSelectedCells(BatchCells);
+    //}
 
     if (UPlayerBuildContext* Ctx = GetBuildContext())
     {
@@ -1866,21 +2031,16 @@ bool UBuildModeManager::CommitFarmZone()
         return false;
     }
 
+    // Long-term exact-cell farming path.
+    //
+    // Important: Do NOT mix raw SelectedCells3D voxel coordinates with farm/world cells.
+    // That old mixed-coordinate path could turn a handful of selected cells into
+    // a massive bounding rectangle, e.g. 9 selected cells becoming 57k farm tiles.
+    // FarmPaintedWorldCells is the only accepted farm/world-cell source here.
     TSet<FIntPoint> UniqueWorldCells;
-
     for (const FIntPoint& WorldCell : FarmPaintedWorldCells)
     {
         UniqueWorldCells.Add(WorldCell);
-    }
-
-    for (const FIntVector& Cell3D : SelectedCells3D)
-    {
-        UniqueWorldCells.Add(FIntPoint(Cell3D.X, Cell3D.Y));
-    }
-
-    for (const FIntPoint& Cell2D : SelectedCells)
-    {
-        UniqueWorldCells.Add(Cell2D);
     }
 
     if (UniqueWorldCells.Num() == 0)
@@ -1888,7 +2048,7 @@ bool UBuildModeManager::CommitFarmZone()
         UE_LOG(
             LogTemp,
             Warning,
-            TEXT("[BuildMode] CommitFarmZone failed: no painted cells. FarmPaintedWorldCells=%d SelectedCells=%d SelectedCells3D=%d"),
+            TEXT("[BuildMode] CommitFarmZone failed: no exact farm cells. FarmPaintedWorldCells=%d SelectedCells=%d SelectedCells3D=%d"),
             FarmPaintedWorldCells.Num(),
             SelectedCells.Num(),
             SelectedCells3D.Num());
@@ -1897,12 +2057,53 @@ bool UBuildModeManager::CommitFarmZone()
         return false;
     }
 
-    TSet<FIntPoint> UniqueLocalCells;
+    // FarmPaintedWorldCells stores exact absolute grid/voxel XY cells.
+    // Settlement->WorldOrigin is a terrain/world-map cell, so convert that
+    // origin to the same exact grid space before producing settlement-local
+    // farm cells. This keeps farm jobs near local coordinates instead of
+    // large absolute voxel values.
+    FIntPoint FarmGridOrigin = Settlement->WorldOrigin;
+    if (UVoxelWorldManager* VM = GetVoxelManager())
+    {
+        const FVector OriginWorld = VM->TerrainCellToWorld(Settlement->WorldOrigin, 0.0f, true);
+        const FIntVector OriginVoxel = WorldToVoxel(OriginWorld, 100.0f);
+        FarmGridOrigin = FIntPoint(OriginVoxel.X, OriginVoxel.Y);
+    }
 
+    TSet<FIntPoint> UniqueLocalCells;
     for (const FIntPoint& WorldCell : UniqueWorldCells)
     {
-        const FIntPoint LocalCell = WorldCell - Settlement->WorldOrigin;
-        UniqueLocalCells.Add(LocalCell);
+        UniqueLocalCells.Add(WorldCell - FarmGridOrigin);
+    }
+
+    if (UniqueLocalCells.Num() == 0)
+    {
+        BroadcastFeedback(TEXT("No valid farm tiles selected."));
+        return false;
+    }
+
+    UFarmingSubsystem* FarmingSub = GetFarmingSubsystem();
+    if (!FarmingSub)
+    {
+        BroadcastFeedback(TEXT("Farming system unavailable."));
+        return false;
+    }
+
+    const ECropCategory Category = ECropCategory::Grains;
+    const FName CropRow = FName(TEXT("LP_Wheat"));
+
+    const int32 ZoneID = FarmingSub->CreateFarmZoneFromCells(
+        SettlementID,
+        FarmGridOrigin,
+        UniqueLocalCells,
+        Category,
+        CropRow,
+        false);
+
+    if (ZoneID == INDEX_NONE)
+    {
+        BroadcastFeedback(TEXT("Farm zone creation failed."));
+        return false;
     }
 
     int32 MinX = TNumericLimits<int32>::Max();
@@ -1918,66 +2119,26 @@ bool UBuildModeManager::CommitFarmZone()
         MaxY = FMath::Max(MaxY, LocalCell.Y);
     }
 
-    const FIntPoint LocalOrigin(MinX, MinY);
-    const int32 SizeX = MaxX - MinX + 1;
-    const int32 SizeY = MaxY - MinY + 1;
-
-    UFarmingSubsystem* FarmingSub = GetFarmingSubsystem();
-    if (!FarmingSub)
-    {
-        BroadcastFeedback(TEXT("Farming system unavailable."));
-        return false;
-    }
-
-    const ECropCategory Category = ECropCategory::Grains;
-    const FName CropRow = FName(TEXT("LP_Wheat"));
-
-    // v2: Auto-replant OFF by default. Requires Crop Rotation tech unlock.
-    const int32 ZoneID = FarmingSub->CreateFarmZone(
-        SettlementID,
-        LocalOrigin,
-        SizeX,
-        SizeY,
-        Category,
-        CropRow,
-        false);
-
-    if (ZoneID == INDEX_NONE)
-    {
-        BroadcastFeedback(TEXT("Farm zone creation failed."));
-        return false;
-    }
-
     UE_LOG(LogTemp, Log,
-        TEXT("[BuildMode] Farm zone committed. ZoneID=%d LocalOrigin=(%d,%d) SettlementWorldOrigin=(%d,%d) Size=%dx%d Crop=%s Settlement=%d PaintedWorldCells=%d LocalCells=%d"),
+        TEXT("[BuildMode] Exact farm zone committed. ZoneID=%d ExactCells=%d BoundsLocal=(%d,%d)->(%d,%d) FarmGridOrigin=(%d,%d) Crop=%s Settlement=%d"),
         ZoneID,
-        LocalOrigin.X,
-        LocalOrigin.Y,
-        Settlement->WorldOrigin.X,
-        Settlement->WorldOrigin.Y,
-        SizeX,
-        SizeY,
+        UniqueLocalCells.Num(),
+        MinX,
+        MinY,
+        MaxX,
+        MaxY,
+        FarmGridOrigin.X,
+        FarmGridOrigin.Y,
         *CropRow.ToString(),
-        SettlementID,
-        UniqueWorldCells.Num(),
-        UniqueLocalCells.Num());
+        SettlementID);
 
-    SelectedCells.Empty();
-    SelectedCells3D.Empty();
-    FarmPaintedWorldCells.Empty();
-
-    if (UPlayerBuildContext* Ctx = GetBuildContext())
-    {
-        Ctx->ClearSelection();
-    }
-
-    OnCellCountChanged.Broadcast(0);
-    UpdateGhost();
+    // Do not clear BuildMode/GridSelection state here. HandleConfirm() must first
+    // copy the active grid selection into the persistent confirmed overlay layer.
+    // Cleanup happens in HandleConfirm after CommitSelectedCellsToConfirmedOverlay().
 
     BroadcastFeedback(FString::Printf(
-        TEXT("Farm zone created: %dx%d wheat field. Auto-replant: OFF."),
-        SizeX,
-        SizeY));
+        TEXT("Farm zone created: %d exact tile(s) wheat field. Auto-replant: OFF."),
+        UniqueLocalCells.Num()));
 
     return true;
 }
@@ -2079,20 +2240,28 @@ void UBuildModeManager::UpdateGhost()
         return;
     }
 
-    const bool bUsesCellCursor =
+    const bool bUsesGridOverlayCursor =
         CurrentMode == EBuildMode::CustomDraw ||
         CurrentToolMode == EBuildToolMode::Farm ||
         CurrentToolMode == EBuildToolMode::Mine;
+
+    // IMPORTANT:
+    // CustomDraw/Farm/Mine now use TileGridOverlayActor for their cell visuals.
+    // The old BuildGhostActor custom-draw path renders full cube placeholders,
+    // which is the giant gray block grid seen in PIE. Keep the ghost hidden for
+    // grid tools so the flat overlay is the only selection feedback.
+    if (bUsesGridOverlayCursor && CurrentMode != EBuildMode::Prefab)
+    {
+        GhostActor->ClearAllHighlights();
+        GhostActor->SetGhostState(EBuildGhostState::Hidden);
+        return;
+    }
 
     if (!bHoveredCellValid)
     {
         GhostActor->SetGhostState(EBuildGhostState::Invalid);
 
-        if (bUsesCellCursor)
-        {
-            GhostActor->UpdateCustomDrawCells3D(SelectedCells3D, CurrentHoveredVoxel, VM);
-        }
-        else if (CurrentMode == EBuildMode::Prefab)
+        if (CurrentMode == EBuildMode::Prefab)
         {
             const FVector WorldPos = VM->GridToWorld(
                 FIntPoint(CurrentHoveredVoxel.X, CurrentHoveredVoxel.Y),
@@ -2113,11 +2282,6 @@ void UBuildModeManager::UpdateGhost()
         );
 
         GhostActor->UpdatePrefabGhost(WorldPos, RotationIndex, SelectedBuildingTag, VM, WorldPos.Z);
-        GhostActor->SetGhostState(EBuildGhostState::Valid);
-    }
-    else if (bUsesCellCursor)
-    {
-        GhostActor->UpdateCustomDrawCells3D(SelectedCells3D, CurrentHoveredVoxel, VM);
         GhostActor->SetGhostState(EBuildGhostState::Valid);
     }
 }
@@ -2225,7 +2389,7 @@ void UBuildModeManager::UpdateGridOverlay()
     // Push hover state.
     if (bHoveredCellValid)
     {
-        GridOverlay->SetHoveredCell(CurrentHoveredVoxel, CurrentHoveredTerrainZ);
+        GridOverlay->SetHoveredCell(CurrentOverlayVoxel, CurrentHoveredTerrainZ);
     }
     else
     {
@@ -2259,10 +2423,20 @@ void UBuildModeManager::DeactivateGridOverlay()
         return;
     }
 
-    GridOverlay->HideOverlay();
     GridOverlay->ClearSelection();
     GridOverlay->ClearDragPreview();
     GridOverlay->ClearHover();
+
+    // Keep confirmed designations visible after exiting a tool. The overlay
+    // actor now has persistent confirmed state separate from active selection.
+    if (GridOverlay->HasConfirmedDesignationCells())
+    {
+        GridOverlay->ShowOverlay();
+    }
+    else
+    {
+        GridOverlay->HideOverlay();
+    }
 }
 
 FIntVector UBuildModeManager::WorldToVoxel(const FVector& WorldPos, float VoxelSize)
@@ -2282,11 +2456,100 @@ FIntPoint UBuildModeManager::VoxelToTerrainCell(const FIntVector& VoxelCoord, in
     );
 }
 
+void UBuildModeManager::SyncSelectionFromGridSelection()
+{
+    UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem();
+    if (!GridSelection)
+    {
+        return;
+    }
+
+    TArray<FGridSelectionCell> GridCells;
+    GridSelection->GetSelectedCells(GridCells);
+
+    SelectedCells.Empty();
+    SelectedCells3D.Empty();
+    FarmPaintedWorldCells.Empty();
+
+    UPlayerBuildContext* Ctx = GetBuildContext();
+    if (Ctx)
+    {
+        Ctx->ClearSelection();
+    }
+
+    UVoxelWorldManager* VM = GetVoxelManager();
+
+    for (const FGridSelectionCell& GridCell : GridCells)
+    {
+        SelectedCells3D.AddUnique(GridCell.VoxelCoord);
+
+        FIntPoint ToolCell = FIntPoint::ZeroValue;
+
+        if (CurrentToolMode == EBuildToolMode::Farm)
+        {
+            // Option B farm selection:
+            // Preserve the exact grid/voxel XY selected by the player.
+            // Do NOT collapse through WorldToTerrainCell(), because several
+            // 100uu grid cells can map into one larger terrain cell.
+            //
+            // Result:
+            //   1 click       = 1 farm cell
+            //   3 clicks      = 3 farm cells
+            //   2x5 drag      = 10 farm cells
+            ToolCell = FIntPoint(GridCell.VoxelCoord.X, GridCell.VoxelCoord.Y);
+            FarmPaintedWorldCells.Add(ToolCell);
+        }
+        else
+        {
+            // Non-farm tools keep the existing 2D helper cell conversion for
+            // legacy UI/build-context compatibility. Build/Mine still use
+            // SelectedCells3D as their authoritative exact voxel selection.
+            ToolCell = VoxelToTerrainCell(GridCell.VoxelCoord);
+            if (VM)
+            {
+                const FVector WorldPos(
+                    (static_cast<float>(GridCell.VoxelCoord.X) + 0.5f) * 100.0f,
+                    (static_cast<float>(GridCell.VoxelCoord.Y) + 0.5f) * 100.0f,
+                    GridCell.TerrainZ);
+
+                ToolCell = VM->WorldToTerrainCell(WorldPos);
+            }
+        }
+
+        SelectedCells.AddUnique(ToolCell);
+
+        if (Ctx)
+        {
+            Ctx->AddCell(ToolCell);
+        }
+    }
+
+    const int32 Count = CurrentToolMode == EBuildToolMode::Farm
+        ? FarmPaintedWorldCells.Num()
+        : SelectedCells3D.Num();
+
+    OnCellCountChanged.Broadcast(Count);
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[BuildMode] Synced grid selection. Tool=%d GridCells=%d Selected2D=%d Selected3D=%d FarmCells=%d"),
+        static_cast<int32>(CurrentToolMode),
+        GridCells.Num(),
+        SelectedCells.Num(),
+        SelectedCells3D.Num(),
+        FarmPaintedWorldCells.Num());
+}
+
 void UBuildModeManager::ClearTileSelectionState()
 {
     SelectedCells.Empty();
     SelectedCells3D.Empty();
     FarmPaintedWorldCells.Empty();
+
+    if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
+    {
+        GridSelection->ClearSelectedCells();
+        GridSelection->ClearPreviewCells();
+    }
 
     if (GridOverlay)
     {
@@ -2320,7 +2583,7 @@ void UBuildModeManager::AddOrToggleCurrentTileSelection(bool bToggleExisting)
 
         if (GridOverlay)
         {
-            GridOverlay->RemoveSelectedCell(CurrentHoveredVoxel);
+            GridOverlay->RemoveSelectedCell(CurrentOverlayVoxel);
         }
     }
     else
@@ -2335,7 +2598,7 @@ void UBuildModeManager::AddOrToggleCurrentTileSelection(bool bToggleExisting)
 
         if (GridOverlay)
         {
-            GridOverlay->AddSelectedCell(CurrentHoveredVoxel, CurrentHoveredTerrainZ);
+            GridOverlay->AddSelectedCell(CurrentOverlayVoxel, CurrentHoveredTerrainZ);
         }
     }
 

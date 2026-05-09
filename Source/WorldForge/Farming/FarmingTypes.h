@@ -202,9 +202,32 @@ struct FWorldForgeFarmZone
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
     int32 SizeX = 1;
 
-    /** Height in tiles (Y axis). */
+    /** Height in tiles (Y axis).
+     *  For exact-cell zones, this is a cached bounding-box height used for UI/debug only.
+     *  The authoritative tile list is ExplicitLocalCells / Tiles. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
     int32 SizeY = 1;
+
+    /** Absolute voxel/grid origin for this farm zone.
+     *
+     *  Exact-cell farm zones store TilePos as settlement-local grid offsets.
+     *  FarmGridOrigin converts those local offsets back to absolute voxel/grid
+     *  coordinates when spawning crop visuals or raycasting terrain.
+     */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    FIntPoint FarmGridOrigin = FIntPoint::ZeroValue;
+
+    /** Exact farm cells in settlement-local coordinates.
+     *
+     *  This supports long-term cell-accurate farming/zoning:
+     *  - 1 click = 1 farm cell
+     *  - 3 separate clicks = 3 farm cells
+     *  - 2x5 drag = exactly 10 farm cells
+     *
+     *  Origin/SizeX/SizeY remain as a cached bounding box for older UI/debug code,
+     *  but they are not the source of truth for exact-cell zones. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    TSet<FIntPoint> ExplicitLocalCells;
 
     /** If true, harvested tiles automatically get replant jobs. */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
@@ -237,51 +260,151 @@ struct FWorldForgeFarmZone
 
     // ── Helpers ──
 
-    /** Get the tile record at local offset (X, Y) within the zone. */
+    /** True if the exact local tile is part of this farm zone. */
+    bool ContainsLocalTile(FIntPoint LocalTile) const
+    {
+        if (ExplicitLocalCells.Num() > 0)
+        {
+            return ExplicitLocalCells.Contains(LocalTile);
+        }
+
+        const FIntPoint LocalOffset = LocalTile - Origin;
+        return
+            LocalOffset.X >= 0 && LocalOffset.X < SizeX &&
+            LocalOffset.Y >= 0 && LocalOffset.Y < SizeY;
+    }
+
+    /** Get the tile record by settlement-local tile position. */
+    FFarmTileRecord* GetTileByPosition(FIntPoint LocalTile)
+    {
+        for (FFarmTileRecord& Tile : Tiles)
+        {
+            if (Tile.TilePos == LocalTile)
+            {
+                return &Tile;
+            }
+        }
+
+        return nullptr;
+    }
+
+    const FFarmTileRecord* GetTileByPosition(FIntPoint LocalTile) const
+    {
+        for (const FFarmTileRecord& Tile : Tiles)
+        {
+            if (Tile.TilePos == LocalTile)
+            {
+                return &Tile;
+            }
+        }
+
+        return nullptr;
+    }
+
+    /** Legacy helper: Get tile at rectangle offset (X,Y). */
     FFarmTileRecord* GetTile(int32 X, int32 Y)
     {
-        const int32 Idx = Y * SizeX + X;
-        return Tiles.IsValidIndex(Idx) ? &Tiles[Idx] : nullptr;
+        return GetTileByPosition(Origin + FIntPoint(X, Y));
     }
 
     const FFarmTileRecord* GetTile(int32 X, int32 Y) const
     {
-        const int32 Idx = Y * SizeX + X;
-        return Tiles.IsValidIndex(Idx) ? &Tiles[Idx] : nullptr;
+        return GetTileByPosition(Origin + FIntPoint(X, Y));
     }
 
-    /** Initialize the Tiles array for the current SizeX * SizeY. */
+    static void ResetTileDefaults(FFarmTileRecord& Tile)
+    {
+        Tile.GrowthStage = ECropGrowthStage::None;
+        Tile.WaterLevel = 0.0f;
+        Tile.bSoilPrepared = false;
+        Tile.bPrepSoilJobPending = false;
+        Tile.LastPrepSoilJobStep = INDEX_NONE;
+        Tile.SoilPreparedStep = INDEX_NONE;
+        Tile.bPlanted = false;
+        Tile.bPlantJobPending = false;
+        Tile.bWaterJobPending = false;
+        Tile.bHarvestJobPending = false;
+        Tile.bAwaitingManualReplant = false;
+        Tile.LastPlantJobStep = INDEX_NONE;
+        Tile.LastWaterJobStep = INDEX_NONE;
+        Tile.LastHarvestJobStep = INDEX_NONE;
+        Tile.SimGrowthStageIndex = INDEX_NONE;
+        Tile.LastGrowthAdvanceStep = INDEX_NONE;
+        Tile.PlantedStep = INDEX_NONE;
+        Tile.HarvestedStep = INDEX_NONE;
+        Tile.CropActor = nullptr;
+    }
+
+    /** Initialize the Tiles array for the current SizeX * SizeY rectangle.
+     *  This is kept for legacy rectangle callers. It also fills ExplicitLocalCells
+     *  so exact-cell queries work for both old and new zone creation paths. */
     void InitTiles()
     {
-        TotalTiles = SizeX * SizeY;
-        Tiles.SetNum(TotalTiles);
+        ExplicitLocalCells.Reset();
 
         for (int32 Y = 0; Y < SizeY; ++Y)
         {
             for (int32 X = 0; X < SizeX; ++X)
             {
-                FFarmTileRecord& Tile = Tiles[Y * SizeX + X];
-                Tile.TilePos = Origin + FIntPoint(X, Y);
-                Tile.GrowthStage = ECropGrowthStage::None;
-                Tile.WaterLevel = 0.0f;
-                Tile.bSoilPrepared = false;
-                Tile.bPrepSoilJobPending = false;
-                Tile.LastPrepSoilJobStep = INDEX_NONE;
-                Tile.SoilPreparedStep = INDEX_NONE;
-                Tile.bPlanted = false;
-                Tile.bPlantJobPending = false;
-                Tile.bWaterJobPending = false;
-                Tile.bHarvestJobPending = false;
-                Tile.bAwaitingManualReplant = false;
-                Tile.LastPlantJobStep = INDEX_NONE;
-                Tile.LastWaterJobStep = INDEX_NONE;
-                Tile.LastHarvestJobStep = INDEX_NONE;
-                Tile.SimGrowthStageIndex = INDEX_NONE;
-                Tile.LastGrowthAdvanceStep = INDEX_NONE;
-                Tile.PlantedStep = INDEX_NONE;
-                Tile.HarvestedStep = INDEX_NONE;
-                Tile.CropActor = nullptr;
+                ExplicitLocalCells.Add(Origin + FIntPoint(X, Y));
             }
+        }
+
+        InitTilesFromCells(ExplicitLocalCells);
+    }
+
+    /** Initialize the Tiles array from exact settlement-local cells. */
+    void InitTilesFromCells(const TSet<FIntPoint>& InLocalCells)
+    {
+        ExplicitLocalCells = InLocalCells;
+
+        TArray<FIntPoint> SortedCells;
+        SortedCells.Reserve(ExplicitLocalCells.Num());
+
+        for (const FIntPoint& Cell : ExplicitLocalCells)
+        {
+            SortedCells.Add(Cell);
+        }
+        SortedCells.Sort([](const FIntPoint& A, const FIntPoint& B)
+        {
+            return A.Y == B.Y ? A.X < B.X : A.Y < B.Y;
+        });
+
+        if (SortedCells.Num() == 0)
+        {
+            Origin = FIntPoint::ZeroValue;
+            SizeX = 0;
+            SizeY = 0;
+            TotalTiles = 0;
+            Tiles.Reset();
+            return;
+        }
+
+        int32 MinX = TNumericLimits<int32>::Max();
+        int32 MinY = TNumericLimits<int32>::Max();
+        int32 MaxX = TNumericLimits<int32>::Min();
+        int32 MaxY = TNumericLimits<int32>::Min();
+
+        for (const FIntPoint& Cell : SortedCells)
+        {
+            MinX = FMath::Min(MinX, Cell.X);
+            MinY = FMath::Min(MinY, Cell.Y);
+            MaxX = FMath::Max(MaxX, Cell.X);
+            MaxY = FMath::Max(MaxY, Cell.Y);
+        }
+
+        Origin = FIntPoint(MinX, MinY);
+        SizeX = MaxX - MinX + 1;
+        SizeY = MaxY - MinY + 1;
+        TotalTiles = SortedCells.Num();
+
+        Tiles.SetNum(TotalTiles);
+
+        for (int32 Index = 0; Index < SortedCells.Num(); ++Index)
+        {
+            FFarmTileRecord& Tile = Tiles[Index];
+            Tile.TilePos = SortedCells[Index];
+            ResetTileDefaults(Tile);
         }
     }
 };
