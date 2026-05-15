@@ -1,8 +1,9 @@
-﻿#include "BuildModeWidget.h"
+#include "BuildModeWidget.h"
 #include "Player/BuildModeManager.h"
 #include "WorldForgeDataRegistry.h"
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
+#include "Player/WorldForgePlayerController.h"
 
 UBuildModeManager* UBuildModeWidget::GetManager()
 {
@@ -28,6 +29,22 @@ UWorldForgeDataRegistry* UBuildModeWidget::GetRegistry() const
 	}
 
 	return nullptr;
+}
+
+namespace
+{
+	static void WF_ExitMineModeBeforeNonMineTool(UBuildModeWidget* Widget)
+	{
+		if (!Widget)
+		{
+			return;
+		}
+
+		if (AWorldForgePlayerController* PC = Widget->GetOwningPlayer<AWorldForgePlayerController>())
+		{
+			PC->ExecuteExitMineModeIfActive();
+		}
+	}
 }
 
 void UBuildModeWidget::NativeConstruct()
@@ -95,6 +112,8 @@ void UBuildModeWidget::SelectPrefabBuilding(FGameplayTag BuildingTag)
 		return;
 	}
 
+	WF_ExitMineModeBeforeNonMineTool(this);
+
 	Mgr->EnterPrefabMode(BuildingTag);
 
 	OnStockpileChanged(Mgr->GetCurrentRequiredItemTag(), Mgr->GetCurrentAvailableUnits());
@@ -109,6 +128,8 @@ void UBuildModeWidget::SelectMaterial(FGameplayTag MaterialTag)
 	{
 		return;
 	}
+
+	WF_ExitMineModeBeforeNonMineTool(this);
 
 	if (Mgr->GetCurrentMode() == EBuildMode::CustomDraw)
 	{
@@ -126,6 +147,8 @@ void UBuildModeWidget::SwitchToCustomDrawMode()
 {
 	UBuildModeManager* Mgr = GetManager();
 	if (!Mgr) return;
+
+	WF_ExitMineModeBeforeNonMineTool(this);
 
 	FGameplayTag DefaultMaterial = FGameplayTag::RequestGameplayTag(
 		FName(TEXT("WorldForge.Voxel.Material.Stone")));
@@ -146,6 +169,8 @@ void UBuildModeWidget::SwitchToDigMode()
 		return;
 	}
 
+	WF_ExitMineModeBeforeNonMineTool(this);
+
 	Mgr->EnterDigMode();
 
 	// Dig has no material/building cost in Phase 1.
@@ -156,6 +181,17 @@ void UBuildModeWidget::SwitchToDigMode()
 
 void UBuildModeWidget::SwitchToMineMode()
 {
+	AWorldForgePlayerController* PC = GetOwningPlayer<AWorldForgePlayerController>();
+	if (PC)
+	{
+		PC->ExecuteToggleMineMode();
+		OnStockpileChanged(FGameplayTag::EmptyTag, 0);
+		UE_LOG(LogTemp, Log, TEXT("[BuildModeWidget] Toggled mine mode via player controller."));
+		return;
+	}
+
+	// Fallback only. This enters Mine mode but cannot activate controller-owned
+	// camera/cutaway subsystems, so the player controller path above is preferred.
 	UBuildModeManager* Mgr = GetManager();
 	if (!Mgr)
 	{
@@ -163,10 +199,8 @@ void UBuildModeWidget::SwitchToMineMode()
 	}
 
 	Mgr->EnterMineMode();
-
 	OnStockpileChanged(FGameplayTag::EmptyTag, 0);
-
-	UE_LOG(LogTemp, Log, TEXT("[BuildModeWidget] Switched to mine mode."));
+	UE_LOG(LogTemp, Warning, TEXT("[BuildModeWidget] Switched to mine mode through manager fallback."));
 }
 
 void UBuildModeWidget::SwitchToFarmMode()
@@ -176,6 +210,8 @@ void UBuildModeWidget::SwitchToFarmMode()
 	{
 		return;
 	}
+
+	WF_ExitMineModeBeforeNonMineTool(this);
 
 	// Safety guard: if the Farm button is clicked while Farm mode already has
 	// painted cells, commit the farm selection instead of toggling/canceling it.
@@ -204,6 +240,18 @@ void UBuildModeWidget::CancelBuild()
 		return;
 	}
 
+	// Mine mode owns extra controller/camera/cutaway state. Exit through the
+	// player controller so TerrainCutawaySubsystem and mining camera state are
+	// properly cleaned up.
+	if (Mgr->IsInMineMode())
+	{
+		if (AWorldForgePlayerController* PC = GetOwningPlayer<AWorldForgePlayerController>())
+		{
+			PC->ExecuteToggleMineMode();
+			return;
+		}
+	}
+
 	Mgr->HandleCancel();
 }
 
@@ -220,6 +268,104 @@ void UBuildModeWidget::ConfirmBuild()
 		Mgr->GetSelectedCellCount());
 
 	Mgr->HandleConfirm();
+}
+
+
+void UBuildModeWidget::ToggleStaticGridOverlay()
+{
+	if (UBuildModeManager* Mgr = GetManager())
+	{
+		const bool bEnabled = Mgr->ToggleStaticBaseGrid();
+		UE_LOG(LogTemp, Log, TEXT("[BuildModeWidget] Static grid overlay toggled: %s"), bEnabled ? TEXT("ON") : TEXT("OFF"));
+	}
+}
+
+void UBuildModeWidget::SetStaticGridOverlayEnabled(bool bEnabled)
+{
+	if (UBuildModeManager* Mgr = GetManager())
+	{
+		Mgr->SetStaticBaseGridEnabled(bEnabled);
+		UE_LOG(LogTemp, Log, TEXT("[BuildModeWidget] Static grid overlay set: %s"), bEnabled ? TEXT("ON") : TEXT("OFF"));
+	}
+}
+
+bool UBuildModeWidget::IsStaticGridOverlayEnabled() const
+{
+	const UBuildModeManager* Mgr = const_cast<UBuildModeWidget*>(this)->GetManager();
+	return Mgr && Mgr->IsStaticBaseGridEnabled();
+}
+
+void UBuildModeWidget::ToggleMiningRemovalMode()
+{
+	UBuildModeManager* Mgr = GetManager();
+	if (!Mgr)
+	{
+		return;
+	}
+
+	Mgr->ToggleMiningRemovalMode();
+	UE_LOG(LogTemp, Log, TEXT("[BuildModeWidget] Toggled mining removal mode."));
+}
+
+void UBuildModeWidget::SetMiningRemovalMode(EMiningRemovalMode NewMode)
+{
+	UBuildModeManager* Mgr = GetManager();
+	if (!Mgr)
+	{
+		return;
+	}
+
+	Mgr->SetMiningRemovalMode(NewMode);
+	UE_LOG(LogTemp, Log, TEXT("[BuildModeWidget] Set mining removal mode: %d"), static_cast<int32>(NewMode));
+}
+
+EMiningRemovalMode UBuildModeWidget::GetMiningRemovalMode() const
+{
+	const UBuildModeManager* Mgr = const_cast<UBuildModeWidget*>(this)->GetManager();
+	return Mgr ? Mgr->GetMiningRemovalMode() : EMiningRemovalMode::VoxelCube;
+}
+
+FText UBuildModeWidget::GetMiningRemovalModeLabel() const
+{
+	const UBuildModeManager* Mgr = const_cast<UBuildModeWidget*>(this)->GetManager();
+	return Mgr ? Mgr->GetMiningRemovalModeText() : FText::FromString(TEXT("Mining: Voxel Cube"));
+}
+
+
+void UBuildModeWidget::ToggleMiningHeightMode()
+{
+	UBuildModeManager* Mgr = GetManager();
+	if (!Mgr)
+	{
+		return;
+	}
+
+	const EWFMiningHeightMode NewMode = Mgr->ToggleMiningHeightMode();
+	UE_LOG(LogTemp, Log, TEXT("[BuildModeWidget] Toggled mining height mode: %d"), static_cast<int32>(NewMode));
+}
+
+void UBuildModeWidget::SetMiningHeightMode(EWFMiningHeightMode NewMode)
+{
+	UBuildModeManager* Mgr = GetManager();
+	if (!Mgr)
+	{
+		return;
+	}
+
+	Mgr->SetMiningHeightMode(NewMode);
+	UE_LOG(LogTemp, Log, TEXT("[BuildModeWidget] Set mining height mode: %d"), static_cast<int32>(NewMode));
+}
+
+EWFMiningHeightMode UBuildModeWidget::GetMiningHeightMode() const
+{
+	const UBuildModeManager* Mgr = const_cast<UBuildModeWidget*>(this)->GetManager();
+	return Mgr ? Mgr->GetMiningHeightMode() : EWFMiningHeightMode::TwoVoxelColumn;
+}
+
+FText UBuildModeWidget::GetMiningHeightModeLabel() const
+{
+	const UBuildModeManager* Mgr = const_cast<UBuildModeWidget*>(this)->GetManager();
+	return Mgr ? Mgr->GetMiningHeightModeText() : FText::FromString(TEXT("Mine Height: 2 Block Column"));
 }
 
 // ================================

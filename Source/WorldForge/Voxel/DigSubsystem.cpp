@@ -44,8 +44,8 @@ void UDigSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 
 void UDigSubsystem::Deinitialize()
 {
-	CachedVoxelManager = nullptr;
-	CachedEventBus = nullptr;
+	CachedVoxelManager  = nullptr;
+	CachedEventBus      = nullptr;
 	CachedResourceSpawn = nullptr;
 
 	UE_LOG(LogTemp, Log, TEXT("[DigSubsystem] Deinitialized."));
@@ -60,8 +60,8 @@ void UDigSubsystem::Deinitialize()
 FDigResult UDigSubsystem::DigAt(const FDigParams& Params)
 {
 	FDigResult Result;
-	Result.DigOrigin = Params.TargetGridPos;
-	Result.DigRadius = Params.Radius;
+	Result.DigOrigin  = Params.TargetGridPos;
+	Result.DigRadius  = Params.Radius;
 	Result.BrushShape = Params.BrushShape;
 
 	UVoxelWorldManager* VoxelMgr = GetVoxelManager();
@@ -73,13 +73,6 @@ FDigResult UDigSubsystem::DigAt(const FDigParams& Params)
 		return Result;
 	}
 
-	// ------------------------------------------------------------------
-	// Step 1:
-	// Compute brush metadata for debug drawing and result tracking.
-	//
-	// We are NOT applying this brush directly here.
-	// VoxelWorldManager owns the private SDF/runtime edit implementation.
-	// ------------------------------------------------------------------
 	FDigBrushRecord BrushRecord;
 	if (!ComputeBrushParameters(Params, BrushRecord))
 	{
@@ -90,20 +83,8 @@ FDigResult UDigSubsystem::DigAt(const FDigParams& Params)
 		return Result;
 	}
 
-	// BrushID is intentionally INDEX_NONE because DigSubsystem is not
-	// directly creating/removing SDF brush records anymore.
 	BrushRecord.BrushID = INDEX_NONE;
 
-	// ------------------------------------------------------------------
-	// Step 2:
-	// Sample blocks in the volume before removing anything.
-	//
-	// Each FRemovedBlockEntry stores:
-	// - GridPosition
-	// - BlockType
-	//
-	// This is also what UndoDig uses to restore removed blocks.
-	// ------------------------------------------------------------------
 	TArray<FRemovedBlockEntry> SampledBlocks = SampleBlocksInVolume(Params);
 
 	if (SampledBlocks.Num() == 0)
@@ -115,15 +96,6 @@ FDigResult UDigSubsystem::DigAt(const FDigParams& Params)
 		return Result;
 	}
 
-	// ------------------------------------------------------------------
-	// Step 3:
-	// Remove each sampled block through VoxelWorldManager's public API.
-	//
-	// This avoids illegal access to private functions like:
-	// - MakeDigBrush()
-	// - ApplyRuntimeBrush()
-	// - RemoveBrushByID()
-	// ------------------------------------------------------------------
 	TArray<FRemovedBlockEntry> ActuallyRemovedBlocks;
 	ActuallyRemovedBlocks.Reserve(SampledBlocks.Num());
 
@@ -153,19 +125,10 @@ FDigResult UDigSubsystem::DigAt(const FDigParams& Params)
 		return Result;
 	}
 
-	// ------------------------------------------------------------------
-	// Step 4:
-	// Populate result.
-	// ------------------------------------------------------------------
-	Result.BrushRecord = BrushRecord;
-
-	// Public API mode does not get a real private SDF BrushID from VoxelWorldManager.
-	// Use a stable pseudo ID so code that checks BrushID != INDEX_NONE does not
-	// incorrectly treat a successful public-API dig as "no effect".
+	Result.BrushRecord         = BrushRecord;
 	Result.BrushRecord.BrushID = NextDigResultID++;
-
-	Result.RemovedBlocks = MoveTemp(ActuallyRemovedBlocks);
-	Result.DepthReached = CalculateMaxDepthReached(Result.RemovedBlocks);
+	Result.RemovedBlocks       = MoveTemp(ActuallyRemovedBlocks);
+	Result.DepthReached        = CalculateMaxDepthReached(Result.RemovedBlocks);
 
 	TArray<FIntVector> DugPositions;
 	DugPositions.Reserve(Result.RemovedBlocks.Num());
@@ -177,7 +140,6 @@ FDigResult UDigSubsystem::DigAt(const FDigParams& Params)
 
 	Result.RevealedNodes = CheckForNodeReveals(DugPositions, Result.DepthReached);
 
-	// Trace logging.
 	for (const FRemovedBlockEntry& Entry : Result.RemovedBlocks)
 	{
 		UE_LOG(LogTemp, Warning,
@@ -189,10 +151,6 @@ FDigResult UDigSubsystem::DigAt(const FDigParams& Params)
 			Result.DepthReached);
 	}
 
-	// ------------------------------------------------------------------
-	// Step 5:
-	// Dispatch dig result through EventBus.
-	// ------------------------------------------------------------------
 	if (Result.WasEffective())
 	{
 		BroadcastDigResult(Result);
@@ -207,7 +165,6 @@ FDigResult UDigSubsystem::DigAt(const FDigParams& Params)
 	}
 
 #if !UE_BUILD_SHIPPING
-	// Debug visualization: draw the intended brush volume.
 	if (UWorld* World = GetWorld())
 	{
 		switch (Params.BrushShape)
@@ -270,12 +227,6 @@ bool UDigSubsystem::UndoDig(const FDigResult& Result)
 		return false;
 	}
 
-	// ------------------------------------------------------------------
-	// Restore every block that DigAt actually removed.
-	//
-	// This is safer than relying on BrushID because the current public
-	// VoxelWorldManager API restores blocks by grid position + block type.
-	// ------------------------------------------------------------------
 	int32 RestoredCount = 0;
 
 	for (const FRemovedBlockEntry& Entry : Result.RemovedBlocks)
@@ -305,18 +256,6 @@ bool UDigSubsystem::UndoDig(const FDigResult& Result)
 		return false;
 	}
 
-	// TODO Phase 2+:
-	// If the dig revealed resource nodes, un-reveal them here.
-	//
-	// UResourceNodeSubsystem* NodeSub = GetWorld()->GetSubsystem<UResourceNodeSubsystem>();
-	// if (NodeSub)
-	// {
-	//     for (const FRevealedNodeEntry& Node : Result.RevealedNodes)
-	//     {
-	//         NodeSub->HideNode(Node.NodeID);
-	//     }
-	// }
-
 	UE_LOG(LogTemp, Log,
 		TEXT("[DigSubsystem] UndoDig — restored %d/%d block(s) at origin %s."),
 		RestoredCount,
@@ -324,6 +263,76 @@ bool UDigSubsystem::UndoDig(const FDigResult& Result)
 		*Result.DigOrigin.ToString());
 
 	return RestoredCount > 0;
+}
+
+// ===================================================================
+// Stability integration — cascade collapse entry point
+// ===================================================================
+
+void UDigSubsystem::DigVoxelAtGrid(FIntVector VoxelGrid)
+{
+	// Called exclusively by UStabilitySubsystem::ProcessCollapses().
+	// Removes a voxel physically without creating a designation, job, or
+	// EventBus event.  The StabilitySubsystem owns the collapse event dispatch.
+
+	UVoxelWorldManager* VoxelMgr = GetVoxelManager();
+	if (!VoxelMgr)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[DigSubsystem] DigVoxelAtGrid failed — VoxelWorldManager unavailable. Grid=(%d,%d,%d)"),
+			VoxelGrid.X, VoxelGrid.Y, VoxelGrid.Z);
+		return;
+	}
+
+	const bool bRemoved = VoxelMgr->RemoveBlockAt(VoxelGrid);
+
+	UE_LOG(LogTemp, Log,
+		TEXT("[DigSubsystem] DigVoxelAtGrid (%d,%d,%d) Removed=%s"),
+		VoxelGrid.X, VoxelGrid.Y, VoxelGrid.Z,
+		bRemoved ? TEXT("true") : TEXT("false"));
+}
+
+// ===================================================================
+// Ore spawn Z helper
+// ===================================================================
+
+FVector UDigSubsystem::GetOreSpawnWorldPosition(FIntVector VoxelGrid) const
+{
+	// ─────────────────────────────────────────────────────────────────
+	// USAGE GUIDE FOR ResourceSpawnSubsystem:
+	//
+	// When spawning a BP_MetalOreNode actor for an underground record,
+	// replace any raw tile-height Z calculation with:
+	//
+	//   UDigSubsystem* DS = GetWorld()->GetSubsystem<UDigSubsystem>();
+	//   FVector SpawnLoc  = DS->GetOreSpawnWorldPosition(
+	//       FIntVector(VoxelX, VoxelY, VoxelZ));
+	//   World->SpawnActor<AActor>(OreNodeClass, SpawnLoc, FRotator::ZeroRotator);
+	//
+	// WHY:
+	// Step 08 (resource seeding) runs before the voxel terrain is fully
+	// rendered, so VeinTile Z values come from the 2D heightmap.  The SDF
+	// terrain generator can produce surface Z values that differ by 1-2
+	// voxels (100-200 UU) from the heightmap at slopes and hills.  Using
+	// GridToWorld() here ensures actors land exactly on the voxel surface
+	// (or at the correct underground depth) that VoxelPlugin actually rendered.
+	//
+	// For "buried" ore nodes (those below SurfaceZ), this gives the exact
+	// underground world position the ShatterStone BP actor expects when it
+	// activates after the player mines into that chunk.
+	// ─────────────────────────────────────────────────────────────────
+
+	const UVoxelWorldManager* VoxelMgr = const_cast<UDigSubsystem*>(this)->GetVoxelManager();
+	if (!VoxelMgr)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[DigSubsystem] GetOreSpawnWorldPosition — VoxelWorldManager unavailable."));
+		return FVector::ZeroVector;
+	}
+
+	// GridToWorld is the single authoritative voxel-index → world-space (cm) conversion.
+	// It already accounts for VoxelSize (100 UU), world offset, and chunk boundaries.
+	return VoxelMgr->GridToWorld(FIntPoint(VoxelGrid.X, VoxelGrid.Y), VoxelGrid.Z);
 }
 
 // ===================================================================
@@ -343,15 +352,12 @@ bool UDigSubsystem::CanDigAt(const FIntVector& GridPos) const
 		return false;
 	}
 
-	// First allow direct underground solid targets.
 	const FGameplayTag DirectBlockType = VoxelMgr->GetBlockTypeAt(GridPos);
 	if (DirectBlockType.IsValid() && DirectBlockType != TAG_Terrain_Bedrock)
 	{
 		return true;
 	}
 
-	// Fallback: if the player clicked near the surface/air, resolve to a
-	// nearby surface block. This preserves slope/surface digging behavior.
 	FIntVector SurfaceBlock;
 	if (!VoxelMgr->TryFindSurfaceBlockNearZ(
 		FIntPoint(GridPos.X, GridPos.Y),
@@ -415,15 +421,6 @@ bool UDigSubsystem::ComputeBrushParameters(
 		return false;
 	}
 
-	// ------------------------------------------------------------------
-	// Match SampleBlocksInVolume behavior:
-	//
-	// If the raw target is already a solid block, treat it as an underground
-	// cave/tunnel dig and keep the exact target Z.
-	//
-	// If the raw target is air/invalid, fall back to nearby surface snapping.
-	// ------------------------------------------------------------------
-
 	const FGameplayTag TargetBlockType = VoxelMgr->GetBlockTypeAt(Params.TargetGridPos);
 	const bool bTargetIsSolid =
 		TargetBlockType.IsValid() &&
@@ -443,8 +440,6 @@ bool UDigSubsystem::ComputeBrushParameters(
 		}
 	}
 
-	// Offset the brush center downward by half the action depth so the
-	// debug volume shows the area being carved into the terrain.
 	const float DepthOffset =
 		static_cast<float>(FMath::Max(Params.DepthPerAction, 1)) *
 		VoxelSize *
@@ -456,43 +451,40 @@ bool UDigSubsystem::ComputeBrushParameters(
 
 	WorldCenter.Z -= DepthOffset;
 
-	const int32 R = FMath::Max(Params.Radius, 1);
+	const int32 R     = FMath::Max(Params.Radius, 1);
 	const int32 Depth = FMath::Max(Params.DepthPerAction, 1);
 
-	// Radius=1 means one block footprint.
-	// Radius=2 means 3x3 footprint.
-	// Radius=R means (2R-1)x(2R-1).
-	const float XYExtent = (static_cast<float>(R) - 0.5f + 0.225f) * VoxelSize;
+	const float XYExtent  = (static_cast<float>(R) - 0.5f + 0.225f) * VoxelSize;
 	const float HalfDepth = (static_cast<float>(Depth) * 0.5f + 0.225f) * VoxelSize;
 
 	const float Falloff = (Params.FalloffOverride > 0.0f)
 		? Params.FalloffOverride
 		: VoxelSize * 0.5f;
 
-	OutRecord.Shape = Params.BrushShape;
+	OutRecord.Shape       = Params.BrushShape;
 	OutRecord.WorldCenter = WorldCenter;
-	OutRecord.Falloff = Falloff;
-	OutRecord.BrushID = INDEX_NONE;
+	OutRecord.Falloff     = Falloff;
+	OutRecord.BrushID     = INDEX_NONE;
 
 	switch (Params.BrushShape)
 	{
 	case EDigBrushShape::Sphere:
-		OutRecord.Radius = FMath::Max(XYExtent, HalfDepth);
+		OutRecord.Radius      = FMath::Max(XYExtent, HalfDepth);
 		OutRecord.HalfExtents = FVector::ZeroVector;
 		break;
 
 	case EDigBrushShape::Cylinder:
-		OutRecord.Radius = XYExtent;
+		OutRecord.Radius      = XYExtent;
 		OutRecord.HalfExtents = FVector(0.0f, 0.0f, HalfDepth);
 		break;
 
 	case EDigBrushShape::Box:
-		OutRecord.Radius = 0.0f;
+		OutRecord.Radius      = 0.0f;
 		OutRecord.HalfExtents = FVector(XYExtent, XYExtent, HalfDepth);
 		break;
 
 	default:
-		OutRecord.Radius = FMath::Max(XYExtent, HalfDepth);
+		OutRecord.Radius      = FMath::Max(XYExtent, HalfDepth);
 		OutRecord.HalfExtents = FVector::ZeroVector;
 		break;
 	}
@@ -514,28 +506,15 @@ TArray<FRemovedBlockEntry> UDigSubsystem::SampleBlocksInVolume(const FDigParams&
 		return Entries;
 	}
 
-	const int32 R = FMath::Max(Params.Radius - 1, 0);
+	const int32 R     = FMath::Max(Params.Radius - 1, 0);
 	const int32 Depth = FMath::Max(Params.DepthPerAction, 1);
-
-	// ------------------------------------------------------------------
-	// Important distinction:
-	//
-	// Surface digging:
-	//   If the raw target is not a solid block, find the nearby surface and
-	//   dig downward from that surface.
-	//
-	// Underground/cave digging:
-	//   If the raw target is already a valid solid block, DO NOT snap back
-	//   to the surface. Use the exact target Z so horizontal X/Y digging
-	//   carves a tunnel instead of a vertical shaft.
-	// ------------------------------------------------------------------
 
 	const FGameplayTag TargetBlockType = VoxelMgr->GetBlockTypeAt(Params.TargetGridPos);
 	const bool bTargetIsSolid =
 		TargetBlockType.IsValid() &&
 		TargetBlockType != TAG_Terrain_Bedrock;
 
-	FIntVector AnchorBlock = Params.TargetGridPos;
+	FIntVector AnchorBlock       = Params.TargetGridPos;
 	bool bUseSurfaceFollowing = !bTargetIsSolid;
 
 	if (bUseSurfaceFollowing)
@@ -569,8 +548,6 @@ TArray<FRemovedBlockEntry> UDigSubsystem::SampleBlocksInVolume(const FDigParams&
 
 			if (bUseSurfaceFollowing)
 			{
-				// Surface mode: each column follows its own local surface
-				// so digging on slopes still behaves naturally.
 				const int32 VerticalSearchRadius = FMath::Max(Depth + 8, 10);
 
 				if (!VoxelMgr->TryFindSurfaceBlockNearZ(
@@ -584,8 +561,6 @@ TArray<FRemovedBlockEntry> UDigSubsystem::SampleBlocksInVolume(const FDigParams&
 			}
 			else
 			{
-				// Underground mode: keep the original Z plane.
-				// This is what allows horizontal cave/tunnel digging.
 				ColumnAnchor = FIntVector(X, Y, Params.TargetGridPos.Z);
 			}
 
@@ -608,8 +583,6 @@ TArray<FRemovedBlockEntry> UDigSubsystem::SampleBlocksInVolume(const FDigParams&
 			}
 #endif
 
-			// Surface mode digs downward from the local surface.
-			// Underground mode digs from the exact tunnel/cave target plane.
 			for (int32 Z = ColumnAnchor.Z; Z > ColumnAnchor.Z - Depth; --Z)
 			{
 				const FIntVector Pos(X, Y, Z);
@@ -625,7 +598,7 @@ TArray<FRemovedBlockEntry> UDigSubsystem::SampleBlocksInVolume(const FDigParams&
 				{
 					FRemovedBlockEntry Entry;
 					Entry.GridPosition = Pos;
-					Entry.BlockType = BlockType;
+					Entry.BlockType    = BlockType;
 
 					Entries.Add(MoveTemp(Entry));
 				}
@@ -637,7 +610,7 @@ TArray<FRemovedBlockEntry> UDigSubsystem::SampleBlocksInVolume(const FDigParams&
 }
 
 // ===================================================================
-// Node reveals — Phase 2 stub
+// Node reveals
 // ===================================================================
 
 TArray<FRevealedNodeEntry> UDigSubsystem::CheckForNodeReveals(
@@ -660,7 +633,6 @@ TArray<FRevealedNodeEntry> UDigSubsystem::CheckForNodeReveals(
 
 	const float VoxelSize = VoxelMgr->GetRenderVoxelSize();
 
-	// Check each dug position for proximity to hidden resource nodes.
 	// Detection radius = 3 voxels — close enough that the dig exposed the node.
 	const float DetectionRadius = VoxelSize * 3.0f;
 
@@ -668,6 +640,8 @@ TArray<FRevealedNodeEntry> UDigSubsystem::CheckForNodeReveals(
 
 	for (const FIntVector& GridPos : DugPositions)
 	{
+		// GridToWorld gives the correct world position for any voxel grid coord,
+		// matching the same conversion used by GetOreSpawnWorldPosition().
 		const FVector WorldPos = VoxelMgr->GridToWorld(
 			FIntPoint(GridPos.X, GridPos.Y), GridPos.Z);
 
@@ -681,15 +655,14 @@ TArray<FRevealedNodeEntry> UDigSubsystem::CheckForNodeReveals(
 				continue;
 			}
 
-			// Mark the node as exposed in the spawn subsystem.
 			ResourceSpawn->MarkNodeExposed(Node.NodeID);
 			AlreadyRevealed.Add(Node.NodeID);
 
 			FRevealedNodeEntry Entry;
-			Entry.NodeID = Node.NodeID;
-			Entry.ResourceTag = Node.ResourceTag;
-			Entry.WorldPosition = Node.WorldPosition;
-			Entry.Category = Node.Category;
+			Entry.NodeID       = Node.NodeID;
+			Entry.ResourceTag  = Node.ResourceTag;
+			Entry.WorldPosition= Node.WorldPosition;
+			Entry.Category     = Node.Category;
 
 			Revealed.Add(MoveTemp(Entry));
 
@@ -760,8 +733,7 @@ UVoxelWorldManager* UDigSubsystem::GetVoxelManager() const
 	}
 
 	UDigSubsystem* MutableThis = const_cast<UDigSubsystem*>(this);
-
-	UWorld* World = GetWorld();
+	UWorld* World              = GetWorld();
 
 	MutableThis->CachedVoxelManager = World
 		? World->GetSubsystem<UVoxelWorldManager>()
@@ -784,8 +756,7 @@ UEventBus* UDigSubsystem::GetEventBus() const
 	}
 
 	UDigSubsystem* MutableThis = const_cast<UDigSubsystem*>(this);
-
-	UWorld* World = GetWorld();
+	UWorld* World              = GetWorld();
 
 	MutableThis->CachedEventBus = World
 		? World->GetSubsystem<UEventBus>()
@@ -808,8 +779,7 @@ UResourceSpawnSubsystem* UDigSubsystem::GetResourceSpawnSubsystem() const
 	}
 
 	UDigSubsystem* MutableThis = const_cast<UDigSubsystem*>(this);
-
-	UWorld* World = GetWorld();
+	UWorld* World              = GetWorld();
 
 	MutableThis->CachedResourceSpawn = World
 		? World->GetSubsystem<UResourceSpawnSubsystem>()

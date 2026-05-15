@@ -47,9 +47,16 @@ UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Skill_Cooking);
 UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Skill_Crafting);
 UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Skill_Hauling);
 UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Skill_Building);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Skill_Research);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Skill_Medicine);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Skill_Combat);
+
+// ---- Race tags ------------------------------------------------------
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Race_Dwarf);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Race_HighElf);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Race_Human);
 
 // ---- Race mechanic tags --------------------------------------------
-// ADDED
 UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Race_Mechanic_PressureLimit);
 
 // ---- Currency tags -------------------------------------------------
@@ -73,7 +80,6 @@ UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Sim_Event_ColonistInjured);
 UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Sim_Event_MoraleCrisis);
 UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Sim_Event_StockpileEmpty);
 
-// ADDED
 // ---- Building tags -------------------------------------------------
 UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Building_Housing_Hut);
 UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Building_Storage_Stockpile);
@@ -122,9 +128,6 @@ UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Resource_VoidCrystal);
 UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Resource_Starstone);
 
 // ---- Batch 3: Resource Discovery category tags ---------------------
-// These are the category-level tags used by ResourceSpawnSubsystem's
-// PickResourceTag() and DigSubsystem's CheckForNodeReveals().
-// Crystal maps to EResourceCategory::Crystal; Fossil maps to Fossil.
 UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Resource_Crystal);
 UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Resource_Fossil);
 
@@ -151,6 +154,24 @@ UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Item_Mushrooms);
 // ---- Farming sim event tags --------------------------------------------
 UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Sim_Event_CropHarvested);
 UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Sim_Event_CropDied);
+
+// ════════════════════════════════════════════════════════════════════
+// Structural Stability System Tags
+// ════════════════════════════════════════════════════════════════════
+
+// Fired by UStabilitySubsystem::ProcessCollapses() whenever one or more
+// ceiling voxels lose structural support and cave in.
+// Payload carriers: FCollapseResult (collapsed voxel list + injured agent IDs).
+// HealthProcessor subscribes to apply cave-in damage to injured agents.
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Sim_Event_CaveCollapse);
+
+// Fired when a named colonist survives a collapse (within injury radius
+// but not killed). Source for narrative / Commander's Desk entries.
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Sim_Event_ColonistEscapedCollapse);
+
+// Identifies the Structural Stability debug overlay (overlay #15).
+// Colours ceiling voxels near mined areas by their span-stability tier.
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Overlay_Stability);
 
 // ====================================================================
 // Blueprint Access Library
@@ -292,7 +313,7 @@ public:
     UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Event")
     static FGameplayTag GetStockpileEmptyEventTag();
 
-    // ADDED
+    // ---- Building tags ---------------------------------------------
     UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Building")
     static FGameplayTag GetBuildingHousingHutTag();
 
@@ -364,4 +385,15 @@ public:
 
     UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Event")
     static FGameplayTag GetCropDiedEventTag();
+
+    // ════ Structural Stability ════
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Event")
+    static FGameplayTag GetCaveCollapseEventTag();
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Event")
+    static FGameplayTag GetColonistEscapedCollapseEventTag();
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Tags|Overlay")
+    static FGameplayTag GetOverlayStabilityTag();
 };

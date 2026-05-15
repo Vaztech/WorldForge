@@ -7,7 +7,7 @@ Saved/
 .vs/
 *.VC.db
 mods/
-
+.DLL
 # Unreal Engine
 Binaries/
 Build/

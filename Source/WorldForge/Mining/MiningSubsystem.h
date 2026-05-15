@@ -14,6 +14,11 @@ class UVoxelWorldManager;
  * v5.0: CompleteDesignation now uses VoxelWorldManager::ApplyRuntimeBrush()
  * with a sphere SDF brush instead of RemoveBlockAt(). The brush ID is stored
  * on the designation for potential undo/rollback.
+ *
+ * v5.1 (Stability): CompleteDesignation calls UStabilitySubsystem::OnVoxelRemoved()
+ * immediately after a successful dig. Any cascade cave-in voxels are cancelled
+ * via CancelDesignationsAtVoxel(). TryReserveDesignation skips underground
+ * designations that have no air-column path to the surface yet.
  */
 UCLASS()
 class WORLDFORGE_API UMiningSubsystem : public UWorldSubsystem
@@ -74,6 +79,25 @@ public:
 	UFUNCTION(BlueprintPure)
 	EDigBrushShape GetDesignationBrushShape(int32 DesignationID) const;
 
+	UFUNCTION(BlueprintCallable, Category = "WorldForge|Mining")
+	void SetMiningRemovalMode(EMiningRemovalMode NewMode);
+
+	UFUNCTION(BlueprintCallable, Category = "WorldForge|Mining")
+	EMiningRemovalMode ToggleMiningRemovalMode();
+
+	UFUNCTION(BlueprintPure, Category = "WorldForge|Mining")
+	EMiningRemovalMode GetMiningRemovalMode() const { return CurrentRemovalMode; }
+
+	UFUNCTION(BlueprintPure, Category = "WorldForge|Mining")
+	FText GetMiningRemovalModeText() const;
+
+	/**
+	 * Cancels all non-terminal designations whose VoxelGrid matches the
+	 * given collapsed voxel. Called by CompleteDesignation after a cave-in
+	 * so agents are not sent into destroyed terrain.
+	 */
+	void CancelDesignationsAtVoxel(FIntVector VoxelGrid, int32 SettlementID);
+
 private:
 	UPROPERTY()
 	TObjectPtr<UVoxelWorldManager> VoxelWorldManager = nullptr;
@@ -82,6 +106,9 @@ private:
 	TMap<int32, FMiningDesignation> Designations;
 
 	int32 NextDesignationID = 1;
+
+	UPROPERTY(Transient)
+	EMiningRemovalMode CurrentRemovalMode = EMiningRemovalMode::VoxelCube;
 
 private:
 	bool IsDesignationTerminal(const FMiningDesignation& Designation) const;

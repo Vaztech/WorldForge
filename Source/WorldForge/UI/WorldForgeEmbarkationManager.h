@@ -47,6 +47,10 @@ struct WORLDFORGE_API FWorldForgeEmbarkConfig
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Embark")
 	TArray<FWorldForgeEmbarkColonist> StartingColonists;
+
+	// Fallback race used when a colonist entry has no RaceTag selected.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Embark")
+	FGameplayTag DefaultRaceTag;
 };
 
 UCLASS(BlueprintType)
@@ -66,6 +70,18 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "WorldForge|Embark")
 	void SetColonists(const TArray<FWorldForgeEmbarkColonist>& InColonists);
+
+	UFUNCTION(BlueprintCallable, Category = "WorldForge|Embark")
+	void SetColonistRaceByIndex(int32 ColonistIndex, FGameplayTag RaceTag);
+
+	UFUNCTION(BlueprintCallable, Category = "WorldForge|Embark")
+	void SetDefaultRace(FGameplayTag RaceTag);
+
+	UFUNCTION(BlueprintCallable, Category = "WorldForge|Embark")
+	TArray<FGameplayTag> GetDefaultPlayableRaceTags() const;
+
+	UFUNCTION(BlueprintCallable, Category = "WorldForge|Embark")
+	void EnsureDefaultColonists(int32 DesiredCount);
 
 	UFUNCTION(BlueprintCallable, Category = "WorldForge|Embark")
 	void ClearColonists();

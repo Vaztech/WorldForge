@@ -483,7 +483,7 @@ void UWorldMapSubsystem::RebuildDetailedMapTexture()
         }
 
         DetailedMapTexture->SRGB = true;
-        DetailedMapTexture->Filter = TF_Nearest;
+        DetailedMapTexture->Filter = TF_Nearest; // Keep the overworld map crisp/readable instead of blurry.
         DetailedMapTexture->AddressX = TA_Clamp;
         DetailedMapTexture->AddressY = TA_Clamp;
         DetailedMapTexture->UpdateResource();
@@ -834,6 +834,44 @@ bool UWorldMapSubsystem::TileIndexToXY(int32 TileIndex, int32& OutTileX, int32& 
     return true;
 }
 
+bool UWorldMapSubsystem::WorldPositionToWorldTileIndex(const FVector& WorldPosition, int32& OutWorldTileIndex) const
+{
+    OutWorldTileIndex = INDEX_NONE;
+
+    const UWorld* World = GetWorld();
+    const UVoxelWorldManager* VoxelMgr = World ? World->GetSubsystem<UVoxelWorldManager>() : nullptr;
+    if (!VoxelMgr)
+    {
+        return false;
+    }
+
+    const FIntPoint WorldCell = VoxelMgr->WorldToTerrainCell(WorldPosition);
+    return WorldCellToWorldTileIndex(WorldCell, OutWorldTileIndex);
+}
+
+bool UWorldMapSubsystem::WorldCellToWorldTileIndex(const FIntPoint& WorldCell, int32& OutWorldTileIndex) const
+{
+    OutWorldTileIndex = INDEX_NONE;
+
+    // Terrain/world cells are the strategic world-map tile X/Y space used by embark selection.
+    return TileXYToIndex(WorldCell.X, WorldCell.Y, OutWorldTileIndex);
+}
+
+bool UWorldMapSubsystem::VoxelCellToWorldTileIndex(const FIntPoint& VoxelCell, int32& OutWorldTileIndex) const
+{
+    OutWorldTileIndex = INDEX_NONE;
+
+    const UWorld* World = GetWorld();
+    const UVoxelWorldManager* VoxelMgr = World ? World->GetSubsystem<UVoxelWorldManager>() : nullptr;
+    if (!VoxelMgr)
+    {
+        return false;
+    }
+
+    const FIntPoint WorldCell = VoxelMgr->VoxelCellToChunkCell(VoxelCell);
+    return WorldCellToWorldTileIndex(WorldCell, OutWorldTileIndex);
+}
+
 bool UWorldMapSubsystem::NormalizedMapUVToTile(
     const FVector2D& NormalizedUV,
     int32& OutTileX,
@@ -1100,6 +1138,20 @@ FColor UWorldMapSubsystem::MakeTileMapColor(const FWorldTileData& Tile) const
     const FGameplayTag PlainsTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Plains")), false);
     const FGameplayTag GrasslandTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Grassland")), false);
     const FGameplayTag HillsTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Hills")), false);
+    const FGameplayTag AlpineTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Alpine")), false);
+    const FGameplayTag SnowPeakTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.SnowPeak")), false);
+    const FGameplayTag IceSheetTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.IceSheet")), false);
+    const FGameplayTag TaigaTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Taiga")), false);
+    const FGameplayTag WoodlandTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Woodland")), false);
+    const FGameplayTag ShrublandTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Shrubland")), false);
+    const FGameplayTag SteppeTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Steppe")), false);
+    const FGameplayTag SavannaTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Savanna")), false);
+    const FGameplayTag MarshTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Marsh")), false);
+    const FGameplayTag JungleTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Jungle")), false);
+    const FGameplayTag RiverTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.River")), false);
+    const FGameplayTag CanyonTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Canyon")), false);
+    const FGameplayTag VolcanicTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Volcanic")), false);
+    const FGameplayTag LavaTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Lava")), false);
 
     FColor BaseColor;
 
@@ -1115,27 +1167,71 @@ FColor UWorldMapSubsystem::MakeTileMapColor(const FWorldTileData& Tile) const
     {
         BaseColor = FColor(30, 85, 160);
     }
+    else if (Tile.BiomeType.MatchesTag(RiverTag))
+    {
+        BaseColor = FColor(45, 130, 200);
+    }
     else if (Tile.BiomeType.MatchesTag(LakeTag) || Tile.BiomeType.MatchesTag(WaterTag))
     {
         BaseColor = FColor(45, 110, 185);
+    }
+    else if (Tile.BiomeType.MatchesTag(LavaTag))
+    {
+        BaseColor = FColor(230, 55, 15);
     }
     else if (Tile.BiomeType.MatchesTag(CoastalTag))
     {
         BaseColor = FColor(210, 196, 145);
     }
-    else if (Tile.BiomeType.MatchesTag(MountainTag))
+    else if (Tile.BiomeType.MatchesTag(IceSheetTag) || Tile.BiomeType.MatchesTag(SnowPeakTag))
     {
-        const uint8 V = static_cast<uint8>(FMath::Lerp(140.0f, 235.0f, Elevation));
+        BaseColor = FColor(230, 235, 240);
+    }
+    else if (Tile.BiomeType.MatchesTag(MountainTag) || Tile.BiomeType.MatchesTag(AlpineTag))
+    {
+        const uint8 V = static_cast<uint8>(FMath::Lerp(135.0f, 235.0f, Elevation));
         BaseColor = FColor(V, V, V);
+    }
+    else if (Tile.BiomeType.MatchesTag(CanyonTag))
+    {
+        BaseColor = FColor(150, 95, 65);
     }
     else if (Tile.BiomeType.MatchesTag(HillsTag))
     {
         BaseColor = FColor(120, 110, 85);
     }
-    else if (Tile.BiomeType.MatchesTag(ForestTag))
+    else if (Tile.BiomeType.MatchesTag(VolcanicTag))
+    {
+        BaseColor = FColor(80, 75, 70);
+    }
+    else if (Tile.BiomeType.MatchesTag(JungleTag))
+    {
+        BaseColor = FColor(20, 120, 45);
+    }
+    else if (Tile.BiomeType.MatchesTag(ForestTag) || Tile.BiomeType.MatchesTag(WoodlandTag))
     {
         const uint8 G = static_cast<uint8>(FMath::Lerp(90.0f, 180.0f, Elevation));
         BaseColor = FColor(40, G, 50);
+    }
+    else if (Tile.BiomeType.MatchesTag(TaigaTag))
+    {
+        BaseColor = FColor(55, 115, 90);
+    }
+    else if (Tile.BiomeType.MatchesTag(MarshTag))
+    {
+        BaseColor = FColor(55, 105, 75);
+    }
+    else if (Tile.BiomeType.MatchesTag(ShrublandTag))
+    {
+        BaseColor = FColor(125, 145, 85);
+    }
+    else if (Tile.BiomeType.MatchesTag(SavannaTag))
+    {
+        BaseColor = FColor(155, 165, 80);
+    }
+    else if (Tile.BiomeType.MatchesTag(SteppeTag))
+    {
+        BaseColor = FColor(135, 150, 90);
     }
     else if (Tile.BiomeType.MatchesTag(DesertTag))
     {
@@ -1381,4 +1477,163 @@ FColor UWorldMapSubsystem::MakeResourceLayerColor(const FWorldTileData& Tile) co
         static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(Blended.G * Brightness * 255.0f), 0, 255)),
         static_cast<uint8>(FMath::Clamp(FMath::RoundToInt(Blended.B * Brightness * 255.0f), 0, 255)),
         255);
+}
+// ═══════════════════════════════════════════════════════════════════
+// Embark / tile selection helpers
+// ═══════════════════════════════════════════════════════════════════
+
+bool UWorldMapSubsystem::IsTileClaimed(int32 TileX, int32 TileY) const
+{
+    int32 TileIndex = INDEX_NONE;
+    if (!TileXYToIndex(TileX, TileY, TileIndex) || !WorldTiles.IsValidIndex(TileIndex))
+    {
+        return false;
+    }
+
+    return WorldTiles[TileIndex].ControllingCivID >= 0;
+}
+
+bool UWorldMapSubsystem::IsTileWaterLike(int32 TileX, int32 TileY) const
+{
+    int32 TileIndex = INDEX_NONE;
+    if (!TileXYToIndex(TileX, TileY, TileIndex) || !WorldTiles.IsValidIndex(TileIndex))
+    {
+        return true;
+    }
+
+    const FWorldTileData& Tile = WorldTiles[TileIndex];
+    const FString Biome = Tile.BiomeType.ToString();
+
+    if (Tile.WaterDepth > KINDA_SMALL_NUMBER)
+    {
+        return true;
+    }
+
+    if (Biome.Contains(TEXT("DeepOcean")) ||
+        Biome.Contains(TEXT("Ocean")) ||
+        Biome.Contains(TEXT("Sea")) ||
+        Biome.Contains(TEXT("Lake")) ||
+        Biome.Contains(TEXT("River")) ||
+        Biome.Contains(TEXT("Underwater")))
+    {
+        return true;
+    }
+
+    // Step02 sea threshold is roughly 0.48.  Keep a small safety floor so
+    // borderline coast/water tiles are not selected as colony starts.
+    return Tile.Elevation < 0.48f;
+}
+
+bool UWorldMapSubsystem::IsTileLandLike(int32 TileX, int32 TileY) const
+{
+    int32 TileIndex = INDEX_NONE;
+    if (!TileXYToIndex(TileX, TileY, TileIndex) || !WorldTiles.IsValidIndex(TileIndex))
+    {
+        return false;
+    }
+
+    return !IsTileWaterLike(TileX, TileY);
+}
+
+bool UWorldMapSubsystem::IsTileValidForEmbark(int32 TileX, int32 TileY, FString& OutReason) const
+{
+    OutReason.Empty();
+
+    int32 TileIndex = INDEX_NONE;
+    if (!TileXYToIndex(TileX, TileY, TileIndex) || !WorldTiles.IsValidIndex(TileIndex))
+    {
+        OutReason = TEXT("Invalid tile.");
+        return false;
+    }
+
+    if (IsTileClaimed(TileX, TileY))
+    {
+        OutReason = TEXT("Claimed by another civilization.");
+        return false;
+    }
+
+    if (IsTileWaterLike(TileX, TileY))
+    {
+        OutReason = TEXT("Water tile. Select land.");
+        return false;
+    }
+
+    OutReason = TEXT("Valid embark region.");
+    return true;
+}
+
+FString UWorldMapSubsystem::BuildTileSurveyText(int32 TileX, int32 TileY, bool bDebugReveal) const
+{
+    int32 TileIndex = INDEX_NONE;
+    if (!TileXYToIndex(TileX, TileY, TileIndex) || !WorldTiles.IsValidIndex(TileIndex))
+    {
+        return TEXT("Invalid tile.");
+    }
+
+    const FWorldTileData& Tile = WorldTiles[TileIndex];
+    FString BlockReason;
+    const bool bValidEmbark = IsTileValidForEmbark(TileX, TileY, BlockReason);
+
+    FString Out = FString::Printf(
+        TEXT("Tile (%d,%d)  Index=%d\nBiome: %s\nElevation: %.2f  WaterDepth: %.2f\nClaimed: %s\nEmbark: %s"),
+        TileX,
+        TileY,
+        TileIndex,
+        *Tile.BiomeType.ToString(),
+        Tile.Elevation,
+        Tile.WaterDepth,
+        Tile.ControllingCivID >= 0 ? *FString::Printf(TEXT("Civ %d"), Tile.ControllingCivID) : TEXT("No"),
+        bValidEmbark ? TEXT("Valid") : *BlockReason);
+
+    const bool bCanRevealSurvey = bDebugReveal ||
+        Tile.KnowledgeState.KnowledgeLevel == EKnowledgeLevel::Surveyed ||
+        Tile.KnowledgeState.KnowledgeLevel == EKnowledgeLevel::Live ||
+        Tile.KnowledgeState.KnowledgeLevel == EKnowledgeLevel::Rumored;
+
+    if (!bCanRevealSurvey)
+    {
+        Out += TEXT("\nResources: Unknown (survey required)");
+        return Out;
+    }
+
+    const int32 IdxMetal = static_cast<int32>(EResourceCategory::Metal);
+    const int32 IdxCrystal = static_cast<int32>(EResourceCategory::Crystal);
+    const int32 IdxFossil = static_cast<int32>(EResourceCategory::Fossil);
+
+    const TArray<float>& Density = Tile.ResourceSurvey.DensityByCategory;
+    const TArray<float>& Depth = Tile.ResourceSurvey.PeakDepthByCategory;
+
+    const float MetalPct = Density.IsValidIndex(IdxMetal) ? FMath::Clamp(Density[IdxMetal] * 100.0f, 0.0f, 100.0f) : 0.0f;
+    const float CrystalPct = Density.IsValidIndex(IdxCrystal) ? FMath::Clamp(Density[IdxCrystal] * 100.0f, 0.0f, 100.0f) : 0.0f;
+    const float FossilPct = Density.IsValidIndex(IdxFossil) ? FMath::Clamp(Density[IdxFossil] * 100.0f, 0.0f, 100.0f) : 0.0f;
+    const float RichnessPct = FMath::Clamp(Tile.ResourceSurvey.OverallRichness * 100.0f, 0.0f, 100.0f);
+
+    Out += FString::Printf(TEXT("\nResources: Richness %.0f%%"), RichnessPct);
+
+    if (MetalPct > 0.1f)
+    {
+        Out += FString::Printf(TEXT("\n  Metal/Fe: %.1f%%  PeakDepth: %.0f"), MetalPct, Depth.IsValidIndex(IdxMetal) ? Depth[IdxMetal] : 0.0f);
+    }
+    if (CrystalPct > 0.1f)
+    {
+        Out += FString::Printf(TEXT("\n  Crystal: %.1f%%  PeakDepth: %.0f"), CrystalPct, Depth.IsValidIndex(IdxCrystal) ? Depth[IdxCrystal] : 0.0f);
+    }
+    if (FossilPct > 0.1f)
+    {
+        Out += FString::Printf(TEXT("\n  Fossil/Stone: %.1f%%  PeakDepth: %.0f"), FossilPct, Depth.IsValidIndex(IdxFossil) ? Depth[IdxFossil] : 0.0f);
+    }
+
+    if (MetalPct <= 0.1f && CrystalPct <= 0.1f && FossilPct <= 0.1f)
+    {
+        Out += TEXT("\n  No strong mineral signal detected.");
+    }
+
+    Out += FString::Printf(
+        TEXT("\nWorld Effects: Sacred %.0f%% | Corruption %.0f%% | Fear %.0f%% | Commerce %.0f%%"),
+        FMath::Clamp(Tile.Sacredness * 100.0f, 0.0f, 100.0f),
+        FMath::Clamp(Tile.Corruption * 100.0f, 0.0f, 100.0f),
+        FMath::Clamp(Tile.FearPressure * 100.0f, 0.0f, 100.0f),
+        FMath::Clamp(Tile.CommercePressure * 100.0f, 0.0f, 100.0f));
+
+    return Out;
 }

@@ -33,7 +33,7 @@ private:
     UHierarchicalInstancedStaticMeshComponent* GetOrCreateHISM(UStaticMesh* Mesh);
 
     // ✅ NOW VALID because struct is visible
-    FTransform MakeBuildingTransform(int32 BuildingIndex, const FBuildingVisualRule& Rule) const;
+    FTransform MakeBuildingTransform(const FSettlementState& SettlementState, int32 BuildingIndex, const FBuildingVisualRule& Rule) const;
 
 private:
     UPROPERTY()

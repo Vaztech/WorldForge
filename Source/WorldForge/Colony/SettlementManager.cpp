@@ -1,5 +1,7 @@
 #include "SettlementManager.h"
 #include "GameplayTagContainer.h"
+#include "WorldMapSubsystem.h"
+#include "Engine/World.h"
 
 void USettlementManager::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -11,36 +13,45 @@ int32 USettlementManager::CreateSettlement(const FString& Name, int32 WorldTileI
 {
     UE_LOG(
         LogTemp,
-        Warning,
+        Log,
         TEXT("[SettlementManager] CreateSettlement called. Existing settlement count=%d"),
         Settlements.Num()
     );
 
-    if (Settlements.Num() > 0)
-    {
-        UE_LOG(
-            LogTemp,
-            Error,
-            TEXT("[SettlementManager] BLOCKED duplicate settlement creation. Returning existing SettlementID=%d"),
-            Settlements[0].SettlementID
-        );
-
-        return Settlements[0].SettlementID;
-    }
+    // WorldForge now supports multiple active settlements: player colony plus
+    // generated NPC civilization settlements. Do not collapse all creation
+    // requests into settlement 0. Duplicate protection belongs at the caller
+    // level when a specific WorldTileID/OwnerCivID needs uniqueness.
 
     FSettlementState NewSettlement;
     NewSettlement.SettlementID = NextSettlementID++;
     NewSettlement.Name = Name;
     NewSettlement.WorldTileID = WorldTileID;
 
+    if (WorldTileID != INDEX_NONE)
+    {
+        NewSettlement.ClaimedWorldTileIDs.AddUnique(WorldTileID);
+
+        UE_LOG(
+            LogTemp,
+            Log,
+            TEXT("[SettlementManager] Settlement %d initial claim added. WorldTileID=%d Claims=%d"),
+            NewSettlement.SettlementID,
+            WorldTileID,
+            NewSettlement.ClaimedWorldTileIDs.Num()
+        );
+    }
+
     Settlements.Add(NewSettlement);
 
     UE_LOG(
         LogTemp,
         Log,
-        TEXT("[SettlementManager] Created '%s' ID=%d"),
+        TEXT("[SettlementManager] Created '%s' ID=%d WorldTileID=%d Claims=%d"),
         *Name,
-        NewSettlement.SettlementID
+        NewSettlement.SettlementID,
+        NewSettlement.WorldTileID,
+        NewSettlement.ClaimedWorldTileIDs.Num()
     );
 
     return NewSettlement.SettlementID;
@@ -148,6 +159,350 @@ void USettlementManager::SetPlayerCurrency(int32 SettlementID, FGameplayTag Curr
     }
 }
 
+bool USettlementManager::AddClaimedWorldTileToSettlement(int32 SettlementID, int32 WorldTileID)
+{
+    if (WorldTileID == INDEX_NONE)
+    {
+        return false;
+    }
+
+    FSettlementState* Settlement = GetMutableSettlement(SettlementID);
+    if (!Settlement)
+    {
+        return false;
+    }
+
+    if (Settlement->ClaimedWorldTileIDs.Contains(WorldTileID))
+    {
+        return true;
+    }
+
+    Settlement->ClaimedWorldTileIDs.Add(WorldTileID);
+    SetVisualDirty(SettlementID);
+
+    UE_LOG(
+        LogTemp,
+        Log,
+        TEXT("[SettlementManager] Settlement %d claim added. WorldTileID=%d Claims=%d"),
+        SettlementID,
+        WorldTileID,
+        Settlement->ClaimedWorldTileIDs.Num()
+    );
+
+    return true;
+}
+
+bool USettlementManager::DoesSettlementClaimWorldTile(int32 SettlementID, int32 WorldTileID) const
+{
+    if (WorldTileID == INDEX_NONE)
+    {
+        return false;
+    }
+
+    const FSettlementState* Settlement = GetSettlement(SettlementID);
+    return Settlement && Settlement->ClaimedWorldTileIDs.Contains(WorldTileID);
+}
+
+const TArray<int32>* USettlementManager::GetClaimedWorldTilesForSettlement(int32 SettlementID) const
+{
+    const FSettlementState* Settlement = GetSettlement(SettlementID);
+    return Settlement ? &Settlement->ClaimedWorldTileIDs : nullptr;
+}
+
+bool USettlementManager::CanPlayerClaimWorldTile(int32 WorldTileID, FString& OutReason) const
+{
+    OutReason.Empty();
+
+    const FSettlementState* PlayerSettlement = GetSettlement(PlayerSettlementID);
+    if (PlayerSettlementID == INDEX_NONE || !PlayerSettlement)
+    {
+        OutReason = TEXT("No player settlement exists.");
+        return false;
+    }
+
+    const UWorld* World = GetWorld();
+    const UWorldMapSubsystem* WorldMapSubsystem = World ? World->GetSubsystem<UWorldMapSubsystem>() : nullptr;
+    if (!WorldMapSubsystem || !WorldMapSubsystem->IsInitialized())
+    {
+        OutReason = TEXT("World map is unavailable.");
+        return false;
+    }
+
+    int32 TileX = INDEX_NONE;
+    int32 TileY = INDEX_NONE;
+    if (!WorldMapSubsystem->TileIndexToXY(WorldTileID, TileX, TileY))
+    {
+        OutReason = TEXT("Invalid world tile.");
+        return false;
+    }
+
+    FWorldTileData TileData;
+    if (!WorldMapSubsystem->GetTileData(WorldTileID, TileData))
+    {
+        OutReason = TEXT("Invalid world tile.");
+        return false;
+    }
+
+    if (PlayerSettlement->ClaimedWorldTileIDs.Contains(WorldTileID))
+    {
+        OutReason = TEXT("Tile is already claimed by your colony.");
+        return false;
+    }
+
+    for (const FSettlementState& Settlement : Settlements)
+    {
+        if (Settlement.SettlementID == PlayerSettlementID)
+        {
+            continue;
+        }
+
+        if (Settlement.ClaimedWorldTileIDs.Contains(WorldTileID))
+        {
+            OutReason = TEXT("Tile is already claimed by another settlement.");
+            return false;
+        }
+    }
+
+    if (TileData.ControllingCivID >= 0)
+    {
+        OutReason = TEXT("Tile is controlled by another civilization.");
+        return false;
+    }
+
+    if (!WorldMapSubsystem->IsTileLandLike(TileX, TileY))
+    {
+        // Reuses the existing conservative world-map land helper: invalid tiles,
+        // water depth, ocean/sea/lake/river/underwater biomes, and low-elevation
+        // sea cells are all rejected for player claim expansion.
+        OutReason = TEXT("Tile is water or otherwise not claimable land.");
+        return false;
+    }
+
+    if (!IsWorldTileAdjacentToPlayerClaim(WorldTileID))
+    {
+        OutReason = TEXT("Tile is not adjacent to existing claim.");
+        return false;
+    }
+
+    OutReason = TEXT("Tile can be claimed.");
+    return true;
+}
+
+bool USettlementManager::ClaimWorldTileForPlayerSettlement(int32 WorldTileID, FString& OutReason)
+{
+    if (!CanPlayerClaimWorldTile(WorldTileID, OutReason))
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[SettlementManager] Claim rejected. TileID=%d Reason=\"%s\""),
+            WorldTileID,
+            *OutReason);
+        return false;
+    }
+
+    const int32 SettlementID = PlayerSettlementID;
+    if (!AddClaimedWorldTileToSettlement(SettlementID, WorldTileID))
+    {
+        OutReason = TEXT("Failed to add tile claim.");
+        UE_LOG(LogTemp, Warning,
+            TEXT("[SettlementManager] Claim rejected. TileID=%d Reason=\"%s\""),
+            WorldTileID,
+            *OutReason);
+        return false;
+    }
+
+    if (UWorld* World = GetWorld())
+    {
+        if (UWorldMapSubsystem* WorldMapSubsystem = World->GetSubsystem<UWorldMapSubsystem>())
+        {
+            WorldMapSubsystem->MarkMapTextureDirty();
+            WorldMapSubsystem->MarkDetailedMapTextureDirty();
+        }
+    }
+
+    const FSettlementState* PlayerSettlement = GetSettlement(SettlementID);
+    const int32 ClaimCount = PlayerSettlement ? PlayerSettlement->ClaimedWorldTileIDs.Num() : 0;
+
+    OutReason = TEXT("Tile claimed.");
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[SettlementManager] Player claimed world tile. SettlementID=%d TileID=%d Claims=%d"),
+        SettlementID,
+        WorldTileID,
+        ClaimCount);
+
+    return true;
+}
+
+bool USettlementManager::IsWorldTileAdjacentToPlayerClaim(int32 WorldTileID) const
+{
+    const FSettlementState* PlayerSettlement = GetSettlement(PlayerSettlementID);
+    if (PlayerSettlementID == INDEX_NONE || !PlayerSettlement)
+    {
+        return false;
+    }
+
+    const UWorld* World = GetWorld();
+    const UWorldMapSubsystem* WorldMapSubsystem = World ? World->GetSubsystem<UWorldMapSubsystem>() : nullptr;
+    if (!WorldMapSubsystem || !WorldMapSubsystem->IsInitialized())
+    {
+        return false;
+    }
+
+    int32 CandidateX = INDEX_NONE;
+    int32 CandidateY = INDEX_NONE;
+    if (!WorldMapSubsystem->TileIndexToXY(WorldTileID, CandidateX, CandidateY))
+    {
+        return false;
+    }
+
+    for (const int32 ClaimedWorldTileID : PlayerSettlement->ClaimedWorldTileIDs)
+    {
+        int32 ClaimedX = INDEX_NONE;
+        int32 ClaimedY = INDEX_NONE;
+        if (!WorldMapSubsystem->TileIndexToXY(ClaimedWorldTileID, ClaimedX, ClaimedY))
+        {
+            continue;
+        }
+
+        const int32 DeltaX = FMath::Abs(CandidateX - ClaimedX);
+        const int32 DeltaY = FMath::Abs(CandidateY - ClaimedY);
+        if (DeltaX + DeltaY == 1)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+int32 USettlementManager::GetPlayerLandClaimCost(int32 WorldTileID) const
+{
+    // Patch 4G is backend-only. Economy/payment will be wired in a later patch;
+    // no stockpile, gold, barter, influence, or other resources are consumed here.
+    (void)WorldTileID;
+    return 0;
+}
+
+bool USettlementManager::DoesPlayerSettlementClaimWorldTile(int32 WorldTileID) const
+{
+    const bool bClaimed =
+        WorldTileID != INDEX_NONE &&
+        PlayerSettlementID != INDEX_NONE &&
+        DoesSettlementClaimWorldTile(PlayerSettlementID, WorldTileID);
+
+    if (bLogClaimQueries)
+    {
+        UE_LOG(
+            LogTemp,
+            Log,
+            TEXT("[SettlementManager] ClaimQuery WorldTileID=%d PlayerSettlement=%d Claimed=%s"),
+            WorldTileID,
+            PlayerSettlementID,
+            bClaimed ? TEXT("true") : TEXT("false")
+        );
+    }
+
+    return bClaimed;
+}
+
+bool USettlementManager::DoesPlayerSettlementClaimWorldPosition(const FVector& WorldPosition) const
+{
+    int32 WorldTileID = INDEX_NONE;
+
+    const UWorld* World = GetWorld();
+    const UWorldMapSubsystem* WorldMapSubsystem = World ? World->GetSubsystem<UWorldMapSubsystem>() : nullptr;
+    const bool bResolved = WorldMapSubsystem && WorldMapSubsystem->WorldPositionToWorldTileIndex(WorldPosition, WorldTileID);
+    const bool bClaimed = bResolved && PlayerSettlementID != INDEX_NONE && DoesSettlementClaimWorldTile(PlayerSettlementID, WorldTileID);
+
+    if (bLogClaimQueries)
+    {
+        UE_LOG(
+            LogTemp,
+            Log,
+            TEXT("[SettlementManager] ClaimQuery WorldPosition=(%.1f,%.1f,%.1f) WorldTileID=%d PlayerSettlement=%d Claimed=%s"),
+            WorldPosition.X,
+            WorldPosition.Y,
+            WorldPosition.Z,
+            WorldTileID,
+            PlayerSettlementID,
+            bClaimed ? TEXT("true") : TEXT("false")
+        );
+    }
+
+    return bClaimed;
+}
+
+bool USettlementManager::DoesPlayerSettlementClaimWorldCell(const FIntPoint& WorldCell) const
+{
+    int32 WorldTileID = INDEX_NONE;
+
+    const UWorld* World = GetWorld();
+    const UWorldMapSubsystem* WorldMapSubsystem = World ? World->GetSubsystem<UWorldMapSubsystem>() : nullptr;
+    const bool bResolved = WorldMapSubsystem && WorldMapSubsystem->WorldCellToWorldTileIndex(WorldCell, WorldTileID);
+    const bool bClaimed = bResolved && PlayerSettlementID != INDEX_NONE && DoesSettlementClaimWorldTile(PlayerSettlementID, WorldTileID);
+
+    if (bLogClaimQueries)
+    {
+        UE_LOG(
+            LogTemp,
+            Log,
+            TEXT("[SettlementManager] ClaimQuery WorldCell=(%d,%d) WorldTileID=%d PlayerSettlement=%d Claimed=%s"),
+            WorldCell.X,
+            WorldCell.Y,
+            WorldTileID,
+            PlayerSettlementID,
+            bClaimed ? TEXT("true") : TEXT("false")
+        );
+    }
+
+    return bClaimed;
+}
+
+bool USettlementManager::DoesPlayerSettlementClaimVoxelCell(const FIntPoint& VoxelCell) const
+{
+    int32 WorldTileID = INDEX_NONE;
+
+    const UWorld* World = GetWorld();
+    const UWorldMapSubsystem* WorldMapSubsystem = World ? World->GetSubsystem<UWorldMapSubsystem>() : nullptr;
+    const bool bResolved = WorldMapSubsystem && WorldMapSubsystem->VoxelCellToWorldTileIndex(VoxelCell, WorldTileID);
+    const bool bClaimed = bResolved && PlayerSettlementID != INDEX_NONE && DoesSettlementClaimWorldTile(PlayerSettlementID, WorldTileID);
+
+    if (bLogClaimQueries)
+    {
+        UE_LOG(
+            LogTemp,
+            Log,
+            TEXT("[SettlementManager] ClaimQuery VoxelCell=(%d,%d) WorldTileID=%d PlayerSettlement=%d Claimed=%s"),
+            VoxelCell.X,
+            VoxelCell.Y,
+            WorldTileID,
+            PlayerSettlementID,
+            bClaimed ? TEXT("true") : TEXT("false")
+        );
+    }
+
+    return bClaimed;
+}
+
+void USettlementManager::SetPlayerSettlementID(int32 SettlementID)
+{
+    if (!SettlementExists(SettlementID))
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[SettlementManager] SetPlayerSettlementID ignored: settlement %d does not exist."), SettlementID);
+        return;
+    }
+
+    PlayerSettlementID = SettlementID;
+
+    UE_LOG(LogTemp, Log, TEXT("[SettlementManager] Player settlement set to ID=%d"), PlayerSettlementID);
+}
+
+void USettlementManager::ClearPlayerSettlementID()
+{
+    PlayerSettlementID = INDEX_NONE;
+    UE_LOG(LogTemp, Log, TEXT("[SettlementManager] Player settlement cleared."));
+}
+
 void USettlementManager::SetVisualDirty(int32 SettlementID)
 {
     if (SettlementID >= 0)
@@ -210,6 +565,40 @@ void USettlementManager::IncrementPopulation(int32 ID)
         S->Population++;
         SetVisualDirty(ID);
     }
+}
+
+void USettlementManager::IncrementRacePopulation(int32 ID, FGameplayTag RaceTag)
+{
+    if (FSettlementState* S = GetMutableSettlement(ID))
+    {
+        if (RaceTag.IsValid())
+        {
+            S->RacePopulation.FindOrAdd(RaceTag)++;
+        }
+        SetVisualDirty(ID);
+    }
+}
+
+void USettlementManager::DecrementRacePopulation(int32 ID, FGameplayTag RaceTag)
+{
+    if (FSettlementState* S = GetMutableSettlement(ID))
+    {
+        if (int32* Count = S->RacePopulation.Find(RaceTag))
+        {
+            *Count = FMath::Max(0, *Count - 1);
+            if (*Count <= 0)
+            {
+                S->RacePopulation.Remove(RaceTag);
+            }
+        }
+        SetVisualDirty(ID);
+    }
+}
+
+TMap<FGameplayTag, int32> USettlementManager::GetRacePopulation(int32 ID) const
+{
+    const FSettlementState* S = GetSettlement(ID);
+    return S ? S->RacePopulation : TMap<FGameplayTag, int32>();
 }
 
 void USettlementManager::DecrementPopulation(int32 ID)

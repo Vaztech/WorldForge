@@ -1,25 +1,22 @@
 #include "DebugSimulationSystem.h"
 #include "Engine/World.h"
 #include "ProcessorManager.h"
-#include "JobProcessor.h" // Required for GetTypedProcessor<UJobProcessor>()
+#include "JobProcessor.h"
 #include "SettlementManager.h"
 #include "ReservationSystem.h"
 #include "EventBus.h"
 #include "VoxelConstructionSystem.h"
-#include "OverworldSubsystem.h"              // ADDED
-#include "DiplomacySubsystem.h"              // ADDED
-#include "NavalSystem.h"                     // ADDED
-#include "CosmicSimulationSubsystem.h"       // ADDED
-#include "WorldMapSubsystem.h" // ADDED
+#include "OverworldSubsystem.h"
+#include "DiplomacySubsystem.h"
+#include "NavalSystem.h"
+#include "CosmicSimulationSubsystem.h"
+#include "WorldMapSubsystem.h"
+#include "Mining/StabilitySubsystem.h"    // Overlay #15
 
 void UDebugSimulationSystem::Initialize(FSubsystemCollectionBase& C)
 {
     Super::Initialize(C);
-
-    // CHANGE:
-    // No architecture change here.
-    // This subsystem still reads from existing world subsystems only.
-    UE_LOG(LogTemp, Log, TEXT("[DebugSim] Initialized. 14 overlays ready.")); // MODIFIED
+    UE_LOG(LogTemp, Log, TEXT("[DebugSim] Initialized. 15 overlays ready."));
 }
 
 void UDebugSimulationSystem::SetActiveOverlay(EDebugOverlay O)
@@ -34,7 +31,8 @@ void UDebugSimulationSystem::ToggleOverlay(EDebugOverlay O)
 
 void UDebugSimulationSystem::CycleToNextOverlay()
 {
-    ActiveOverlay = static_cast<EDebugOverlay>((static_cast<int32>(ActiveOverlay) + 1) % 15); // MODIFIED
+    // EDebugOverlay has 16 values (None=0 … StabilityOverlay=15).
+    ActiveOverlay = static_cast<EDebugOverlay>((static_cast<int32>(ActiveOverlay) + 1) % 16);
 }
 
 void UDebugSimulationSystem::OnSimulationStep(int32 S, int32)
@@ -57,31 +55,10 @@ FString UDebugSimulationSystem::GetLowestNeedLabel(int32 ID) const
             float M = A->FoodNeed;
             FString L = TEXT("Food");
 
-            if (A->SleepNeed < M)
-            {
-                M = A->SleepNeed;
-                L = TEXT("Sleep");
-            }
-
-            if (A->SafetyNeed < M)
-            {
-                M = A->SafetyNeed;
-                L = TEXT("Safety");
-            }
-
-            if (A->SocialNeed < M)
-            {
-                M = A->SocialNeed;
-                L = TEXT("Social");
-            }
-
-            if (A->PurposeNeed < M)
-            {
-                // CHANGE:
-                // Fixed the displayed numeric value when Purpose is the lowest need.
-                M = A->PurposeNeed;
-                L = TEXT("Purpose");
-            }
+            if (A->SleepNeed < M)   { M = A->SleepNeed;   L = TEXT("Sleep"); }
+            if (A->SafetyNeed < M)  { M = A->SafetyNeed;  L = TEXT("Safety"); }
+            if (A->SocialNeed < M)  { M = A->SocialNeed;  L = TEXT("Social"); }
+            if (A->PurposeNeed < M) { M = A->PurposeNeed; L = TEXT("Purpose"); }
 
             return FString::Printf(TEXT("%s:%.0f"), *L, M);
         }
@@ -106,15 +83,8 @@ FLinearColor UDebugSimulationSystem::GetNeedColor(int32 ID) const
                 FMath::Min(A->FoodNeed, A->SleepNeed),
                 FMath::Min(FMath::Min(A->SafetyNeed, A->SocialNeed), A->PurposeNeed));
 
-            if (M < 20.f)
-            {
-                return FLinearColor::Red;
-            }
-
-            if (M < 40.f)
-            {
-                return FLinearColor(1.f, 0.5f, 0.f);
-            }
+            if (M < 20.f) { return FLinearColor::Red; }
+            if (M < 40.f) { return FLinearColor(1.f, 0.5f, 0.f); }
 
             return FLinearColor::Green;
         }
@@ -136,7 +106,7 @@ FString UDebugSimulationSystem::GetAgentTaskLabel(int32 ID) const
         if (const FAgentData* A = PM->GetAgent(ID))
         {
             const FString St = UEnum::GetValueAsString(A->State);
-            const FString J = A->CurrentJobTag.IsValid() ? A->CurrentJobTag.ToString() : TEXT("None");
+            const FString J  = A->CurrentJobTag.IsValid() ? A->CurrentJobTag.ToString() : TEXT("None");
             return FString::Printf(TEXT("%s|%s"), *St, *J);
         }
     }
@@ -159,10 +129,7 @@ TArray<FString> UDebugSimulationSystem::GetReservationSummary(int32 SID) const
     {
         for (const FReservationRecord& R : RS->GetAllReservations())
         {
-            if (R.SettlementID != SID)
-            {
-                continue;
-            }
+            if (R.SettlementID != SID) { continue; }
 
             Lines.Add(FString::Printf(
                 TEXT("Agent%d->Target%d(%s)"),
@@ -283,34 +250,16 @@ FString UDebugSimulationSystem::GetJobQueueSummary(int32 SettlementID) const
 
     if (UProcessorManager* PM = World->GetSubsystem<UProcessorManager>())
     {
-        int32 Idle = 0;
-        int32 Working = 0;
-        int32 Active = 0;
-        int32 Dead = 0;
+        int32 Idle = 0, Working = 0, Active = 0, Dead = 0;
 
         for (const FAgentData& A : PM->GetAllAgents())
         {
-            if (A.SettlementID != SettlementID)
-            {
-                continue;
-            }
+            if (A.SettlementID != SettlementID) { continue; }
 
-            if (A.State == EAgentState::Idle)
-            {
-                Idle++;
-            }
-            else if (A.State == EAgentState::Working)
-            {
-                Working++;
-            }
-            else if (A.State == EAgentState::Dead)
-            {
-                Dead++;
-            }
-            else
-            {
-                Active++;
-            }
+            if      (A.State == EAgentState::Idle)    { Idle++; }
+            else if (A.State == EAgentState::Working)  { Working++; }
+            else if (A.State == EAgentState::Dead)     { Dead++; }
+            else                                        { Active++; }
         }
 
         if (UJobProcessor* JP = PM->GetTypedProcessor<UJobProcessor>())
@@ -319,18 +268,12 @@ FString UDebugSimulationSystem::GetJobQueueSummary(int32 SettlementID) const
                 TEXT("Jobs Pending=%d Assigned=%d | Agents Idle=%d Work=%d Active=%d Dead=%d"),
                 JP->GetPendingJobCount(SettlementID),
                 JP->GetAssignedJobCount(SettlementID),
-                Idle,
-                Working,
-                Active,
-                Dead);
+                Idle, Working, Active, Dead);
         }
 
         return FString::Printf(
             TEXT("Agents Idle=%d Work=%d Active=%d Dead=%d"),
-            Idle,
-            Working,
-            Active,
-            Dead);
+            Idle, Working, Active, Dead);
     }
 
     return TEXT("ProcessorManager not found.");
@@ -339,10 +282,7 @@ FString UDebugSimulationSystem::GetJobQueueSummary(int32 SettlementID) const
 FString UDebugSimulationSystem::GetMoraleReport(int32 ID) const
 {
     UWorld* World = GetWorld();
-    if (!World)
-    {
-        return TEXT("?");
-    }
+    if (!World) { return TEXT("?"); }
 
     if (UProcessorManager* PM = World->GetSubsystem<UProcessorManager>())
     {
@@ -398,8 +338,6 @@ TArray<FString> UDebugSimulationSystem::GetProcessorTimingReport() const
         const TArray<float>& T = PM->GetProcessorTimings();
         const TArray<FName>& N = PM->GetProcessorNames();
 
-        // CHANGE:
-        // Added a bounds-safe loop in case names/timings ever get out of sync.
         const int32 Count = FMath::Min(T.Num(), N.Num());
         for (int32 i = 0; i < Count; i++)
         {
@@ -425,7 +363,7 @@ TArray<FString> UDebugSimulationSystem::GetNavalSummary() const
     {
         const TArray<FShipData>& Ships = Naval->GetActiveShips();
 
-        Lines.Add(FString::Printf(TEXT("Ships Active=%d"), Ships.Num())); // ADDED
+        Lines.Add(FString::Printf(TEXT("Ships Active=%d"), Ships.Num()));
 
         for (const FShipData& Ship : Ships)
         {
@@ -466,8 +404,6 @@ TArray<FString> UDebugSimulationSystem::GetCosmicSummary() const
     {
         const FNarrativePressureState& Pressure = Cosmic->GetNarrativePressure();
 
-        // ADDED
-        // H2 keeps this summary string-based and display-only.
         Lines.Add(FString::Printf(
             TEXT("Pressure War=%.1f Commerce=%.1f Fear=%.1f Cosmic=%.1f"),
             Pressure.War,
@@ -475,8 +411,6 @@ TArray<FString> UDebugSimulationSystem::GetCosmicSummary() const
             Pressure.Fear,
             Pressure.CosmicUnstable));
 
-        // ADDED
-        // Summary for known domains using existing query API.
         const TArray<FGameplayTag> ProbeTags =
         {
             FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Cosmic.Domain.War")), false),
@@ -488,16 +422,10 @@ TArray<FString> UDebugSimulationSystem::GetCosmicSummary() const
         bool bAnyFound = false;
         for (const FGameplayTag& Tag : ProbeTags)
         {
-            if (!Tag.IsValid())
-            {
-                continue;
-            }
+            if (!Tag.IsValid()) { continue; }
 
             const FCosmicEntityState* State = Cosmic->GetEntityState(Tag);
-            if (!State)
-            {
-                continue;
-            }
+            if (!State) { continue; }
 
             bAnyFound = true;
             Lines.Add(FString::Printf(
@@ -532,8 +460,6 @@ TArray<FString> UDebugSimulationSystem::GetDiplomacySummary() const
 
     if (UDiplomacySubsystem* Diplomacy = World->GetSubsystem<UDiplomacySubsystem>())
     {
-        // ADDED
-        // H2 stays minimal: summarize pair relationships across current civilizations.
         if (UWorldMapSubsystem* WM = World->GetSubsystem<UWorldMapSubsystem>())
         {
             const TArray<FCivilizationData>& Civs = WM->GetCivilizations();
@@ -550,15 +476,15 @@ TArray<FString> UDebugSimulationSystem::GetDiplomacySummary() const
                 {
                     const int32 CivA = Civs[i].CivID;
                     const int32 CivB = Civs[j].CivID;
-                    const float Rel = Diplomacy->GetRelationship(CivA, CivB);
+                    const float Rel  = Diplomacy->GetRelationship(CivA, CivB);
 
                     Lines.Add(FString::Printf(
                         TEXT("Civ%d<->Civ%d Rel=%.1f War=%s Embargo=%s"),
                         CivA,
                         CivB,
                         Rel,
-                        Diplomacy->IsAtWar(CivA, CivB) ? TEXT("Yes") : TEXT("No"),
-                        Diplomacy->IsEmbargoActive(CivA, CivB) ? TEXT("Yes") : TEXT("No")));
+                        Diplomacy->IsAtWar(CivA, CivB)       ? TEXT("Yes") : TEXT("No"),
+                        Diplomacy->IsEmbargoActive(CivA, CivB)? TEXT("Yes") : TEXT("No")));
                 }
             }
 
@@ -573,21 +499,43 @@ TArray<FString> UDebugSimulationSystem::GetDiplomacySummary() const
     return Lines;
 }
 
-UDebugSimulationSystem* UDebugSimulationBlueprintLibrary::GetDebugSimulationSystem(const UObject* WorldContextObject)
+TArray<FString> UDebugSimulationSystem::GetStabilityReport(int32 SID) const
 {
-    // CHANGE:
-    // Explicit Blueprint helper to fetch the subsystem instance using any valid world context.
-    // This is the minimal fallback when the engine does not surface the auto-generated getter node.
-    if (!WorldContextObject)
-    {
-        return nullptr;
-    }
+    TArray<FString> Lines;
 
-    UWorld* World = WorldContextObject->GetWorld();
+    UWorld* World = GetWorld();
     if (!World)
     {
-        return nullptr;
+        Lines.Add(TEXT("World unavailable"));
+        return Lines;
     }
+
+    UStabilitySubsystem* StabSys = World->GetSubsystem<UStabilitySubsystem>();
+    if (!StabSys)
+    {
+        Lines.Add(TEXT("StabilitySubsystem unavailable — no underground mining yet."));
+        return Lines;
+    }
+
+    Lines.Add(FString::Printf(
+        TEXT("Tracked Air Voxels: %d | MaxSpan: %d | MaxCascade: %d"),
+        StabSys->GetAirVoxelCount(),
+        WF_STABILITY_MAX_SPAN,
+        WF_COLLAPSE_MAX_CASCADE));
+
+    Lines.Add(TEXT("Ceiling colour: GREEN=Stable  YELLOW=Adequate  ORANGE=Poor  RED=Unstable"));
+    Lines.Add(TEXT("Leave a solid column every 4 voxels to prevent cave-ins."));
+    Lines.Add(TEXT("Per-voxel colour: query StabilitySubsystem::GetStabilityColor() in TileGridOverlayActor."));
+
+    return Lines;
+}
+
+UDebugSimulationSystem* UDebugSimulationBlueprintLibrary::GetDebugSimulationSystem(const UObject* WorldContextObject)
+{
+    if (!WorldContextObject) { return nullptr; }
+
+    UWorld* World = WorldContextObject->GetWorld();
+    if (!World) { return nullptr; }
 
     return World->GetSubsystem<UDebugSimulationSystem>();
 }

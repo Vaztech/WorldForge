@@ -552,162 +552,29 @@ void UJobProcessor::GenerateIdleHarvestJobs(
     int32 StepNumber,
     UWorld* World)
 {
-    USettlementManager* SM = World ? World->GetSubsystem<USettlementManager>() : nullptr;
-    UNavigationContext* Nav = World ? World->GetSubsystem<UNavigationContext>() : nullptr;
-
-    if (!SM)
+    // Intentionally do NOT generate generic default food/wood/stone harvest jobs here.
+    // Player-directed/system-directed work should come from real designations and systems:
+    // - MiningSubsystem posts mining jobs for marked mining designations.
+    // - FarmingSubsystem posts farm jobs from farm zones.
+    // - Build/production systems post build/craft/cook jobs from player orders.
+    //
+    // This keeps idle colonists from inventing work before the player tells them what to do.
+    if (!World)
     {
         return;
     }
 
-    // --------------------------------------------------------------------
-    // Player/system-created mining designations should post real jobs before
-    // fallback idle harvest jobs.
-    //
-    // This allows the loop:
-    //   MiningSubsystem designation
-    //   → JobProcessor queued TAG_Job_Mine
-    //   → colonist walks to target
-    //   → ProductionProcessor completes work
-    //   → MiningSubsystem::CompleteDesignation()
-    //
-    // The generic TAG_Job_Harvest_Stone jobs below are still useful as
-    // fallback/idle gathering, but they should not replace explicit mining.
-    // --------------------------------------------------------------------
-    if (UMiningSubsystem* MiningSubsystem = World ? World->GetSubsystem<UMiningSubsystem>() : nullptr)
+    if (UMiningSubsystem* MiningSubsystem = World->GetSubsystem<UMiningSubsystem>())
     {
         MiningSubsystem->PostMiningJobs(SettlementID, StepNumber);
     }
 
-    const int32 FoodAmt = SM->GetStockpileAmount(SettlementID, TAG_Item_Food);
-    const int32 WoodAmt = SM->GetStockpileAmount(SettlementID, TAG_Item_Wood);
-    const int32 StoneAmt = SM->GetStockpileAmount(SettlementID, TAG_Item_Stone);
-
     UE_LOG(
         LogTemp,
-        Log,
-        TEXT("[JobProcessor] Idle job check Settlement=%d Step=%d Food=%d Wood=%d Stone=%d"),
+        Verbose,
+        TEXT("[JobProcessor] Idle/default harvest generation disabled. Checked explicit mining jobs only. Settlement=%d Step=%d"),
         SettlementID,
-        StepNumber,
-        FoodAmt,
-        WoodAmt,
-        StoneAmt);
-
-    auto GetSpreadTarget = [&](int32 BaseX, int32 BaseY) -> FIntPoint
-        {
-            const int32 MaxAttempts = 6;
-
-            for (int32 Attempt = 0; Attempt < MaxAttempts; ++Attempt)
-            {
-                const int32 OffsetX = FMath::RandRange(-6, 6);
-                const int32 OffsetY = FMath::RandRange(-6, 6);
-
-                const FIntPoint Candidate(BaseX + OffsetX, BaseY + OffsetY);
-
-                if (Nav && Nav->IsCellWalkable(SettlementID, Candidate))
-                {
-                    return Candidate;
-                }
-            }
-
-            return FIntPoint(BaseX, BaseY);
-        };
-
-    if (FoodAmt < 50)
-    {
-        for (int32 i = 0; i < 3; ++i)
-        {
-            FJobRequest Job;
-            Job.SettlementID = SettlementID;
-            Job.PostedOnStep = StepNumber;
-            Job.JobTag = TAG_Job_Harvest_Food;
-            Job.RequiredSkill = TAG_Skill_Farming;
-            Job.Priority = (FoodAmt < 20) ? EJobPriority::High : EJobPriority::Normal;
-            Job.TargetGridPos = GetSpreadTarget(10, 10);
-            Job.TargetID = INDEX_NONE;
-            Job.TargetItemTag = TAG_Item_Food;
-
-            if (FJobRequest* J = PostJob(Job))
-            {
-                UE_LOG(
-                    LogTemp,
-                    Log,
-                    TEXT("[JobProcessor] Posted job %s at (%d,%d) Step=%d"),
-                    *J->JobTag.ToString(),
-                    J->TargetGridPos.X,
-                    J->TargetGridPos.Y,
-                    StepNumber);
-            }
-        }
-    }
-    else
-    {
-        UE_LOG(LogTemp, Log, TEXT("[JobProcessor] Skipping food harvest job: Food stockpile is sufficient."));
-    }
-
-    if (WoodAmt < 20)
-    {
-        for (int32 i = 0; i < 2; ++i)
-        {
-            FJobRequest Job;
-            Job.SettlementID = SettlementID;
-            Job.PostedOnStep = StepNumber;
-            Job.JobTag = TAG_Job_Harvest_Wood;
-            Job.RequiredSkill = TAG_Skill_Hauling;
-            Job.Priority = EJobPriority::Normal;
-            Job.TargetGridPos = GetSpreadTarget(15, 10);
-            Job.TargetID = INDEX_NONE;
-            Job.TargetItemTag = TAG_Item_Wood;
-
-            if (FJobRequest* J = PostJob(Job))
-            {
-                UE_LOG(
-                    LogTemp,
-                    Log,
-                    TEXT("[JobProcessor] Posted job %s at (%d,%d) Step=%d"),
-                    *J->JobTag.ToString(),
-                    J->TargetGridPos.X,
-                    J->TargetGridPos.Y,
-                    StepNumber);
-            }
-        }
-    }
-    else
-    {
-        UE_LOG(LogTemp, Log, TEXT("[JobProcessor] Skipping wood harvest job: Wood stockpile is sufficient."));
-    }
-
-    if (StoneAmt < 20)
-    {
-        for (int32 i = 0; i < 2; ++i)
-        {
-            FJobRequest Job;
-            Job.SettlementID = SettlementID;
-            Job.PostedOnStep = StepNumber;
-            Job.JobTag = TAG_Job_Harvest_Stone;
-            Job.RequiredSkill = TAG_Skill_Mining;
-            Job.Priority = EJobPriority::Normal;
-            Job.TargetGridPos = GetSpreadTarget(20, 10);
-            Job.TargetID = INDEX_NONE;
-            Job.TargetItemTag = TAG_Item_Stone;
-
-            if (FJobRequest* J = PostJob(Job))
-            {
-                UE_LOG(
-                    LogTemp,
-                    Log,
-                    TEXT("[JobProcessor] Posted job %s at (%d,%d) Step=%d"),
-                    *J->JobTag.ToString(),
-                    J->TargetGridPos.X,
-                    J->TargetGridPos.Y,
-                    StepNumber);
-            }
-        }
-    }
-    else
-    {
-        UE_LOG(LogTemp, Log, TEXT("[JobProcessor] Skipping stone harvest job: Stone stockpile is sufficient."));
-    }
+        StepNumber);
 }
 
 // ====================================================================

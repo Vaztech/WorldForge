@@ -6,6 +6,13 @@
 #include "MiningTypes.generated.h"
 
 UENUM(BlueprintType)
+enum class EMiningRemovalMode : uint8
+{
+	VoxelCube UMETA(DisplayName = "Voxel Cube"),
+	SDFBrush  UMETA(DisplayName = "SDF Brush")
+};
+
+UENUM(BlueprintType)
 enum class EMiningDesignationState : uint8
 {
 	Pending,
@@ -53,7 +60,15 @@ struct FMiningDesignation
 	 * Box: room excavation designations.
 	 */
 	UPROPERTY(BlueprintReadOnly)
-	EDigBrushShape BrushShape = EDigBrushShape::Sphere;
+	EDigBrushShape BrushShape = EDigBrushShape::Box;
+
+	/**
+	 * How this mining designation removes terrain when completed.
+	 * VoxelCube removes exactly one voxel cell.
+	 * SDFBrush uses the existing smooth/brush carve path.
+	 */
+	UPROPERTY(BlueprintReadOnly)
+	EMiningRemovalMode RemovalMode = EMiningRemovalMode::VoxelCube;
 
 	/**
 	 * SDF brush ID assigned after the brush is applied.

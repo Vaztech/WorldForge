@@ -2,6 +2,8 @@
 
 #include "CoreMinimal.h"
 #include "GameplayTagContainer.h"
+#include "Engine/DataTable.h"
+#include "UObject/SoftObjectPtr.h"
 #include "Civilization/WorldHistory/WorldHistoryTypes.h"
 #include "Modifiers/WorldForgeEquipmentTypes.h"
 #include "WorldForgeDataTypes.generated.h"
@@ -777,8 +779,13 @@ struct FSettlementState
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 SettlementID = -1;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 WorldTileID = -1;
+
+    // These are strategic world-map tiles claimed by this settlement. The player can eventually build/mine/farm only inside these claimed tiles.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TArray<int32> ClaimedWorldTileIDs;
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FString Name;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 Population = 0;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TMap<FGameplayTag, int32> RacePopulation;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float MoraleSummary = 50.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FGameplayTag PlayerCurrencyTag;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 OwnerCivID = -1;
@@ -931,6 +938,237 @@ struct FActiveBuildTask
     UPROPERTY(SaveGame, EditAnywhere, BlueprintReadWrite) FGameplayTag MaterialTag;
 };
 
+
+
+// ═══════════════════════════════════════════════════════════════════
+// COLONIST VISUAL DATA TABLES
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Row type used by per-race colonist visual DataTables.
+ *
+ * Create one DataTable per race using this row structure, for example:
+ * - DT_ColonistVisual_Dwarf
+ * - DT_ColonistVisual_HighElf
+ *
+ * Keep this row generic: Paper2D flipbooks, PaperZD assets, PaperZD-in-3D
+ * assets, or temporary placeholder art can all be assigned as soft UObject
+ * references without forcing another compile dependency here.
+ */
+USTRUCT(BlueprintType)
+struct WORLDFORGE_API FWorldForgeColonistVisualRow : public FTableRowBase
+{
+    GENERATED_BODY()
+
+    /** Race this table/row belongs to, e.g. WorldForge.Race.Dwarf. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual")
+    FGameplayTag RaceTag;
+
+    /** Optional body/variant tag, e.g. WorldForge.BodyType.Default or WorldForge.BodyType.Stocky. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual")
+    FGameplayTag BodyTypeTag;
+
+    /** Human-readable label for UI menus. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual")
+    FText DisplayName;
+
+    /** Optional tags for filtering this visual row later: culture, profession, gender, class, faction, etc. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual|Filtering")
+    FGameplayTagContainer VariantTags;
+
+    /** Tags that must be present in the colonist visual context for this row to be valid. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual|Filtering")
+    FGameplayTagContainer RequiredTags;
+
+    /** Tags that make this row invalid for the colonist visual context. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual|Filtering")
+    FGameplayTagContainer BlockedTags;
+
+    /** Paper2D idle flipbook or equivalent visual asset. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual|Core States")
+    TSoftObjectPtr<UObject> IdleVisualAsset;
+
+    /** Paper2D walk flipbook or equivalent visual asset. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual|Core States")
+    TSoftObjectPtr<UObject> WalkVisualAsset;
+
+    /** Generic work fallback. Used when a specific job state is missing. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual|Core States")
+    TSoftObjectPtr<UObject> WorkVisualAsset;
+
+    /** Carrying/hauling item animation. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual|Core States")
+    TSoftObjectPtr<UObject> CarryVisualAsset;
+
+    /** Combat/attack animation. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual|Core States")
+    TSoftObjectPtr<UObject> FightVisualAsset;
+
+    /** Hurt, hit reaction, injured, or low-health animation. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual|Core States")
+    TSoftObjectPtr<UObject> HurtVisualAsset;
+
+    /** Resting/relaxing animation. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual|Core States")
+    TSoftObjectPtr<UObject> RestVisualAsset;
+
+    /** Sleep flipbook or equivalent visual asset. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual|Core States")
+    TSoftObjectPtr<UObject> SleepVisualAsset;
+
+    /** Dead/downed flipbook or equivalent visual asset. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual|Core States")
+    TSoftObjectPtr<UObject> DeadVisualAsset;
+
+    /** Eating animation. Falls back to Idle if empty. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual|Need States")
+    TSoftObjectPtr<UObject> EatVisualAsset;
+
+    /** Socializing animation. Falls back to Idle if empty. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual|Need States")
+    TSoftObjectPtr<UObject> SocialVisualAsset;
+
+    /** Fleeing/panic animation. Falls back to Walk if empty. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual|Need States")
+    TSoftObjectPtr<UObject> FleeVisualAsset;
+
+    /** Recovering/incapacitated animation. Falls back to Hurt, Rest, or Sleep if empty. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual|Need States")
+    TSoftObjectPtr<UObject> IncapacitatedVisualAsset;
+
+    /** Mining-specific work animation. Falls back to Work if empty. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual|Job States")
+    TSoftObjectPtr<UObject> MineVisualAsset;
+
+    /** Farming-specific work animation. Falls back to Work if empty. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual|Job States")
+    TSoftObjectPtr<UObject> FarmVisualAsset;
+
+    /** Building-specific work animation. Falls back to Work if empty. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual|Job States")
+    TSoftObjectPtr<UObject> BuildVisualAsset;
+
+    /** Crafting-specific work animation. Falls back to Work if empty. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual|Job States")
+    TSoftObjectPtr<UObject> CraftVisualAsset;
+
+    /** Research-specific work animation. Falls back to Work if empty. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual|Job States")
+    TSoftObjectPtr<UObject> ResearchVisualAsset;
+
+    /** Hauling-specific animation. Falls back to Carry, Walk, or Work if empty. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual|Job States")
+    TSoftObjectPtr<UObject> HaulVisualAsset;
+
+    /** Doctor/healing animation. Falls back to Work if empty. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual|Job States")
+    TSoftObjectPtr<UObject> DoctorVisualAsset;
+
+    /** Cooking animation. Falls back to Work if empty. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual|Job States")
+    TSoftObjectPtr<UObject> CookVisualAsset;
+
+    /** Guarding/standing watch animation. Falls back to Fight or Idle if empty. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual|Job States")
+    TSoftObjectPtr<UObject> GuardVisualAsset;
+
+    /** Trading/merchant animation. Falls back to Social or Idle if empty. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual|Job States")
+    TSoftObjectPtr<UObject> TradeVisualAsset;
+
+    /** Prayer/ritual animation. Falls back to Idle if empty. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual|Job States")
+    TSoftObjectPtr<UObject> PrayVisualAsset;
+
+    /** Optional PaperZD animation source, PaperZD-in-3D asset, or animation data asset. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual|PaperZD")
+    TSoftObjectPtr<UObject> PaperZDAnimationSource;
+
+    /** Optional PaperZD animation blueprint/instance asset. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual|PaperZD")
+    TSoftObjectPtr<UObject> PaperZDAnimBP;
+
+    /** Relative placement for the visual component under the native actor. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual|Transform")
+    FVector RelativeLocation = FVector::ZeroVector;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual|Transform")
+    FRotator RelativeRotation = FRotator::ZeroRotator;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual|Transform")
+    FVector RelativeScale = FVector(5.0f, 5.0f, 5.0f);
+
+    /** Native fallback cube size. Useful while art is missing or being debugged. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual|Fallback")
+    FVector DebugMeshScale = FVector(0.35f, 0.35f, 0.8f);
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual|Fallback")
+    FLinearColor DebugColor = FLinearColor::White;
+
+    /** Shows the native fallback cube when no visual asset is assigned. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual|Fallback")
+    bool bUseDebugMeshWhenNoAnimation = true;
+};
+
+/**
+ * Race → DataTable registration entry.
+ * The UI can query these entries from UColonistVisualManager to list which
+ * race visual tables are available.
+ */
+USTRUCT(BlueprintType)
+struct WORLDFORGE_API FColonistRaceVisualTable
+{
+    GENERATED_BODY()
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual")
+    FGameplayTag RaceTag;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|ColonistVisual")
+    TObjectPtr<UDataTable> VisualTable = nullptr;
+};
+
+USTRUCT(BlueprintType)
+struct FColonistJobPriority
+{
+    GENERATED_BODY()
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
+    FGameplayTag JobTag;
+
+    // 0 = disabled, 1 = low, 2 = normal, 3 = high, 4 = emergency.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame, meta = (ClampMin = "0", ClampMax = "4", UIMin = "0", UIMax = "4"))
+    int32 Priority = 2;
+};
+
+USTRUCT(BlueprintType)
+struct FColonistInspectionData
+{
+    GENERATED_BODY()
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite) int32 AgentID = -1;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite) int32 SettlementID = -1;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite) FString DisplayName;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite) FGameplayTag RaceTag;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite) EAgentState State = EAgentState::Idle;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite) FGameplayTag CurrentJobTag;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite) FIntPoint CurrentGridPos = FIntPoint::ZeroValue;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite) FIntPoint CurrentNavTarget = FIntPoint::ZeroValue;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite) float FoodNeed = 0.f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite) float SleepNeed = 0.f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite) float SocialNeed = 0.f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite) float SafetyNeed = 0.f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite) float PurposeNeed = 0.f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite) float MoodScore = 0.f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite) float Health = 0.f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite) float MaxHealth = 0.f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite) float CurrentEfficiency = 1.f;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite) bool bInjured = false;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite) FGameplayTagContainer TraitTags;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite) TMap<FGameplayTag, float> Skills;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite) TArray<FColonistJobPriority> JobPriorities;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite) TMap<EWorldForgeEquipmentSlot, FGameplayTag> EquippedItems;
+};
+
 USTRUCT(BlueprintType)
 struct FJobRequest
 {
@@ -1000,6 +1238,7 @@ struct FAgentData
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 AgentID = -1;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) int32 SettlementID = -1;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FString DisplayName;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) EAgentState State = EAgentState::Idle;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) FGameplayTag RaceTag;
 
@@ -1024,6 +1263,9 @@ struct FAgentData
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float MoodScore = 50.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TArray<FString> RecentThoughts;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TMap<FGameplayTag, float> Skills;
+
+    // Per-colonist work matrix. Key = WorldForge.Job.* tag. Value: 0 disabled, 1 low, 2 normal, 3 high, 4 emergency.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) TMap<FGameplayTag, int32> JobPriorities;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float EthicsPacifism = 50.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float EthicsCompassion = 50.f;
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame) float EthicsHonour = 50.f;

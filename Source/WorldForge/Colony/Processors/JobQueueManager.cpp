@@ -34,6 +34,10 @@ namespace
     // JobProcessor applies trait WorkEfficiencyMultiplier before scoring.
     constexpr float EfficiencyWeight = 250.0f;
 
+    // Player/colonist work-priority matrix weight. This is intentionally
+    // stronger than skill so UI priority changes are immediately visible.
+    constexpr float AgentPriorityWeight = 750.0f;
+
     // Distance prevents colonists from always picking far-away jobs.
     constexpr float DistancePenaltyWeight = 1.5f;
 }
@@ -94,6 +98,15 @@ FJobRequest* FJobQueueManager::FindBestJobForAgent(
         }
 
         const int32 Pri = static_cast<int32>(J.Priority);
+        const int32 AgentPri = FMath::Clamp(AgentData.JobPriorities.FindRef(J.JobTag), 0, 4);
+
+        // 0 means this colonist is manually disabled for this job type.
+        // Emergency personal-need jobs still get posted as Eat/Sleep and should
+        // only be disabled deliberately by the player/UI.
+        if (AgentPri <= 0)
+        {
+            continue;
+        }
 
         float Skill = 0.0f;
 
@@ -122,6 +135,7 @@ FJobRequest* FJobQueueManager::FindBestJobForAgent(
         // Higher score wins.
         const float Score =
             (Pri * PriorityWeight) +
+            (AgentPri * AgentPriorityWeight) +
             (Skill * SkillWeight) +
             (Efficiency * EfficiencyWeight) -
             (Distance * DistancePenaltyWeight);

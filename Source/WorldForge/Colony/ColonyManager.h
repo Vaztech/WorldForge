@@ -53,6 +53,7 @@ private:
     void StartSimulation();
 
     void BindDebugInput();
+    bool TryGetSelectedStartTile(int32& OutTileX, int32& OutTileY, int32& OutTileIndex) const;
     FIntPoint ResolveInitialSettlementWorldOrigin() const;
     FIntPoint ComputeSettlementOriginFromSpawnCenter(const FIntPoint& InSpawnCenter) const;
     void PositionPlayerCameraOverSettlement() const;
@@ -63,6 +64,10 @@ private:
     bool IsWorldCellAvailableForSpawn(const FIntPoint& WorldCell, const TSet<FIntPoint>& ClaimedWorldCells) const;
     FIntPoint WorldCellToSettlementLocalCell(const FIntPoint& WorldCell) const;
     int32 GetNextAgentID() const;
+    FGameplayTag ResolveStartingRaceForAgentIndex(int32 AgentIndex) const;
+    FString ResolveStartingNameForAgentIndex(int32 AgentIndex, int32 AgentID) const;
+    void ApplyRaceSkillDefaults(FAgentData& Agent) const;
+    void ApplyDefaultJobPriorities(FAgentData& Agent) const;
 
     void HandleSaveInput();
     void HandleLoadInput();

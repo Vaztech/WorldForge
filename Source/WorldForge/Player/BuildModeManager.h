@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "CoreMinimal.h"
 #include "Subsystems/WorldSubsystem.h"
@@ -7,10 +7,14 @@
 #include "VoxelWorldManager.h"
 #include "WorldForgeDataTypes.h"
 #include "Player/DigResult.h"
+#include "Mining/MiningTypes.h"
+#include "Grid/LayerViewTypes.h"
 #include "BuildModeManager.generated.h"
 
 class ABuildGhostActor;
 class ADigGhostActor;
+class AMiningGhostActor;
+class AMiningLayerRenderer;
 class ATileGridOverlayActor;
 class APlayerController;
 class UPlayerBuildContext;
@@ -21,6 +25,7 @@ class UDigSubsystem;
 class UMiningSubsystem;
 class UFarmingSubsystem;
 class UGridSelectionSubsystem;
+class ULayerViewSubsystem;
 class UTexture2D;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnBuildModeChanged, EBuildMode, NewMode);
@@ -102,6 +107,20 @@ public:
 
     UFUNCTION(BlueprintPure, Category = "WorldForge|Build")
     bool IsInMineMode() const { return CurrentToolMode == EBuildToolMode::Mine; }
+
+    /**
+     * Player-facing selection preference. When enabled, selecting an already
+     * selected block/cell removes it from the current selection. When disabled,
+     * reselecting an already selected block/cell keeps it selected.
+     */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Build|Selection")
+    bool bToggleSelectedCellsOnReselect = true;
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Build|Selection")
+    void SetToggleSelectedCellsOnReselect(bool bEnabled);
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Build|Selection")
+    bool GetToggleSelectedCellsOnReselect() const { return bToggleSelectedCellsOnReselect; }
 
     // ================================
     // Live Cost / Availability Queries
@@ -195,6 +214,76 @@ public:
 
     UFUNCTION(BlueprintCallable, Category = "WorldForge|Build")
     void SetBuildAgentID(int32 AgentID);
+
+    // ================================
+    // Tool Layer Controls
+    // ================================
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Build|Layer")
+    void AdjustActiveToolLayer(int32 Delta);
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Build|Layer")
+    void ResetActiveToolLayer();
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Build|Layer")
+    int32 GetActiveToolLayerOffset() const;
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Build|Layer")
+    void AdjustActiveViewLayer(int32 Delta);
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Build|Layer")
+    void ResetActiveViewLayer();
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Build|Layer")
+    int32 GetActiveViewLayerOffset() const;
+
+    // ================================
+    // Static Grid Overlay Controls
+    // ================================
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Build|Overlay")
+    void SetStaticBaseGridEnabled(bool bEnabled);
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Build|Overlay")
+    bool ToggleStaticBaseGrid();
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Build|Overlay")
+    bool IsStaticBaseGridEnabled() const;
+
+    // ================================
+    // Mining Removal Mode Controls
+    // ================================
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Build|Mining")
+    void SetMiningRemovalMode(EMiningRemovalMode NewMode);
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Build|Mining")
+    EMiningRemovalMode ToggleMiningRemovalMode();
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Build|Mining")
+    EMiningRemovalMode GetMiningRemovalMode() const;
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Build|Mining")
+    FText GetMiningRemovalModeText() const;
+
+    // ================================
+    // Mining Height Mode Controls
+    // ================================
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Build|Mining")
+    void SetMiningHeightMode(EWFMiningHeightMode NewMode);
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Build|Mining")
+    EWFMiningHeightMode ToggleMiningHeightMode();
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Build|Mining")
+    EWFMiningHeightMode GetMiningHeightMode() const;
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Build|Mining")
+    FText GetMiningHeightModeText() const;
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Build|Layer")
+    int32 GetActiveVoxelLayerZ() const;
 
     // ================================
     // Delegates
@@ -313,6 +402,31 @@ private:
     UPROPERTY()
     TObjectPtr<UDigSubsystem> CachedDigSubsystem = nullptr;
 
+    // ----- Mine Mode Ghost Cube -----
+    // 3D voxel-sized hover preview cube shown at the hovered voxel in Mine mode.
+    // Separate from the 2D tile overlay (TileGridOverlayActor) which shows confirmed
+    // designation cells. The ghost cube provides volumetric hover feedback before
+    // the player clicks. Assign BP_MiningGhostActor in Class Defaults.
+
+    UPROPERTY(EditDefaultsOnly, Category = "Build|Mine")
+    TSubclassOf<AMiningGhostActor> MiningGhostClass;
+
+    UPROPERTY()
+    TObjectPtr<AMiningGhostActor> ActiveMiningGhost = nullptr;
+
+    // Dedicated renderer for mine-mode terrain layer blocks and ghost designations.
+    UPROPERTY()
+    TObjectPtr<AMiningLayerRenderer> MiningLayerRenderer = nullptr;
+
+    // Stable anchor for the underground mining layer renderer.
+    // Do not center the cap renderer directly on the mouse every tick; that makes
+    // the whole layer window pop/flicker as the cursor crosses voxel cells.
+    bool bMiningLayerAnchorValid = false;
+    FIntVector MiningLayerAnchorVoxel = FIntVector::ZeroValue;
+    int32 MiningLayerAnchorZ = MIN_int32;
+
+    TSet<TWeakObjectPtr<AActor>> MiningPresentationHiddenActors;
+
     // ================================
     // Subsystem helpers
     // ================================
@@ -325,6 +439,7 @@ private:
     UMiningSubsystem* GetMiningSubsystem() const;
     UFarmingSubsystem* GetFarmingSubsystem() const;
     UGridSelectionSubsystem* GetGridSelectionSubsystem() const;
+    ULayerViewSubsystem* GetLayerViewSubsystem() const;
 
     int32 GetEffectiveSettlementID() const;
 
@@ -366,6 +481,23 @@ private:
     /** Hide overlay and clear all visual state. */
     void DeactivateGridOverlay();
 
+    // Dedicated mine-layer renderer lifecycle.
+    void InitializeMiningLayerRenderer();
+    void DestroyMiningLayerRenderer();
+    void UpdateMiningLayerRenderer();
+
+    /**
+     * Called each tick while in mine mode. Constrains the camera pawn's XY
+     * position to stay within the diorama walls so the player can't pan the
+     * camera outside the underground box and see the grass terrain beyond.
+     */
+    void ClampCameraToMineRegion();
+
+    // Mine-mode presentation filter: hides above-ground/outside-diorama colonists
+    // so the underground view reads as a focused slice instead of an open world.
+    void UpdateMiningPresentationVisibility(const FIntVector& CenterVoxel, int32 ActiveVoxelZ, bool bUnderground);
+    void RestoreMiningPresentationVisibility();
+
     void SyncSelectionFromGridSelection();
     void ClearTileSelectionState();
     void AddOrToggleCurrentTileSelection(bool bToggleExisting);
@@ -404,4 +536,10 @@ private:
     float GetMaxGroundBuildSlopeDegrees() const;
     bool IsBuildableTerrainType(EWorldForgeTerrainType TerrainType) const;
     bool ValidateGroundTerrainPlacement(const FIntVector& Voxel, FString& OutReason) const;
+
+    // Patch 4D/4E/4F: tool-specific claimed-land gates.
+    bool IsBuildVoxelInsidePlayerClaim(const FIntVector& Voxel) const;
+    bool IsDigVoxelInsidePlayerClaim(const FIntVector& Voxel) const;
+    bool IsMineVoxelInsidePlayerClaim(const FIntVector& Voxel) const;
+    bool IsFarmCellInsidePlayerClaim(const FIntPoint& WorldCell) const;
 };

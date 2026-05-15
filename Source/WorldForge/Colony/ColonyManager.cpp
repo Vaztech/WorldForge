@@ -1,4 +1,4 @@
-﻿#include "ColonyManager.h"
+#include "ColonyManager.h"
 
 #include "SettlementManager.h"
 #include "ProcessorManager.h"
@@ -12,6 +12,7 @@
 #include "Player/WorldForgeCamera.h"
 #include "WorldMapSubsystem.h"
 #include "Embark/EmbarkLoadoutSubsystem.h"
+#include "UI/WorldForgeEmbarkationManager.h"
 
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
@@ -361,29 +362,87 @@ void AColonyManager::InitializeSettlement()
         return;
     }
 
+    int32 SelectedStartTileX = INDEX_NONE;
+    int32 SelectedStartTileY = INDEX_NONE;
+    int32 SelectedStartTileIndex = INDEX_NONE;
+
+    if (TryGetSelectedStartTile(SelectedStartTileX, SelectedStartTileY, SelectedStartTileIndex))
+    {
+        // The selected full-map tile is the strategic colony claim/source tile.
+        SettlementWorldTileID = SelectedStartTileIndex;
+
+        UE_LOG(
+            LogTemp,
+            Log,
+            TEXT("[ColonyManager] Selected start tile found. Tile=(%d,%d) Index=%d"),
+            SelectedStartTileX,
+            SelectedStartTileY,
+            SelectedStartTileIndex
+        );
+    }
+    else
+    {
+        UE_LOG(
+            LogTemp,
+            Warning,
+            TEXT("[ColonyManager] No selected start tile found. Using fallback SettlementWorldTileID=%d"),
+            SettlementWorldTileID
+        );
+    }
+
     const FIntPoint ResolvedSpawnCenter = ResolveInitialSettlementWorldOrigin();
     SpawnGridCenter = ResolvedSpawnCenter;
     SettlementWorldOrigin = ComputeSettlementOriginFromSpawnCenter(SpawnGridCenter);
 
-    SettlementID = SettlementMgr->CreateSettlement(SettlementName, SettlementWorldTileID);
-    ProcessorMgr->RegisterSettlement(SettlementID);
-    SettlementMgr->SetPlayerCurrency(SettlementID, TAG_Currency_Barter);
-
-    if (FSettlementState* Settlement = SettlementMgr->GetMutableSettlement(SettlementID))
-    {
-        Settlement->WorldOrigin = SettlementWorldOrigin;
-    }
-
     UE_LOG(
         LogTemp,
         Log,
-        TEXT("[ColonyManager] Created settlement '%s' with ID=%d at WorldOrigin=(%d,%d) SpawnCenter=(%d,%d)"),
-        *SettlementName,
-        SettlementID,
+        TEXT("[ColonyManager] Final settlement bootstrap values. SettlementWorldTileID=%d SettlementWorldOrigin=(%d,%d) SpawnCenter=(%d,%d)"),
+        SettlementWorldTileID,
         SettlementWorldOrigin.X,
         SettlementWorldOrigin.Y,
         SpawnGridCenter.X,
         SpawnGridCenter.Y
+    );
+
+    SettlementID = SettlementMgr->CreateSettlement(SettlementName, SettlementWorldTileID);
+    ProcessorMgr->RegisterSettlement(SettlementID);
+    SettlementMgr->SetPlayerCurrency(SettlementID, TAG_Currency_Barter);
+    SettlementMgr->SetPlayerSettlementID(SettlementID);
+
+    if (FSettlementState* Settlement = SettlementMgr->GetMutableSettlement(SettlementID))
+    {
+        // Keep the persisted settlement state aligned with the strategic claim tile.
+        Settlement->WorldTileID = SettlementWorldTileID;
+        Settlement->WorldOrigin = SettlementWorldOrigin;
+    }
+
+    const TArray<int32>* ClaimedWorldTileIDs = SettlementMgr->GetClaimedWorldTilesForSettlement(SettlementID);
+    const int32 ClaimedWorldTileCount = ClaimedWorldTileIDs ? ClaimedWorldTileIDs->Num() : 0;
+    const bool bStartingTileClaimed = SettlementMgr->DoesSettlementClaimWorldTile(SettlementID, SettlementWorldTileID);
+
+    UE_LOG(
+        LogTemp,
+        Log,
+        TEXT("[ColonyManager] Player settlement claim verified. SettlementID=%d WorldTileID=%d Claims=%d Claimed=%s"),
+        SettlementID,
+        SettlementWorldTileID,
+        ClaimedWorldTileCount,
+        bStartingTileClaimed ? TEXT("true") : TEXT("false")
+    );
+
+    UE_LOG(
+        LogTemp,
+        Log,
+        TEXT("[ColonyManager] Created player settlement ID=%d Name='%s' WorldTileID=%d WorldOrigin=(%d,%d) SpawnCenter=(%d,%d) ClaimedWorldTileIDs=%d"),
+        SettlementID,
+        *SettlementName,
+        SettlementWorldTileID,
+        SettlementWorldOrigin.X,
+        SettlementWorldOrigin.Y,
+        SpawnGridCenter.X,
+        SpawnGridCenter.Y,
+        ClaimedWorldTileCount
     );
 }
 
@@ -423,8 +482,9 @@ void AColonyManager::SetupAgents()
         FAgentData NewAgent;
         NewAgent.AgentID = AgentID;
         NewAgent.SettlementID = SettlementID;
+        NewAgent.DisplayName = ResolveStartingNameForAgentIndex(i, AgentID);
         NewAgent.State = EAgentState::Idle;
-        NewAgent.RaceTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Race.Dwarf")));
+        NewAgent.RaceTag = ResolveStartingRaceForAgentIndex(i);
 
         // Roll starting personality/gameplay traits for this colonist.
         // Future us: this same generator can later be reused for NPCs, animals,
@@ -458,15 +518,12 @@ void AColonyManager::SetupAgents()
         NewAgent.CurrentGridPos = SpawnLocalCell;
         NewAgent.CurrentNavTarget = SpawnLocalCell;
 
-        NewAgent.Skills.Add(TAG_Skill_Mining, 25.0f);
-        NewAgent.Skills.Add(TAG_Skill_Hauling, 25.0f);
-        NewAgent.Skills.Add(TAG_Skill_Farming, 25.0f);
-        NewAgent.Skills.Add(TAG_Skill_Cooking, 25.0f);
-        NewAgent.Skills.Add(TAG_Skill_Crafting, 25.0f);
-        NewAgent.Skills.Add(TAG_Skill_Building, 25.0f);
+        ApplyRaceSkillDefaults(NewAgent);
+        ApplyDefaultJobPriorities(NewAgent);
 
         ProcessorMgr->RegisterAgent(NewAgent);
         SettlementMgr->IncrementPopulation(SettlementID);
+        SettlementMgr->IncrementRacePopulation(SettlementID, NewAgent.RaceTag);
 
         UE_LOG(
             LogTemp,
@@ -479,6 +536,114 @@ void AColonyManager::SetupAgents()
             ValidWorldCell.Y
         );
     }
+}
+
+FGameplayTag AColonyManager::ResolveStartingRaceForAgentIndex(int32 AgentIndex) const
+{
+    // Future embark UI path:
+    // - If the player explicitly supplies starting colonists, respect those race choices.
+    // - If the player later chooses a single default race, respect that default race.
+    //
+    // MVP/testing fallback:
+    // - When no explicit race data exists, spawn a mixed-race starter colony so both
+    //   Dwarf and HighElf visual/data paths are exercised immediately.
+    if (const UGameInstance* GI = GetGameInstance())
+    {
+        if (const UWorldForgeEmbarkationManager* Embark = GI->GetSubsystem<UWorldForgeEmbarkationManager>())
+        {
+            const FWorldForgeEmbarkConfig Config = Embark->GetEmbarkConfig();
+            if (Config.StartingColonists.IsValidIndex(AgentIndex) && Config.StartingColonists[AgentIndex].RaceTag.IsValid())
+            {
+                return Config.StartingColonists[AgentIndex].RaceTag;
+            }
+
+            if (Config.StartingColonists.Num() > 0 && Config.DefaultRaceTag.IsValid())
+            {
+                return Config.DefaultRaceTag;
+            }
+        }
+    }
+
+    const int32 HalfPoint = FMath::Max(1, InitialAgentCount / 2);
+    return (AgentIndex < HalfPoint) ? TAG_Race_Dwarf : TAG_Race_HighElf;
+}
+
+FString AColonyManager::ResolveStartingNameForAgentIndex(int32 AgentIndex, int32 AgentID) const
+{
+    if (const UGameInstance* GI = GetGameInstance())
+    {
+        if (const UWorldForgeEmbarkationManager* Embark = GI->GetSubsystem<UWorldForgeEmbarkationManager>())
+        {
+            const FWorldForgeEmbarkConfig Config = Embark->GetEmbarkConfig();
+            if (Config.StartingColonists.IsValidIndex(AgentIndex) && !Config.StartingColonists[AgentIndex].Name.IsEmpty())
+            {
+                return Config.StartingColonists[AgentIndex].Name;
+            }
+        }
+    }
+
+    return FString::Printf(TEXT("Colonist %d"), AgentID);
+}
+
+void AColonyManager::ApplyRaceSkillDefaults(FAgentData& Agent) const
+{
+    Agent.Skills.Add(TAG_Skill_Mining, 25.0f);
+    Agent.Skills.Add(TAG_Skill_Hauling, 25.0f);
+    Agent.Skills.Add(TAG_Skill_Farming, 25.0f);
+    Agent.Skills.Add(TAG_Skill_Cooking, 25.0f);
+    Agent.Skills.Add(TAG_Skill_Crafting, 25.0f);
+    Agent.Skills.Add(TAG_Skill_Building, 25.0f);
+    Agent.Skills.Add(TAG_Skill_Research, 25.0f);
+    Agent.Skills.Add(TAG_Skill_Medicine, 25.0f);
+    Agent.Skills.Add(TAG_Skill_Combat, 25.0f);
+
+    // Lightweight starter flavor until race DataAssets drive full modifiers.
+    if (Agent.RaceTag == TAG_Race_Dwarf)
+    {
+        Agent.Skills.FindOrAdd(TAG_Skill_Mining) += 10.0f;
+        Agent.Skills.FindOrAdd(TAG_Skill_Crafting) += 5.0f;
+        Agent.MaxHealth = 110.0f;
+        Agent.Health = Agent.MaxHealth;
+    }
+    else if (Agent.RaceTag == TAG_Race_HighElf)
+    {
+        Agent.Skills.FindOrAdd(TAG_Skill_Farming) += 5.0f;
+        Agent.Skills.FindOrAdd(TAG_Skill_Research) += 10.0f;
+        Agent.SocialNeed = 75.0f;
+    }
+    else if (Agent.RaceTag == TAG_Race_Human)
+    {
+        Agent.Skills.FindOrAdd(TAG_Skill_Building) += 5.0f;
+        Agent.Skills.FindOrAdd(TAG_Skill_Hauling) += 5.0f;
+    }
+
+    for (TPair<FGameplayTag, float>& Pair : Agent.Skills)
+    {
+        Pair.Value = FMath::Clamp(Pair.Value, 0.0f, 100.0f);
+    }
+}
+
+void AColonyManager::ApplyDefaultJobPriorities(FAgentData& Agent) const
+{
+    // MVP/testing: every known job starts at the highest priority so any
+    // player/system-created work designation is picked up immediately.
+    // Future UI can lower/disable these per colonist.
+    Agent.JobPriorities.Add(TAG_Job_Eat, 4);
+    Agent.JobPriorities.Add(TAG_Job_Sleep, 4);
+    Agent.JobPriorities.Add(TAG_Job_Haul, 4);
+    Agent.JobPriorities.Add(TAG_Job_Build, 4);
+    Agent.JobPriorities.Add(TAG_Job_Mine, 4);
+    Agent.JobPriorities.Add(TAG_Job_Harvest_Food, 4);
+    Agent.JobPriorities.Add(TAG_Job_Harvest_Wood, 4);
+    Agent.JobPriorities.Add(TAG_Job_Harvest_Stone, 4);
+    Agent.JobPriorities.Add(TAG_Job_Cook, 4);
+    Agent.JobPriorities.Add(TAG_Job_Craft, 4);
+    Agent.JobPriorities.Add(TAG_Job_Farm_PrepSoil, 4);
+    Agent.JobPriorities.Add(TAG_Job_Farm_Plant, 4);
+    Agent.JobPriorities.Add(TAG_Job_Farm_Water, 4);
+    Agent.JobPriorities.Add(TAG_Job_Farm_Harvest, 4);
+    Agent.JobPriorities.Add(TAG_Job_Farm_Clear, 4);
+    Agent.JobPriorities.Add(TAG_Job_Farm_Fertilize, 4);
 }
 
 void AColonyManager::SetupInitialResources()
@@ -559,6 +724,32 @@ void AColonyManager::BindDebugInput()
     InputComponent->BindKey(EKeys::Y, IE_Pressed, this, &AColonyManager::HandleBuildTaskInput);
 }
 
+bool AColonyManager::TryGetSelectedStartTile(int32& OutTileX, int32& OutTileY, int32& OutTileIndex) const
+{
+    OutTileX = INDEX_NONE;
+    OutTileY = INDEX_NONE;
+    OutTileIndex = INDEX_NONE;
+
+    const UWorld* World = GetWorld();
+    if (!World)
+    {
+        return false;
+    }
+
+    const UWorldMapSubsystem* WorldMapSubsystem = World->GetSubsystem<UWorldMapSubsystem>();
+    if (!WorldMapSubsystem)
+    {
+        return false;
+    }
+
+    if (!WorldMapSubsystem->GetSelectedStartTile(OutTileX, OutTileY, OutTileIndex))
+    {
+        return false;
+    }
+
+    return OutTileX >= 0 && OutTileY >= 0 && OutTileIndex >= 0;
+}
+
 FIntPoint AColonyManager::ResolveInitialSettlementWorldOrigin() const
 {
     FIntPoint DesiredWorldCell(
@@ -567,20 +758,14 @@ FIntPoint AColonyManager::ResolveInitialSettlementWorldOrigin() const
     );
     const TCHAR* SourceLabel = TEXT("MapCenter");
 
-    if (const UWorld* World = GetWorld())
-    {
-        if (const UWorldMapSubsystem* WorldMapSubsystem = World->GetSubsystem<UWorldMapSubsystem>())
-        {
-            int32 SelectedTileX = INDEX_NONE;
-            int32 SelectedTileY = INDEX_NONE;
-            int32 SelectedTileIndex = INDEX_NONE;
+    int32 SelectedTileX = INDEX_NONE;
+    int32 SelectedTileY = INDEX_NONE;
+    int32 SelectedTileIndex = INDEX_NONE;
 
-            if (WorldMapSubsystem->GetSelectedStartTile(SelectedTileX, SelectedTileY, SelectedTileIndex))
-            {
-                DesiredWorldCell = FIntPoint(SelectedTileX, SelectedTileY);
-                SourceLabel = TEXT("PlayerSelectedTile");
-            }
-        }
+    if (TryGetSelectedStartTile(SelectedTileX, SelectedTileY, SelectedTileIndex))
+    {
+        DesiredWorldCell = FIntPoint(SelectedTileX, SelectedTileY);
+        SourceLabel = TEXT("PlayerSelectedTile");
     }
 
     if (!bPreferMapCenterOnStart && FCString::Strcmp(SourceLabel, TEXT("PlayerSelectedTile")) != 0)

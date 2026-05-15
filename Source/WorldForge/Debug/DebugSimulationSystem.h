@@ -25,18 +25,12 @@ enum class EDebugOverlay : uint8
     MoraleBreakdown,
     IncidentEventLog,
     ProcessorTiming,
-    NavalSummary,        // ADDED
-    CosmicSummary,       // ADDED
-    DiplomacySummary     // ADDED
+    NavalSummary,
+    CosmicSummary,
+    DiplomacySummary,
+    StabilityOverlay     // #15 – colours ceiling voxels by structural stability tier
 };
 
-/*
- * CHANGE:
- * Kept the subsystem Blueprint-facing and explicitly Blueprintable/BlueprintType.
- *
- * WHY:
- * This preserves the existing architecture and keeps the debug API visible to Blueprint.
- */
 UCLASS(BlueprintType, Blueprintable)
 class WORLDFORGE_API UDebugSimulationSystem : public UWorldSubsystem
 {
@@ -117,43 +111,32 @@ public:
     TArray<FString> GetProcessorTimingReport() const;
 
     UFUNCTION(BlueprintPure, Category = "WorldForge|Debug|Naval")
-    TArray<FString> GetNavalSummary() const; // ADDED
+    TArray<FString> GetNavalSummary() const;
 
     UFUNCTION(BlueprintPure, Category = "WorldForge|Debug|Cosmic")
-    TArray<FString> GetCosmicSummary() const; // ADDED
+    TArray<FString> GetCosmicSummary() const;
 
     UFUNCTION(BlueprintPure, Category = "WorldForge|Debug|Diplomacy")
-    TArray<FString> GetDiplomacySummary() const; // ADDED
+    TArray<FString> GetDiplomacySummary() const;
+
+    /**
+     * Returns a text summary of the current structural stability state.
+     * Includes total tracked air-voxel count, MaxSpan setting, and overlay
+     * colour legend.  For per-voxel visual colour, TileGridOverlayActor should
+     * query UStabilitySubsystem::GetStabilityColor() directly.
+     */
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Debug|Stability")
+    TArray<FString> GetStabilityReport(int32 SID) const;
 
     UFUNCTION(BlueprintCallable, Category = "WorldForge|Debug|Timing")
     void OnSimulationStep(int32 StepNumber, int32 SID);
 
 private:
-    // Current active overlay mode.
-    EDebugOverlay ActiveOverlay = EDebugOverlay::None;
-
-    // Currently selected colonist for F7-style inspector view.
-    int32 SelectedAgentID = -1;
-
-    // Last simulation step received by the debug system.
-    int32 LastStepNumber = 0;
+    EDebugOverlay ActiveOverlay  = EDebugOverlay::None;
+    int32 SelectedAgentID        = -1;
+    int32 LastStepNumber         = 0;
 };
 
-/*
- * CHANGE:
- * Added a tiny Blueprint function library with one helper:
- * GetDebugSimulationSystem(WorldContextObject)
- *
- * WHY:
- * The auto-generated subsystem getter node is not appearing in your Blueprint search.
- * This gives BP_DebugHUD a guaranteed, explicit way to fetch the subsystem instance
- * without changing the architecture or moving logic out of Blueprint.
- *
- * IMPORTANT:
- * - This is read-only access plumbing only.
- * - It does NOT redesign the subsystem.
- * - It does NOT modify simulation data.
- */
 UCLASS()
 class WORLDFORGE_API UDebugSimulationBlueprintLibrary : public UBlueprintFunctionLibrary
 {

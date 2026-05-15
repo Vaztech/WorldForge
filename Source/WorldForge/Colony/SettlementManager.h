@@ -51,6 +51,45 @@ public:
     UFUNCTION(BlueprintCallable, Category = "WorldForge|Settlement")
     void SetPlayerCurrency(int32 SettlementID, FGameplayTag CurrencyTag);
 
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Settlement|Claims")
+    bool AddClaimedWorldTileToSettlement(int32 SettlementID, int32 WorldTileID);
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Settlement|Claims")
+    bool DoesSettlementClaimWorldTile(int32 SettlementID, int32 WorldTileID) const;
+
+    const TArray<int32>* GetClaimedWorldTilesForSettlement(int32 SettlementID) const;
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Settlement|Claims")
+    bool CanPlayerClaimWorldTile(int32 WorldTileID, FString& OutReason) const;
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Settlement|Claims")
+    bool ClaimWorldTileForPlayerSettlement(int32 WorldTileID, FString& OutReason);
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Settlement|Claims")
+    bool IsWorldTileAdjacentToPlayerClaim(int32 WorldTileID) const;
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Settlement|Claims")
+    int32 GetPlayerLandClaimCost(int32 WorldTileID) const;
+
+    // Patch 4C: Strategic claims are stored as world-map tile IDs on FSettlementState.
+    // Local actions operate in world position, terrain cell, or voxel cell space.
+    // These helpers convert action locations back to world-map tile IDs for later enforcement.
+    // Build/mine/dig/farm restriction checks will call these in later patches.
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Settlement|Claims")
+    bool DoesPlayerSettlementClaimWorldTile(int32 WorldTileID) const;
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Settlement|Claims")
+    bool DoesPlayerSettlementClaimWorldPosition(const FVector& WorldPosition) const;
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Settlement|Claims")
+    bool DoesPlayerSettlementClaimWorldCell(const FIntPoint& WorldCell) const;
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Settlement|Claims")
+    bool DoesPlayerSettlementClaimVoxelCell(const FIntPoint& VoxelCell) const;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Settlement|Claims")
+    bool bLogClaimQueries = false;
+
     UFUNCTION(BlueprintCallable, Category = "WorldForge|Settlement|Visuals")
     void SetVisualDirty(int32 SettlementID);
 
@@ -67,10 +106,33 @@ public:
     void IncrementPopulation(int32 ID);
 
     UFUNCTION(BlueprintCallable, Category = "WorldForge|Settlement")
+    void IncrementRacePopulation(int32 ID, FGameplayTag RaceTag);
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Settlement")
+    void DecrementRacePopulation(int32 ID, FGameplayTag RaceTag);
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Settlement")
+    TMap<FGameplayTag, int32> GetRacePopulation(int32 ID) const;
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Settlement")
     void DecrementPopulation(int32 ID);
 
     UFUNCTION(BlueprintCallable, Category = "WorldForge|Settlement")
     int32 GetPopulation(int32 ID) const;
+
+
+    /** Player-owned settlement. Player build/mine/farm tools must use this, not settlement 0. */
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Settlement|Player")
+    void SetPlayerSettlementID(int32 SettlementID);
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Settlement|Player")
+    int32 GetPlayerSettlementID() const { return PlayerSettlementID; }
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Settlement|Player")
+    bool HasPlayerSettlement() const { return PlayerSettlementID >= 0 && SettlementExists(PlayerSettlementID); }
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Settlement|Player")
+    void ClearPlayerSettlementID();
 
     const TArray<FSettlementState>& GetAllSettlements() const { return Settlements; }
     void RestoreFromSave(const TArray<FSettlementState>& Saved);
@@ -87,6 +149,9 @@ public:
 private:
     TArray<FSettlementState> Settlements;
     int32 NextSettlementID = 0;
+
+    // -1 until the player colony is created. NPC civ settlements must never set this.
+    int32 PlayerSettlementID = INDEX_NONE;
 
     UPROPERTY(Transient)
     TSet<int32> VisualDirtySettlements;

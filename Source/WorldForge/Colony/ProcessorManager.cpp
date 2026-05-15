@@ -1,4 +1,4 @@
-﻿#include "ProcessorManager.h"
+#include "ProcessorManager.h"
 
 #include "Processors/NeedsProcessor.h"
 #include "Processors/JobProcessor.h"
@@ -28,6 +28,89 @@
 
 // Required for FGameplayTag::RequestGameplayTag
 #include "GameplayTagContainer.h"
+
+namespace
+{
+    TArray<FGameplayTag> BuildDefaultJobPriorityTags()
+    {
+        return TArray<FGameplayTag>{
+            TAG_Job_Eat,
+            TAG_Job_Sleep,
+            TAG_Job_Haul,
+            TAG_Job_Build,
+            TAG_Job_Mine,
+            TAG_Job_Harvest_Food,
+            TAG_Job_Harvest_Wood,
+            TAG_Job_Harvest_Stone,
+            TAG_Job_Cook,
+            TAG_Job_Craft,
+            TAG_Job_Farm_PrepSoil,
+            TAG_Job_Farm_Plant,
+            TAG_Job_Farm_Water,
+            TAG_Job_Farm_Harvest,
+            TAG_Job_Farm_Clear,
+            TAG_Job_Farm_Fertilize
+        };
+    }
+
+    void EnsureDefaultJobPriorities(FAgentData& Agent)
+    {
+        for (const FGameplayTag& JobTag : BuildDefaultJobPriorityTags())
+        {
+            if (JobTag.IsValid() && !Agent.JobPriorities.Contains(JobTag))
+            {
+                Agent.JobPriorities.Add(JobTag, 4);
+            }
+        }
+
+        // MVP/testing: all known jobs are high priority so any player-created
+        // designation can be picked up immediately. Needs can still override
+        // behavior through HandleCriticalNeeds in JobProcessor.
+        for (const FGameplayTag& JobTag : BuildDefaultJobPriorityTags())
+        {
+            if (JobTag.IsValid())
+            {
+                Agent.JobPriorities.FindOrAdd(JobTag) = 4;
+            }
+        }
+    }
+
+    FColonistInspectionData MakeInspectionData(const FAgentData& Agent)
+    {
+        FColonistInspectionData Data;
+        Data.AgentID = Agent.AgentID;
+        Data.SettlementID = Agent.SettlementID;
+        Data.DisplayName = Agent.DisplayName;
+        Data.RaceTag = Agent.RaceTag;
+        Data.State = Agent.State;
+        Data.CurrentJobTag = Agent.CurrentJobTag;
+        Data.CurrentGridPos = Agent.CurrentGridPos;
+        Data.CurrentNavTarget = Agent.CurrentNavTarget;
+        Data.FoodNeed = Agent.FoodNeed;
+        Data.SleepNeed = Agent.SleepNeed;
+        Data.SocialNeed = Agent.SocialNeed;
+        Data.SafetyNeed = Agent.SafetyNeed;
+        Data.PurposeNeed = Agent.PurposeNeed;
+        Data.MoodScore = Agent.MoodScore;
+        Data.Health = Agent.Health;
+        Data.MaxHealth = Agent.MaxHealth;
+        Data.CurrentEfficiency = Agent.CurrentEfficiency;
+        Data.bInjured = Agent.bInjured;
+        Data.TraitTags = Agent.TraitTags;
+        Data.Skills = Agent.Skills;
+        Data.EquippedItems = Agent.EquippedItems;
+
+        for (const TPair<FGameplayTag, int32>& Pair : Agent.JobPriorities)
+        {
+            FColonistJobPriority Entry;
+            Entry.JobTag = Pair.Key;
+            Entry.Priority = Pair.Value;
+            Data.JobPriorities.Add(Entry);
+        }
+
+        return Data;
+    }
+}
 
 void UProcessorManager::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -291,6 +374,13 @@ void UProcessorManager::RegisterAgent(const FAgentData& A)
         );
     }
 
+    if (NewAgent.DisplayName.IsEmpty())
+    {
+        NewAgent.DisplayName = FString::Printf(TEXT("Colonist %d"), NewAgent.AgentID);
+    }
+
+    EnsureDefaultJobPriorities(NewAgent);
+
     // Test-level fallback so agents created from Blueprint or other paths
     // are still eligible for basic harvest jobs when no explicit skills
     // were assigned before registration.
@@ -320,6 +410,7 @@ void UProcessorManager::SpawnTestAgent(int32 AgentID, int32 SettlementID, FIntPo
     FAgentData Agent;
     Agent.AgentID = AgentID;
     Agent.SettlementID = SettlementID;
+    Agent.DisplayName = FString::Printf(TEXT("Test Colonist %d"), AgentID);
     Agent.State = EAgentState::Idle;
     Agent.FoodNeed = 100.f;
     Agent.SleepNeed = 100.f;
@@ -338,6 +429,8 @@ void UProcessorManager::SpawnTestAgent(int32 AgentID, int32 SettlementID, FIntPo
     Agent.RaceTag = FGameplayTag::RequestGameplayTag(
         FName("WorldForge.Race.Dwarf")
     );
+
+    EnsureDefaultJobPriorities(Agent);
 
     RegisterAgent(Agent);
     RegisterSettlement(SettlementID);
@@ -392,13 +485,110 @@ const TArray<FAgentData>& UProcessorManager::GetAgentsForSettlement(int32 Settle
     return SettlementAgentScratch;
 }
 
+bool UProcessorManager::GetAgentInspectionData(int32 AgentID, FColonistInspectionData& OutData) const
+{
+    if (const FAgentData* Agent = GetAgent(AgentID))
+    {
+        OutData = MakeInspectionData(*Agent);
+        return true;
+    }
+
+    OutData = FColonistInspectionData();
+    return false;
+}
+
+bool UProcessorManager::SetAgentJobPriority(int32 AgentID, FGameplayTag JobTag, int32 Priority)
+{
+    if (!JobTag.IsValid())
+    {
+        return false;
+    }
+
+    FAgentData* Agent = GetMutableAgent(AgentID);
+    if (!Agent)
+    {
+        return false;
+    }
+
+    Agent->JobPriorities.FindOrAdd(JobTag) = FMath::Clamp(Priority, 0, 4);
+    return true;
+}
+
+int32 UProcessorManager::GetAgentJobPriority(int32 AgentID, FGameplayTag JobTag) const
+{
+    if (!JobTag.IsValid())
+    {
+        return 0;
+    }
+
+    const FAgentData* Agent = GetAgent(AgentID);
+    if (!Agent)
+    {
+        return 0;
+    }
+
+    const int32* Found = Agent->JobPriorities.Find(JobTag);
+    return Found ? *Found : 4;
+}
+
+TArray<FColonistJobPriority> UProcessorManager::GetAgentJobPriorities(int32 AgentID) const
+{
+    TArray<FColonistJobPriority> Result;
+
+    const FAgentData* Agent = GetAgent(AgentID);
+    if (!Agent)
+    {
+        return Result;
+    }
+
+    for (const FGameplayTag& JobTag : BuildDefaultJobPriorityTags())
+    {
+        if (!JobTag.IsValid())
+        {
+            continue;
+        }
+
+        FColonistJobPriority Entry;
+        Entry.JobTag = JobTag;
+        Entry.Priority = Agent->JobPriorities.FindRef(JobTag);
+        if (Entry.Priority <= 0 && !Agent->JobPriorities.Contains(JobTag))
+        {
+            Entry.Priority = 4;
+        }
+        Result.Add(Entry);
+    }
+
+    return Result;
+}
+
+void UProcessorManager::ResetAgentJobPrioritiesToDefault(int32 AgentID)
+{
+    if (FAgentData* Agent = GetMutableAgent(AgentID))
+    {
+        Agent->JobPriorities.Reset();
+        EnsureDefaultJobPriorities(*Agent);
+    }
+}
+
+TArray<FGameplayTag> UProcessorManager::GetDefaultJobPriorityTags() const
+{
+    return BuildDefaultJobPriorityTags();
+}
+
 void UProcessorManager::RestoreAgents(const TArray<FAgentData>& Saved)
 {
     Agents = Saved;
     ActiveSettlementIDs.Reset();
 
-    for (const FAgentData& Agent : Agents)
+    for (FAgentData& Agent : Agents)
     {
+        if (Agent.DisplayName.IsEmpty())
+        {
+            Agent.DisplayName = FString::Printf(TEXT("Colonist %d"), Agent.AgentID);
+        }
+
+        EnsureDefaultJobPriorities(Agent);
+
         if (Agent.SettlementID >= 0 && !ActiveSettlementIDs.Contains(Agent.SettlementID))
         {
             ActiveSettlementIDs.Add(Agent.SettlementID);

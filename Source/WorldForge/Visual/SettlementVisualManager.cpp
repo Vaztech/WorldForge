@@ -5,6 +5,7 @@
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "GameFramework/WorldSettings.h"
+#include "Voxel/VoxelWorldManager.h"
 
 void USettlementVisualManager::Initialize(UWorld* InWorld, int32 InSettlementID, UDA_VoxelVisualRuleSet* InRuleSet)
 {
@@ -75,7 +76,7 @@ void USettlementVisualManager::RebuildBuildingVisuals(
             continue;
         }
 
-        const FTransform WorldTransform = MakeBuildingTransform(Index, Rule);
+        const FTransform WorldTransform = MakeBuildingTransform(SettlementState, Index, Rule);
         const int32 InstanceIdx = HISM->AddInstance(WorldTransform, true);
 
         FVoxelSpawnRecord Record;
@@ -147,16 +148,32 @@ UHierarchicalInstancedStaticMeshComponent* USettlementVisualManager::GetOrCreate
     return HISM;
 }
 
-FTransform USettlementVisualManager::MakeBuildingTransform(int32 BuildingIndex, const FBuildingVisualRule& Rule) const
+FTransform USettlementVisualManager::MakeBuildingTransform(
+    const FSettlementState& SettlementState,
+    int32 BuildingIndex,
+    const FBuildingVisualRule& Rule) const
 {
-    // Placeholder deterministic layout until real colony building grid positions
-    // are surfaced to VSS from construction / settlement data.
-    const FVector BaseLocation(
-        static_cast<float>(BuildingIndex) * 250.f,
-        static_cast<float>(SettlementID) * 1200.f,
-        0.f);
+    // Deterministic placeholder layout anchored to the settlement's real
+    // WorldOrigin so generated NPC civ settlements appear at their civ capital
+    // instead of all spawning near world zero.
+    const int32 LocalX = BuildingIndex % 4;
+    const int32 LocalY = BuildingIndex / 4;
+    const FIntPoint BuildingWorldCell = SettlementState.WorldOrigin + FIntPoint(4 + LocalX * 2, 4 + LocalY * 2);
 
-    const FVector WorldLocation = BaseLocation + Rule.RelativeOffset;
+    FVector BaseLocation(
+        static_cast<float>(BuildingWorldCell.X) * 3200.0f,
+        static_cast<float>(BuildingWorldCell.Y) * 3200.0f,
+        0.0f);
+
+    if (CachedWorld)
+    {
+        if (const UVoxelWorldManager* VoxelWorldManager = CachedWorld->GetSubsystem<UVoxelWorldManager>())
+        {
+            BaseLocation = VoxelWorldManager->TerrainCellToWorld(BuildingWorldCell, 0.0f, true);
+        }
+    }
+
+    const FVector WorldLocation = BaseLocation + Rule.RelativeOffset + FVector(0.0f, 0.0f, 120.0f);
 
     return FTransform(
         Rule.RelativeRotation.Quaternion(),

@@ -35,6 +35,14 @@ public:
     UFUNCTION(BlueprintCallable, Category = "Simulation")
     void ResumeSimulation();
 
+    /**
+     * Set the simulation speed multiplier.
+     * 1.0 = normal, 2.0 = 2x faster, etc.
+     * Clamped to [0.01, 10.0].
+     *
+     * Called by WorldForgePlayerController::ApplyCurrentSimSpeed()
+     * via the + / - / * key bindings (or their UI button equivalents).
+     */
     UFUNCTION(BlueprintCallable, Category = "Simulation")
     void SetSimSpeed(float Multiplier);
 
@@ -68,32 +76,60 @@ public:
     UPROPERTY(BlueprintAssignable, Category = "Simulation")
     FOnSimulationStep OnSimulationStep;
 
-    // Automatically recalculates FixedStepInterval from TargetMinutesPerDay and StepsPerDay.
-    // Example: 1 minute/day with 50 steps/day => 1.2 seconds/step.
-    // Lowered from 20 to 1 during testing so colonist movement is visible in PIE.
-    // Restore to 20 (or whatever the production target is) once locomotion tuning is done.
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Simulation|Tuning", meta = (ClampMin = "1.0", UIMin = "1.0", ClampMax = "120.0", UIMax = "120.0"))
-    float TargetMinutesPerDay = 1.0f;
+    // ─────────────────────────────────────────────────────────────────────────
+    // Simulation timing
+    //
+    // Production target time scale:
+    //   1 in-game hour  = 1 real-world minute  (at 1x speed)
+    //   1 in-game day   = 24 real-world minutes (at 1x speed)
+    //   Full day cycle  = 120,000 engine ticks at 60fps ≈ 33 min
+    //                     (SkyScape day/night is independent of this value)
+    //
+    // Speed multiplier effect at each level:
+    //   1x → 24 real minutes per game day    (1 hr/min)
+    //   2x → 12 real minutes per game day    (1 hr/30s)
+    //   3x →  8 real minutes per game day    (1 hr/20s)
+    //   4x →  6 real minutes per game day    (1 hr/15s)
+    //
+    // TargetMinutesPerDay was previously set to 1.0 (1 min/day) during
+    // locomotion testing so colonist movement was visible in fast PIE sessions.
+    // It is temporarily set to 4.0 for faster PIE testing so jobs and
+    // colonist visual movement update often enough to see during debugging.
+    // Return this to 24.0 later for production pacing.
+    // ─────────────────────────────────────────────────────────────────────────
 
-    // Number of simulation steps that make up a single day.
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Simulation|Tuning", meta = (ClampMin = "1", UIMin = "1"))
-    int32 StepsPerDay = 50;
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Simulation|Tuning",
+        meta = (ClampMin = "1.0", UIMin = "1.0", ClampMax = "120.0", UIMax = "120.0"))
+    float TargetMinutesPerDay = 4.0f;
+
+    // Number of simulation steps that make up a single in-game day.
+    // At 4 min/day with 120 steps: FixedStepInterval = 2.0 seconds/step.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Simulation|Tuning",
+        meta = (ClampMin = "1", UIMin = "1"))
+    int32 StepsPerDay = 120;
 
     // Length of a year in simulation days.
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Simulation|Tuning", meta = (ClampMin = "1", UIMin = "1"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Simulation|Tuning",
+        meta = (ClampMin = "1", UIMin = "1"))
     int32 DaysPerYear = 100;
 
     // Runtime speed multiplier applied to DeltaTime accumulation.
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Simulation|Tuning", meta = (ClampMin = "0.01", UIMin = "0.01", ClampMax = "10.0", UIMax = "10.0"))
+    // Changed at runtime by WorldForgePlayerController via SetSimSpeed().
+    // 1x, 2x, 3x, 4x are the player-facing levels (clamped to [0.01, 10.0] internally).
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Simulation|Tuning",
+        meta = (ClampMin = "0.01", UIMin = "0.01", ClampMax = "10.0", UIMax = "10.0"))
     float SimSpeedMultiplier = 1.0f;
 
     // Calculated fixed-step interval in real seconds per simulation step.
-    // Usually derived from TargetMinutesPerDay / StepsPerDay via RecalculateTimeSettings().
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Simulation|Advanced", meta = (ClampMin = "0.001", UIMin = "0.001"))
+    // Derived automatically from TargetMinutesPerDay / StepsPerDay via RecalculateTimeSettings().
+    // Do not set this manually — call RecalculateTimeSettings() instead.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Simulation|Advanced",
+        meta = (ClampMin = "0.001", UIMin = "0.001"))
     float FixedStepInterval = 1.2f;
 
     // Safety cap to prevent huge catch-up bursts in a single frame.
-    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Simulation|Advanced", meta = (ClampMin = "1", UIMin = "1", ClampMax = "100", UIMax = "100"))
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Simulation|Advanced",
+        meta = (ClampMin = "1", UIMin = "1", ClampMax = "100", UIMax = "100"))
     int32 MaxStepsPerFrame = 5;
 
     int32 GetTotalStepCount() const { return StepNumber; }
@@ -101,9 +137,9 @@ public:
 
 private:
     float Accumulator = 0.f;
-    int32 StepNumber = 0;
-    int32 CurrentDay = 1;
+    int32 StepNumber  = 0;
+    int32 CurrentDay  = 1;
     int32 CurrentYear = 1;
-    bool bRunning = false;
-    bool bPaused = false;
+    bool  bRunning    = false;
+    bool  bPaused     = false;
 };

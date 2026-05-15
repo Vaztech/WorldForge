@@ -1,9 +1,11 @@
 #include "Mining/MiningSubsystem.h"
 
 #include "Voxel/VoxelWorldManager.h"
+#include "Colony/SettlementManager.h"
 #include "Colony/ProcessorManager.h"
 #include "Colony/Processors/JobProcessor.h"
 #include "Data/WorldForgeTags.h"
+#include "Mining/StabilitySubsystem.h"
 #include "Engine/World.h"
 
 // ===================================================================
@@ -34,7 +36,7 @@ bool UMiningSubsystem::IsDesignationTerminal(const FMiningDesignation& Designati
 {
 	return
 		Designation.State == EMiningDesignationState::Cancelled ||
-		Designation.State == EMiningDesignationState::Complete ||
+		Designation.State == EMiningDesignationState::Complete  ||
 		Designation.State == EMiningDesignationState::Failed;
 }
 
@@ -151,6 +153,26 @@ bool UMiningSubsystem::CreateMiningDesignation(
 		return false;
 	}
 
+	if (UWorld* World = GetWorld())
+	{
+		if (const USettlementManager* SettlementManager = World->GetSubsystem<USettlementManager>())
+		{
+			const int32 PlayerSettlementID = SettlementManager->GetPlayerSettlementID();
+			if (PlayerSettlementID != INDEX_NONE &&
+				SettlementID == PlayerSettlementID &&
+				!SettlementManager->DoesPlayerSettlementClaimVoxelCell(FIntPoint(ResolvedGridPosition.X, ResolvedGridPosition.Y)))
+			{
+				UE_LOG(LogTemp, Warning,
+					TEXT("[MiningSubsystem] CreateMiningDesignation blocked: unclaimed land. Settlement=%d Voxel=(%d,%d,%d)"),
+					SettlementID,
+					ResolvedGridPosition.X,
+					ResolvedGridPosition.Y,
+					ResolvedGridPosition.Z);
+				return false;
+			}
+		}
+	}
+
 	for (const TPair<int32, FMiningDesignation>& Pair : Designations)
 	{
 		const FMiningDesignation& Existing = Pair.Value;
@@ -168,27 +190,29 @@ bool UMiningSubsystem::CreateMiningDesignation(
 	}
 
 	FMiningDesignation NewDesignation;
-	NewDesignation.DesignationID = NextDesignationID++;
-	NewDesignation.SettlementID = SettlementID;
-	NewDesignation.GridPosition = ResolvedGridPosition;
-	NewDesignation.ExpectedBlockType = BlockType;
-	NewDesignation.State = EMiningDesignationState::Pending;
-	NewDesignation.ReservedAgentID = INDEX_NONE;
-	NewDesignation.CreatedStep = CurrentStep;
-	NewDesignation.BrushShape = EDigBrushShape::Sphere;
-	NewDesignation.AppliedBrushID = INDEX_NONE;
+	NewDesignation.DesignationID    = NextDesignationID++;
+	NewDesignation.SettlementID     = SettlementID;
+	NewDesignation.GridPosition     = ResolvedGridPosition;
+	NewDesignation.ExpectedBlockType= BlockType;
+	NewDesignation.State            = EMiningDesignationState::Pending;
+	NewDesignation.ReservedAgentID  = INDEX_NONE;
+	NewDesignation.CreatedStep      = CurrentStep;
+	NewDesignation.BrushShape       = EDigBrushShape::Box;
+	NewDesignation.RemovalMode      = CurrentRemovalMode;
+	NewDesignation.AppliedBrushID   = INDEX_NONE;
 
 	Designations.Add(NewDesignation.DesignationID, NewDesignation);
 	OutDesignationID = NewDesignation.DesignationID;
 
 	UE_LOG(LogTemp, Warning,
-		TEXT("[MiningSubsystem] Created designation ID=%d Settlement=%d Grid=%s Type=%s Step=%d BrushShape=%d"),
+		TEXT("[MiningSubsystem] Created designation ID=%d Settlement=%d Grid=%s Type=%s Step=%d BrushShape=%d RemovalMode=%d"),
 		OutDesignationID,
 		SettlementID,
 		*ResolvedGridPosition.ToString(),
 		*BlockType.ToString(),
 		CurrentStep,
-		static_cast<int32>(NewDesignation.BrushShape));
+		static_cast<int32>(NewDesignation.BrushShape),
+		static_cast<int32>(NewDesignation.RemovalMode));
 
 	return true;
 }
@@ -216,8 +240,8 @@ bool UMiningSubsystem::CancelMiningDesignation(int32 DesignationID)
 		return false;
 	}
 
-	Designation->State = EMiningDesignationState::Cancelled;
-	Designation->ReservedAgentID = INDEX_NONE;
+	Designation->State          = EMiningDesignationState::Cancelled;
+	Designation->ReservedAgentID= INDEX_NONE;
 
 	UE_LOG(LogTemp, Log,
 		TEXT("[MiningSubsystem] Cancelled designation ID=%d"),
@@ -237,29 +261,26 @@ bool UMiningSubsystem::TryReserveDesignation(
 	FIntVector& OutGridPosition)
 {
 	OutDesignationID = INDEX_NONE;
-	OutGridPosition = FIntVector::ZeroValue;
+	OutGridPosition  = FIntVector::ZeroValue;
+
+	// Cache subsystem pointers once outside the loop.
+	UVoxelWorldManager*   VM      = GetVoxelWorldManager();
+	UStabilitySubsystem*  StabSys = GetWorld() ? GetWorld()->GetSubsystem<UStabilitySubsystem>() : nullptr;
 
 	for (TPair<int32, FMiningDesignation>& Pair : Designations)
 	{
 		FMiningDesignation& Designation = Pair.Value;
 
-		if (Designation.SettlementID != SettlementID)
-		{
-			continue;
-		}
-
-		if (Designation.State != EMiningDesignationState::Pending)
-		{
-			continue;
-		}
+		if (Designation.SettlementID != SettlementID)   { continue; }
+		if (Designation.State != EMiningDesignationState::Pending) { continue; }
 
 		FGameplayTag CurrentBlockType;
-		FIntVector ResolvedGridPosition;
+		FIntVector   ResolvedGridPosition;
 
 		if (!ResolveMineTarget(Designation.GridPosition, ResolvedGridPosition, CurrentBlockType))
 		{
-			Designation.State = EMiningDesignationState::Failed;
-			Designation.ReservedAgentID = INDEX_NONE;
+			Designation.State          = EMiningDesignationState::Failed;
+			Designation.ReservedAgentID= INDEX_NONE;
 
 			UE_LOG(LogTemp, Warning,
 				TEXT("[MiningSubsystem] Reservation failed validation. ID=%d Grid=%s"),
@@ -269,13 +290,55 @@ bool UMiningSubsystem::TryReserveDesignation(
 			continue;
 		}
 
-		Designation.GridPosition = ResolvedGridPosition;
-		Designation.ExpectedBlockType = CurrentBlockType;
-		Designation.State = EMiningDesignationState::Reserved;
-		Designation.ReservedAgentID = AgentID;
+		// ── Underground access check ────────────────────────────────────────
+		// Do not let agents claim designations they physically cannot reach yet.
+		// A voxel is accessible if:
+		//   (a) It is at or near the terrain surface (≤ 1 layer below surface Z), OR
+		//   (b) There is at least one already-mined (air) voxel in the column
+		//       between this voxel and the surface, giving colonists a path in.
+		//
+		// Inaccessible designations remain Pending and will be picked up
+		// automatically once higher layers are dug out.
+		if (StabSys && VM)
+		{
+			const int32 SurfaceZ          = VM->GetSurfaceZAt(FIntPoint(ResolvedGridPosition.X, ResolvedGridPosition.Y));
+			const int32 DepthBelowSurface = SurfaceZ - ResolvedGridPosition.Z;
+
+			if (DepthBelowSurface > 1)
+			{
+				// Deep underground — require an air column above.
+				bool bAccessible = false;
+
+				for (int32 CheckZ = ResolvedGridPosition.Z + 1; CheckZ <= SurfaceZ; ++CheckZ)
+				{
+					if (StabSys->IsAirVoxel(FIntVector(ResolvedGridPosition.X, ResolvedGridPosition.Y, CheckZ)))
+					{
+						bAccessible = true;
+						break;
+					}
+				}
+
+				if (!bAccessible)
+				{
+					UE_LOG(LogTemp, Verbose,
+						TEXT("[MiningSubsystem] Designation ID=%d at (%d,%d,%d) depth=%d not yet accessible — no air path above. Skipping."),
+						Designation.DesignationID,
+						ResolvedGridPosition.X, ResolvedGridPosition.Y, ResolvedGridPosition.Z,
+						DepthBelowSurface);
+
+					continue;  // Leave Pending; try again next step after above layers are mined.
+				}
+			}
+		}
+		// ── End access check ────────────────────────────────────────────────
+
+		Designation.GridPosition     = ResolvedGridPosition;
+		Designation.ExpectedBlockType= CurrentBlockType;
+		Designation.State            = EMiningDesignationState::Reserved;
+		Designation.ReservedAgentID  = AgentID;
 
 		OutDesignationID = Designation.DesignationID;
-		OutGridPosition = Designation.GridPosition;
+		OutGridPosition  = Designation.GridPosition;
 
 		UE_LOG(LogTemp, Warning,
 			TEXT("[MiningSubsystem] Reserved designation ID=%d Agent=%d Grid=%s Type=%s"),
@@ -331,28 +394,17 @@ void UMiningSubsystem::PostMiningJobs(int32 SettlementID, int32 StepNumber)
 	{
 		FMiningDesignation& Designation = Pair.Value;
 
-		if (Designation.SettlementID != SettlementID)
-		{
-			continue;
-		}
-
-		if (Designation.State != EMiningDesignationState::Pending)
-		{
-			continue;
-		}
-
-		if (HasExistingMiningJob(SettlementID, Designation.DesignationID))
-		{
-			continue;
-		}
+		if (Designation.SettlementID != SettlementID) { continue; }
+		if (Designation.State != EMiningDesignationState::Pending) { continue; }
+		if (HasExistingMiningJob(SettlementID, Designation.DesignationID)) { continue; }
 
 		FGameplayTag CurrentBlockType;
-		FIntVector ResolvedGridPosition;
+		FIntVector   ResolvedGridPosition;
 
 		if (!ResolveMineTarget(Designation.GridPosition, ResolvedGridPosition, CurrentBlockType))
 		{
-			Designation.State = EMiningDesignationState::Failed;
-			Designation.ReservedAgentID = INDEX_NONE;
+			Designation.State          = EMiningDesignationState::Failed;
+			Designation.ReservedAgentID= INDEX_NONE;
 
 			UE_LOG(LogTemp, Warning,
 				TEXT("[MiningSubsystem] PostMiningJobs failed validation. ID=%d Grid=%s"),
@@ -362,20 +414,20 @@ void UMiningSubsystem::PostMiningJobs(int32 SettlementID, int32 StepNumber)
 			continue;
 		}
 
-		Designation.GridPosition = ResolvedGridPosition;
-		Designation.ExpectedBlockType = CurrentBlockType;
+		Designation.GridPosition     = ResolvedGridPosition;
+		Designation.ExpectedBlockType= CurrentBlockType;
 
 		FJobRequest Req;
-		Req.SettlementID = SettlementID;
-		Req.JobTag = TAG_Job_Mine;
+		Req.SettlementID  = SettlementID;
+		Req.JobTag        = TAG_Job_Mine;
 		Req.RequiredSkill = TAG_Skill_Mining;
-		Req.Priority = EJobPriority::High;
-		Req.PostedOnStep = StepNumber;
+		Req.Priority      = EJobPriority::High;
+		Req.PostedOnStep  = StepNumber;
 
 		// Critical metadata:
 		// TargetID = Mining DesignationID
 		// TargetGridPos = X/Y nav target for the miner
-		Req.TargetID = Designation.DesignationID;
+		Req.TargetID      = Designation.DesignationID;
 		Req.TargetGridPos = FIntPoint(Designation.GridPosition.X, Designation.GridPosition.Y);
 		Req.TargetItemTag = TAG_Item_Stone;
 
@@ -449,12 +501,12 @@ bool UMiningSubsystem::CompleteDesignation(int32 DesignationID, int32 AgentID)
 
 	// Revalidate the designation at completion time.
 	FGameplayTag CurrentBlockType;
-	FIntVector ResolvedGridPosition;
+	FIntVector   ResolvedGridPosition;
 
 	if (!ResolveMineTarget(Designation->GridPosition, ResolvedGridPosition, CurrentBlockType))
 	{
-		Designation->State = EMiningDesignationState::Failed;
-		Designation->ReservedAgentID = INDEX_NONE;
+		Designation->State          = EMiningDesignationState::Failed;
+		Designation->ReservedAgentID= INDEX_NONE;
 
 		UE_LOG(LogTemp, Warning,
 			TEXT("[MiningSubsystem] CompleteDesignation failed validation. ID=%d Grid=%s"),
@@ -464,28 +516,27 @@ bool UMiningSubsystem::CompleteDesignation(int32 DesignationID, int32 AgentID)
 		return false;
 	}
 
-	Designation->GridPosition = ResolvedGridPosition;
-	Designation->ExpectedBlockType = CurrentBlockType;
+	Designation->GridPosition     = ResolvedGridPosition;
+	Designation->ExpectedBlockType= CurrentBlockType;
 
 	UE_LOG(LogTemp, Warning,
-		TEXT("[MiningSubsystem] CompleteDesignation removing block. ID=%d Agent=%d Grid=%s ExpectedType=%s Shape=%d"),
+		TEXT("[MiningSubsystem] CompleteDesignation removing block. ID=%d Agent=%d Grid=%s ExpectedType=%s Shape=%d RemovalMode=%d"),
 		DesignationID,
 		AgentID,
 		*Designation->GridPosition.ToString(),
 		*Designation->ExpectedBlockType.ToString(),
-		static_cast<int32>(Designation->BrushShape));
+		static_cast<int32>(Designation->BrushShape),
+		static_cast<int32>(Designation->RemovalMode));
 
-	// Current VoxelWorldManager exposes block removal publicly.
-	// The lower-level SDF/runtime edit path stays inside VoxelWorldManager.
-	const bool bRemoved = VM->RemoveBlockAt(Designation->GridPosition);
+	const bool bRemoved = VM->RemoveVoxelByMode(Designation->GridPosition, Designation->RemovalMode);
 
 	if (!bRemoved)
 	{
-		Designation->State = EMiningDesignationState::Failed;
-		Designation->ReservedAgentID = INDEX_NONE;
+		Designation->State          = EMiningDesignationState::Failed;
+		Designation->ReservedAgentID= INDEX_NONE;
 
 		UE_LOG(LogTemp, Warning,
-			TEXT("[MiningSubsystem] CompleteDesignation failed. RemoveBlockAt failed. ID=%d Agent=%d Grid=%s Type=%s"),
+			TEXT("[MiningSubsystem] CompleteDesignation failed. RemoveVoxelByMode failed. ID=%d Agent=%d Grid=%s Type=%s"),
 			DesignationID,
 			AgentID,
 			*Designation->GridPosition.ToString(),
@@ -494,9 +545,47 @@ bool UMiningSubsystem::CompleteDesignation(int32 DesignationID, int32 AgentID)
 		return false;
 	}
 
+	// ── Structural stability check ─────────────────────────────────────────
+	// Now that the voxel is physically removed, ask the stability system whether
+	// any ceiling tiles have lost support and need to cave in.
+	//
+	// ProcessCollapses inside OnVoxelRemoved calls DigSubsystem::DigVoxelAtGrid
+	// for each cascading voxel, so no further Voxel Plugin calls are needed here.
+	if (UStabilitySubsystem* StabSys = GetWorld() ? GetWorld()->GetSubsystem<UStabilitySubsystem>() : nullptr)
+	{
+		FCollapseResult Collapse = StabSys->OnVoxelRemoved(
+			Designation->GridPosition,
+			Designation->SettlementID);
+
+		if (Collapse.WasTriggered())
+		{
+			UE_LOG(LogTemp, Warning,
+				TEXT("[MiningSubsystem] Cave-in triggered by DesignationID=%d. Collapsed=%d Injured=%d CascadeDepth=%d"),
+				DesignationID,
+				Collapse.CollapsedVoxels.Num(),
+				Collapse.InjuredAgentIDs.Num(),
+				Collapse.MaxCascadeDepthReached);
+
+			// Cancel any standing designations that now point into collapsed air.
+			for (const FIntVector& CollapsedVoxel : Collapse.CollapsedVoxels)
+			{
+				CancelDesignationsAtVoxel(CollapsedVoxel, Designation->SettlementID);
+			}
+
+			// TODO: Forward Collapse.InjuredAgentIDs to EventBus so HealthProcessor
+			// can apply cave-in damage (TAG_Sim_Event_CaveCollapse payload).
+			// Uncomment once EventBus Dispatch() payload API is confirmed:
+			// if (UEventBus* Bus = GetWorld()->GetSubsystem<UEventBus>())
+			// {
+			//     Bus->Dispatch(TAG_Sim_Event_CaveCollapse, Collapse);
+			// }
+		}
+	}
+	// ── End stability check ────────────────────────────────────────────────
+
 	// Brush IDs are not generated here anymore.
-	Designation->AppliedBrushID = INDEX_NONE;
-	Designation->State = EMiningDesignationState::Complete;
+	Designation->AppliedBrushID  = INDEX_NONE;
+	Designation->State           = EMiningDesignationState::Complete;
 	Designation->ReservedAgentID = INDEX_NONE;
 
 	UE_LOG(LogTemp, Warning,
@@ -535,8 +624,8 @@ bool UMiningSubsystem::FailDesignation(int32 DesignationID, int32 AgentID)
 		return false;
 	}
 
-	Designation->State = EMiningDesignationState::Failed;
-	Designation->ReservedAgentID = INDEX_NONE;
+	Designation->State          = EMiningDesignationState::Failed;
+	Designation->ReservedAgentID= INDEX_NONE;
 
 	UE_LOG(LogTemp, Warning,
 		TEXT("[MiningSubsystem] Failed designation ID=%d Agent=%d"),
@@ -544,6 +633,30 @@ bool UMiningSubsystem::FailDesignation(int32 DesignationID, int32 AgentID)
 		AgentID);
 
 	return true;
+}
+
+// ===================================================================
+// Cave-in cancellation
+// ===================================================================
+
+void UMiningSubsystem::CancelDesignationsAtVoxel(FIntVector VoxelGrid, int32 SettlementID)
+{
+	for (TPair<int32, FMiningDesignation>& Pair : Designations)
+	{
+		FMiningDesignation& Des = Pair.Value;
+
+		if (Des.SettlementID != SettlementID) { continue; }
+		if (IsDesignationTerminal(Des)) { continue; }
+		if (Des.GridPosition != VoxelGrid) { continue; }
+
+		Des.State          = EMiningDesignationState::Cancelled;
+		Des.ReservedAgentID= INDEX_NONE;
+
+		UE_LOG(LogTemp, Warning,
+			TEXT("[MiningSubsystem] Cancelled designation ID=%d at (%d,%d,%d) due to cave-in."),
+			Des.DesignationID,
+			VoxelGrid.X, VoxelGrid.Y, VoxelGrid.Z);
+	}
 }
 
 // ===================================================================
@@ -588,10 +701,39 @@ void UMiningSubsystem::GetAllDesignations(
 EDigBrushShape UMiningSubsystem::GetDesignationBrushShape(int32 DesignationID) const
 {
 	const FMiningDesignation* Designation = Designations.Find(DesignationID);
-	if (!Designation)
-	{
-		return EDigBrushShape::Sphere;
-	}
-
+	if (!Designation) { return EDigBrushShape::Box; }
 	return Designation->BrushShape;
+}
+
+void UMiningSubsystem::SetMiningRemovalMode(EMiningRemovalMode NewMode)
+{
+	CurrentRemovalMode = NewMode;
+
+	UE_LOG(LogTemp, Log,
+		TEXT("[MiningSubsystem] Mining removal mode set to %d"),
+		static_cast<int32>(CurrentRemovalMode));
+}
+
+EMiningRemovalMode UMiningSubsystem::ToggleMiningRemovalMode()
+{
+	CurrentRemovalMode =
+		(CurrentRemovalMode == EMiningRemovalMode::VoxelCube)
+		? EMiningRemovalMode::SDFBrush
+		: EMiningRemovalMode::VoxelCube;
+
+	UE_LOG(LogTemp, Log,
+		TEXT("[MiningSubsystem] Mining removal mode toggled to %d"),
+		static_cast<int32>(CurrentRemovalMode));
+
+	return CurrentRemovalMode;
+}
+
+FText UMiningSubsystem::GetMiningRemovalModeText() const
+{
+	switch (CurrentRemovalMode)
+	{
+	case EMiningRemovalMode::VoxelCube: return FText::FromString(TEXT("Mining: Voxel Cube"));
+	case EMiningRemovalMode::SDFBrush:  return FText::FromString(TEXT("Mining: SDF Brush"));
+	default:                            return FText::FromString(TEXT("Mining: Unknown"));
+	}
 }

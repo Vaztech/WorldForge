@@ -1,5 +1,7 @@
 #include "UI/WorldForgeEmbarkationManager.h"
 
+#include "WorldForgeTags.h"
+
 void UWorldForgeEmbarkationManager::SetSeedString(const FString& InSeedString)
 {
 	EmbarkConfig.SeedString = InSeedString.TrimStartAndEnd().IsEmpty()
@@ -48,6 +50,64 @@ void UWorldForgeEmbarkationManager::SetColonists(const TArray<FWorldForgeEmbarkC
 	UE_LOG(LogTemp, Log,
 		TEXT("[EmbarkationManager] Colonists set. Total=%d"),
 		EmbarkConfig.StartingColonists.Num());
+}
+
+void UWorldForgeEmbarkationManager::SetColonistRaceByIndex(int32 ColonistIndex, FGameplayTag RaceTag)
+{
+	if (!EmbarkConfig.StartingColonists.IsValidIndex(ColonistIndex) || !RaceTag.IsValid())
+	{
+		return;
+	}
+
+	EmbarkConfig.StartingColonists[ColonistIndex].RaceTag = RaceTag;
+	bHasUserEmbarkConfig = true;
+}
+
+void UWorldForgeEmbarkationManager::SetDefaultRace(FGameplayTag RaceTag)
+{
+	if (!RaceTag.IsValid())
+	{
+		return;
+	}
+
+	EmbarkConfig.DefaultRaceTag = RaceTag;
+	bHasUserEmbarkConfig = true;
+}
+
+TArray<FGameplayTag> UWorldForgeEmbarkationManager::GetDefaultPlayableRaceTags() const
+{
+	return TArray<FGameplayTag>{ TAG_Race_Dwarf, TAG_Race_HighElf, TAG_Race_Human };
+}
+
+void UWorldForgeEmbarkationManager::EnsureDefaultColonists(int32 DesiredCount)
+{
+	DesiredCount = FMath::Max(0, DesiredCount);
+
+	const TArray<FGameplayTag> RaceCycle = GetDefaultPlayableRaceTags();
+	const FGameplayTag DefaultRace = EmbarkConfig.DefaultRaceTag.IsValid()
+		? EmbarkConfig.DefaultRaceTag
+		: TAG_Race_Dwarf;
+
+	while (EmbarkConfig.StartingColonists.Num() < DesiredCount)
+	{
+		const int32 Index = EmbarkConfig.StartingColonists.Num();
+
+		FWorldForgeEmbarkColonist Colonist;
+		Colonist.Name = FString::Printf(TEXT("Colonist %d"), Index + 1);
+		Colonist.RaceTag = RaceCycle.IsValidIndex(Index % RaceCycle.Num())
+			? RaceCycle[Index % RaceCycle.Num()]
+			: DefaultRace;
+
+		EmbarkConfig.StartingColonists.Add(Colonist);
+	}
+
+	for (FWorldForgeEmbarkColonist& Colonist : EmbarkConfig.StartingColonists)
+	{
+		if (!Colonist.RaceTag.IsValid())
+		{
+			Colonist.RaceTag = DefaultRace;
+		}
+	}
 }
 
 void UWorldForgeEmbarkationManager::ClearColonists()

@@ -31,6 +31,14 @@ UE_DEFINE_GAMEPLAY_TAG(TAG_Skill_Cooking, "WorldForge.Skill.Cooking");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Skill_Crafting, "WorldForge.Skill.Crafting");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Skill_Hauling, "WorldForge.Skill.Hauling");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Skill_Building, "WorldForge.Skill.Building");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Skill_Research, "WorldForge.Skill.Research");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Skill_Medicine, "WorldForge.Skill.Medicine");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Skill_Combat, "WorldForge.Skill.Combat");
+
+// ---- Race tags ------------------------------------------------------
+UE_DEFINE_GAMEPLAY_TAG(TAG_Race_Dwarf, "WorldForge.Race.Dwarf");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Race_HighElf, "WorldForge.Race.HighElf");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Race_Human, "WorldForge.Race.Human");
 
 // ---- Race mechanic tags --------------------------------------------
 UE_DEFINE_GAMEPLAY_TAG(TAG_Race_Mechanic_PressureLimit, "WorldForge.Race.Mechanic.PressureLimit");
@@ -56,7 +64,6 @@ UE_DEFINE_GAMEPLAY_TAG(TAG_Sim_Event_ColonistInjured, "WorldForge.Sim.Event.Colo
 UE_DEFINE_GAMEPLAY_TAG(TAG_Sim_Event_MoraleCrisis, "WorldForge.Sim.Event.MoraleCrisis");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Sim_Event_StockpileEmpty, "WorldForge.Sim.Event.StockpileEmpty");
 
-// ADDED
 // ---- Building tags -------------------------------------------------
 UE_DEFINE_GAMEPLAY_TAG(TAG_Building_Housing_Hut, "WorldForge.Building.Housing.Hut");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Building_Storage_Stockpile, "WorldForge.Building.Storage.Stockpile");
@@ -65,10 +72,6 @@ UE_DEFINE_GAMEPLAY_TAG(TAG_Building_Production_Carpenter, "WorldForge.Building.P
 UE_DEFINE_GAMEPLAY_TAG(TAG_Building_Defense_Barracks, "WorldForge.Building.Defense.Barracks");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Building_Spiritual_Shrine, "WorldForge.Building.Spiritual.Shrine");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Building_Economic_MarketStall, "WorldForge.Building.Economic.MarketStall");
-
-// ====================================================================
-// UWorldForgeTagLibrary -- Blueprint accessors for native tags
-// ====================================================================
 
 // ====================================================================
 // Phase 1: Digging & Mining Tags
@@ -136,268 +139,85 @@ UE_DEFINE_GAMEPLAY_TAG(TAG_Item_Mushrooms, "WorldForge.Item.Mushrooms");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Sim_Event_CropHarvested, "WorldForge.Sim.Event.CropHarvested");
 UE_DEFINE_GAMEPLAY_TAG(TAG_Sim_Event_CropDied,      "WorldForge.Sim.Event.CropDied");
 
+// ════════════════════════════════════════════════════════════════════
+// Structural Stability System Tags
+// ════════════════════════════════════════════════════════════════════
+
+UE_DEFINE_GAMEPLAY_TAG(TAG_Sim_Event_CaveCollapse,           "WorldForge.Sim.Event.CaveCollapse");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Sim_Event_ColonistEscapedCollapse,"WorldForge.Sim.Event.ColonistEscapedCollapse");
+UE_DEFINE_GAMEPLAY_TAG(TAG_Overlay_Stability,                "WorldForge.Overlay.Stability");
+
+// ====================================================================
+// UWorldForgeTagLibrary — Blueprint accessors
+// ====================================================================
+
 // ---- Job tags ------------------------------------------------------
-FGameplayTag UWorldForgeTagLibrary::GetJobEatTag()
-{
-    return TAG_Job_Eat;
-}
-
-FGameplayTag UWorldForgeTagLibrary::GetJobSleepTag()
-{
-    return TAG_Job_Sleep;
-}
-
-FGameplayTag UWorldForgeTagLibrary::GetJobHaulTag()
-{
-    return TAG_Job_Haul;
-}
-
-FGameplayTag UWorldForgeTagLibrary::GetJobCookTag()
-{
-    return TAG_Job_Cook;
-}
-
-FGameplayTag UWorldForgeTagLibrary::GetJobCraftTag()
-{
-    return TAG_Job_Craft;
-}
-
-FGameplayTag UWorldForgeTagLibrary::GetJobBuildTag()
-{
-    return TAG_Job_Build;
-}
-
-FGameplayTag UWorldForgeTagLibrary::GetJobIdleTag()
-{
-    return TAG_Job_Idle;
-}
-
-FGameplayTag UWorldForgeTagLibrary::GetJobHarvestTag()
-{
-    return TAG_Job_Harvest;
-}
-
-FGameplayTag UWorldForgeTagLibrary::GetJobHarvestFoodTag()
-{
-    return TAG_Job_Harvest_Food;
-}
-
-FGameplayTag UWorldForgeTagLibrary::GetJobHarvestWoodTag()
-{
-    return TAG_Job_Harvest_Wood;
-}
-
-FGameplayTag UWorldForgeTagLibrary::GetJobHarvestStoneTag()
-{
-    return TAG_Job_Harvest_Stone;
-}
-
-FGameplayTag UWorldForgeTagLibrary::GetJobMineTag()
-{
-    return TAG_Job_Mine;
-}
+FGameplayTag UWorldForgeTagLibrary::GetJobEatTag()          { return TAG_Job_Eat; }
+FGameplayTag UWorldForgeTagLibrary::GetJobSleepTag()        { return TAG_Job_Sleep; }
+FGameplayTag UWorldForgeTagLibrary::GetJobHaulTag()         { return TAG_Job_Haul; }
+FGameplayTag UWorldForgeTagLibrary::GetJobCookTag()         { return TAG_Job_Cook; }
+FGameplayTag UWorldForgeTagLibrary::GetJobCraftTag()        { return TAG_Job_Craft; }
+FGameplayTag UWorldForgeTagLibrary::GetJobBuildTag()        { return TAG_Job_Build; }
+FGameplayTag UWorldForgeTagLibrary::GetJobIdleTag()         { return TAG_Job_Idle; }
+FGameplayTag UWorldForgeTagLibrary::GetJobHarvestTag()      { return TAG_Job_Harvest; }
+FGameplayTag UWorldForgeTagLibrary::GetJobHarvestFoodTag()  { return TAG_Job_Harvest_Food; }
+FGameplayTag UWorldForgeTagLibrary::GetJobHarvestWoodTag()  { return TAG_Job_Harvest_Wood; }
+FGameplayTag UWorldForgeTagLibrary::GetJobHarvestStoneTag() { return TAG_Job_Harvest_Stone; }
+FGameplayTag UWorldForgeTagLibrary::GetJobMineTag()         { return TAG_Job_Mine; }
 
 // ---- Item tags -----------------------------------------------------
-FGameplayTag UWorldForgeTagLibrary::GetItemFoodTag()
-{
-    return TAG_Item_Food;
-}
-
-FGameplayTag UWorldForgeTagLibrary::GetItemWoodTag()
-{
-    return TAG_Item_Wood;
-}
-
-FGameplayTag UWorldForgeTagLibrary::GetItemStoneTag()
-{
-    return TAG_Item_Stone;
-}
-
-FGameplayTag UWorldForgeTagLibrary::GetItemIronOreTag()
-{
-    return TAG_Item_IronOre;
-}
-
-FGameplayTag UWorldForgeTagLibrary::GetItemIronBarTag()
-{
-    return TAG_Item_IronBar;
-}
-
-FGameplayTag UWorldForgeTagLibrary::GetItemMealTag()
-{
-    return TAG_Item_Meal;
-}
-
-FGameplayTag UWorldForgeTagLibrary::GetItemAleTag()
-{
-    return TAG_Item_Ale;
-}
-
-FGameplayTag UWorldForgeTagLibrary::GetItemPlankTag()
-{
-    return TAG_Item_Plank;
-}
+FGameplayTag UWorldForgeTagLibrary::GetItemFoodTag()    { return TAG_Item_Food; }
+FGameplayTag UWorldForgeTagLibrary::GetItemWoodTag()    { return TAG_Item_Wood; }
+FGameplayTag UWorldForgeTagLibrary::GetItemStoneTag()   { return TAG_Item_Stone; }
+FGameplayTag UWorldForgeTagLibrary::GetItemIronOreTag() { return TAG_Item_IronOre; }
+FGameplayTag UWorldForgeTagLibrary::GetItemIronBarTag() { return TAG_Item_IronBar; }
+FGameplayTag UWorldForgeTagLibrary::GetItemMealTag()    { return TAG_Item_Meal; }
+FGameplayTag UWorldForgeTagLibrary::GetItemAleTag()     { return TAG_Item_Ale; }
+FGameplayTag UWorldForgeTagLibrary::GetItemPlankTag()   { return TAG_Item_Plank; }
 
 // ---- Skill tags ----------------------------------------------------
-FGameplayTag UWorldForgeTagLibrary::GetSkillFarmingTag()
-{
-    return TAG_Skill_Farming;
-}
-
-FGameplayTag UWorldForgeTagLibrary::GetSkillMiningTag()
-{
-    return TAG_Skill_Mining;
-}
-
-FGameplayTag UWorldForgeTagLibrary::GetSkillCookingTag()
-{
-    return TAG_Skill_Cooking;
-}
-
-FGameplayTag UWorldForgeTagLibrary::GetSkillCraftingTag()
-{
-    return TAG_Skill_Crafting;
-}
-
-FGameplayTag UWorldForgeTagLibrary::GetSkillHaulingTag()
-{
-    return TAG_Skill_Hauling;
-}
-
-FGameplayTag UWorldForgeTagLibrary::GetSkillBuildingTag()
-{
-    return TAG_Skill_Building;
-}
+FGameplayTag UWorldForgeTagLibrary::GetSkillFarmingTag()  { return TAG_Skill_Farming; }
+FGameplayTag UWorldForgeTagLibrary::GetSkillMiningTag()   { return TAG_Skill_Mining; }
+FGameplayTag UWorldForgeTagLibrary::GetSkillCookingTag()  { return TAG_Skill_Cooking; }
+FGameplayTag UWorldForgeTagLibrary::GetSkillCraftingTag() { return TAG_Skill_Crafting; }
+FGameplayTag UWorldForgeTagLibrary::GetSkillHaulingTag()  { return TAG_Skill_Hauling; }
+FGameplayTag UWorldForgeTagLibrary::GetSkillBuildingTag() { return TAG_Skill_Building; }
 
 // ---- Currency tags -------------------------------------------------
-FGameplayTag UWorldForgeTagLibrary::GetCurrencyBarterTag()
-{
-    return TAG_Currency_Barter;
-}
+FGameplayTag UWorldForgeTagLibrary::GetCurrencyBarterTag() { return TAG_Currency_Barter; }
 
 // ---- Economy pattern tags ------------------------------------------
-FGameplayTag UWorldForgeTagLibrary::GetEconomyPatternFamineTag()
-{
-    return TAG_Economy_Pattern_Famine;
-}
-
-FGameplayTag UWorldForgeTagLibrary::GetEconomyPatternCurrencyFreefallTag()
-{
-    return TAG_Economy_Pattern_CurrencyFreefall;
-}
-
-FGameplayTag UWorldForgeTagLibrary::GetEconomyPatternBoomTag()
-{
-    return TAG_Economy_Pattern_Boom;
-}
-
-FGameplayTag UWorldForgeTagLibrary::GetEconomyPatternMonopolyTag()
-{
-    return TAG_Economy_Pattern_Monopoly;
-}
+FGameplayTag UWorldForgeTagLibrary::GetEconomyPatternFamineTag()          { return TAG_Economy_Pattern_Famine; }
+FGameplayTag UWorldForgeTagLibrary::GetEconomyPatternCurrencyFreefallTag(){ return TAG_Economy_Pattern_CurrencyFreefall; }
+FGameplayTag UWorldForgeTagLibrary::GetEconomyPatternBoomTag()            { return TAG_Economy_Pattern_Boom; }
+FGameplayTag UWorldForgeTagLibrary::GetEconomyPatternMonopolyTag()        { return TAG_Economy_Pattern_Monopoly; }
 
 // ---- Simulation event tags -----------------------------------------
-FGameplayTag UWorldForgeTagLibrary::GetNeedFoodCriticalEventTag()
-{
-    return TAG_Sim_Event_NeedFoodCritical;
-}
+FGameplayTag UWorldForgeTagLibrary::GetNeedFoodCriticalEventTag()  { return TAG_Sim_Event_NeedFoodCritical; }
+FGameplayTag UWorldForgeTagLibrary::GetNeedCriticalEventTag()      { return TAG_Sim_Event_NeedCritical; }
+FGameplayTag UWorldForgeTagLibrary::GetJobAssignedEventTag()       { return TAG_Sim_Event_JobAssigned; }
+FGameplayTag UWorldForgeTagLibrary::GetJobCancelledEventTag()      { return TAG_Sim_Event_JobCancelled; }
+FGameplayTag UWorldForgeTagLibrary::GetProductionCompleteEventTag(){ return TAG_Sim_Event_ProductionComplete; }
+FGameplayTag UWorldForgeTagLibrary::GetBuildingCompleteEventTag()  { return TAG_Sim_Event_BuildingComplete; }
+FGameplayTag UWorldForgeTagLibrary::GetColonistDiedEventTag()      { return TAG_Sim_Event_ColonistDied; }
+FGameplayTag UWorldForgeTagLibrary::GetColonistInjuredEventTag()   { return TAG_Sim_Event_ColonistInjured; }
+FGameplayTag UWorldForgeTagLibrary::GetMoraleCrisisEventTag()      { return TAG_Sim_Event_MoraleCrisis; }
+FGameplayTag UWorldForgeTagLibrary::GetStockpileEmptyEventTag()    { return TAG_Sim_Event_StockpileEmpty; }
 
-FGameplayTag UWorldForgeTagLibrary::GetNeedCriticalEventTag()
-{
-    return TAG_Sim_Event_NeedCritical;
-}
-
-FGameplayTag UWorldForgeTagLibrary::GetJobAssignedEventTag()
-{
-    return TAG_Sim_Event_JobAssigned;
-}
-
-FGameplayTag UWorldForgeTagLibrary::GetJobCancelledEventTag()
-{
-    return TAG_Sim_Event_JobCancelled;
-}
-
-FGameplayTag UWorldForgeTagLibrary::GetProductionCompleteEventTag()
-{
-    return TAG_Sim_Event_ProductionComplete;
-}
-
-FGameplayTag UWorldForgeTagLibrary::GetBuildingCompleteEventTag()
-{
-    return TAG_Sim_Event_BuildingComplete;
-}
-
-FGameplayTag UWorldForgeTagLibrary::GetColonistDiedEventTag()
-{
-    return TAG_Sim_Event_ColonistDied;
-}
-
-FGameplayTag UWorldForgeTagLibrary::GetColonistInjuredEventTag()
-{
-    return TAG_Sim_Event_ColonistInjured;
-}
-
-FGameplayTag UWorldForgeTagLibrary::GetMoraleCrisisEventTag()
-{
-    return TAG_Sim_Event_MoraleCrisis;
-}
-
-FGameplayTag UWorldForgeTagLibrary::GetStockpileEmptyEventTag()
-{
-    return TAG_Sim_Event_StockpileEmpty;
-}
-
-// ADDED
 // ---- Building tags -------------------------------------------------
-FGameplayTag UWorldForgeTagLibrary::GetBuildingHousingHutTag()
-{
-    return TAG_Building_Housing_Hut;
-}
+FGameplayTag UWorldForgeTagLibrary::GetBuildingHousingHutTag()          { return TAG_Building_Housing_Hut; }
+FGameplayTag UWorldForgeTagLibrary::GetBuildingStorageStockpileTag()     { return TAG_Building_Storage_Stockpile; }
+FGameplayTag UWorldForgeTagLibrary::GetBuildingProductionKitchenTag()    { return TAG_Building_Production_Kitchen; }
+FGameplayTag UWorldForgeTagLibrary::GetBuildingProductionCarpenterTag()  { return TAG_Building_Production_Carpenter; }
+FGameplayTag UWorldForgeTagLibrary::GetBuildingDefenseBarracksTag()      { return TAG_Building_Defense_Barracks; }
+FGameplayTag UWorldForgeTagLibrary::GetBuildingSpiritualShrineTag()      { return TAG_Building_Spiritual_Shrine; }
+FGameplayTag UWorldForgeTagLibrary::GetBuildingEconomicMarketStallTag()  { return TAG_Building_Economic_MarketStall; }
 
-FGameplayTag UWorldForgeTagLibrary::GetBuildingStorageStockpileTag()
-{
-    return TAG_Building_Storage_Stockpile;
-}
-
-FGameplayTag UWorldForgeTagLibrary::GetBuildingProductionKitchenTag()
-{
-    return TAG_Building_Production_Kitchen;
-}
-
-FGameplayTag UWorldForgeTagLibrary::GetBuildingProductionCarpenterTag()
-{
-    return TAG_Building_Production_Carpenter;
-}
-
-FGameplayTag UWorldForgeTagLibrary::GetBuildingDefenseBarracksTag()
-{
-    return TAG_Building_Defense_Barracks;
-}
-
-FGameplayTag UWorldForgeTagLibrary::GetBuildingSpiritualShrineTag()
-{
-    return TAG_Building_Spiritual_Shrine;
-}
-
-FGameplayTag UWorldForgeTagLibrary::GetBuildingEconomicMarketStallTag()
-{
-    return TAG_Building_Economic_MarketStall;
-}
 // ---- Batch 3: Resource Discovery category tags ---------------------
-FGameplayTag UWorldForgeTagLibrary::GetResourceCrystalTag()
-{
-    return TAG_Resource_Crystal;
-}
+FGameplayTag UWorldForgeTagLibrary::GetResourceCrystalTag() { return TAG_Resource_Crystal; }
+FGameplayTag UWorldForgeTagLibrary::GetResourceFossilTag()  { return TAG_Resource_Fossil; }
 
-FGameplayTag UWorldForgeTagLibrary::GetResourceFossilTag()
-{
-    return TAG_Resource_Fossil;
-}
-
-// ════════════════════════════════════════════════════════════════════
-// Wild Harvest Integration — Farming Tag Accessors
-// ════════════════════════════════════════════════════════════════════
-
+// ════ Wild Harvest Integration — Farming Tag Accessors ════
 FGameplayTag UWorldForgeTagLibrary::GetJobFarmPrepSoilTag()  { return TAG_Job_Farm_PrepSoil; }
 FGameplayTag UWorldForgeTagLibrary::GetJobFarmPlantTag()     { return TAG_Job_Farm_Plant; }
 FGameplayTag UWorldForgeTagLibrary::GetJobFarmWaterTag()     { return TAG_Job_Farm_Water; }
@@ -414,3 +234,8 @@ FGameplayTag UWorldForgeTagLibrary::GetItemMushroomsTag()  { return TAG_Item_Mus
 
 FGameplayTag UWorldForgeTagLibrary::GetCropHarvestedEventTag() { return TAG_Sim_Event_CropHarvested; }
 FGameplayTag UWorldForgeTagLibrary::GetCropDiedEventTag()      { return TAG_Sim_Event_CropDied; }
+
+// ════ Structural Stability ════
+FGameplayTag UWorldForgeTagLibrary::GetCaveCollapseEventTag()           { return TAG_Sim_Event_CaveCollapse; }
+FGameplayTag UWorldForgeTagLibrary::GetColonistEscapedCollapseEventTag(){ return TAG_Sim_Event_ColonistEscapedCollapse; }
+FGameplayTag UWorldForgeTagLibrary::GetOverlayStabilityTag()            { return TAG_Overlay_Stability; }

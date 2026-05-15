@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "CoreMinimal.h"
 #include "Subsystems/WorldSubsystem.h"
@@ -6,6 +6,7 @@
 #include "Engine/TimerHandle.h"
 #include "../Data/WorldForgeDataTypes.h"
 #include "WorldForgeTerrainSnapshot.h"
+#include "Mining/MiningTypes.h"
 #include "VoxelWorldManager.generated.h"
 
 class AVoxelWorld;
@@ -131,6 +132,20 @@ public:
      */
     UFUNCTION(BlueprintCallable, Category = "WorldForge|Voxel")
     bool RemoveBlockAt(const FIntVector& GridPos);
+
+    /**
+     * Remove exactly one voxel cell with no SDF falloff.
+     * This is the precise Dwarf Fortress-style mining path.
+     */
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Voxel")
+    bool RemoveSingleVoxelAt(const FIntVector& GridPos);
+
+    /**
+     * Remove terrain using the requested mining mode.
+     * VoxelCube = exact one-cell removal. SDFBrush = existing brush carve path.
+     */
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Voxel")
+    bool RemoveVoxelByMode(const FIntVector& GridPos, EMiningRemovalMode RemovalMode);
 
     bool TryFindTopSolidBlockInColumn(
         const FIntPoint& GridXY,
@@ -258,6 +273,15 @@ public:
 
     UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel|Terrain")
     bool GetTerrainTypeAtVoxelSample(FIntPoint VoxelXY, EWorldForgeTerrainType& OutTerrainType) const;
+
+    /**
+     * Query the material layer index used by MC_WorldForge_Terrain for a specific voxel.
+     * Returns false for air, carved/removed voxels, invalid positions, or missing terrain data.
+     * Layer indices match WorldForgeTerrainGenerator.h:
+     * 0 Sand, 1 Grass, 2 Dirt, 3 Rock, 4 Snow, 5 Water, 6 Lava, 7 Basalt, 8 DeepRock.
+     */
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel|Terrain")
+    bool GetTerrainMaterialLayerAtVoxel(const FIntVector& GridPos, int32& OutMaterialLayer, FGameplayTag& OutBlockType) const;
 
     UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel|Terrain")
     bool GetTerrainSlopeAtCell(FIntPoint GridCell, float& OutSlopeDegrees) const;
@@ -608,6 +632,7 @@ private:
     // ── v5.0: SDF brush helpers for the Hybrid Chunking Modification Path ──
     FSDFBrush MakeDigBrush(const FIntVector& GridPos) const;
     bool ApplyRuntimeBrush(const FSDFBrush& Brush);
+    bool ApplyRuntimeVoxelRemoval(const FIntVector& GridPos);
     bool ApplyRuntimeVoxelRestore(const FIntVector& GridPos);
     void RefreshEditedVoxel(const FIntVector& GridPos);
 
@@ -642,6 +667,12 @@ private:
 
     UPROPERTY(Transient)
     TMap<FIntVector, TObjectPtr<AStaticMeshActor>> FallbackPlacedBlockActors;
+
+    // Exact voxel removals made by VoxelCube mining mode.
+    // These are checked before procedural terrain classification so a removed
+    // voxel stays air during this runtime session.
+    UPROPERTY(Transient)
+    TSet<FIntVector> RuntimeRemovedVoxels;
 
     // v5.0: RemovedTerrainBlocks replaced by TerrainSnapshot.Modifications
     // (FTerrainModificationMap — chunk-indexed SDF brush volumes)

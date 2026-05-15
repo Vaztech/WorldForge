@@ -10,6 +10,7 @@
 #include "Blueprint/UserWidget.h"
 #include "GameFramework/PlayerController.h"
 #include "UI/WorldForgeEmbarkationManager.h"
+#include "Civilization/CivilizationActivitySubsystem.h"
 
 
 AWorldGenBootstrapActor::AWorldGenBootstrapActor()
@@ -210,6 +211,23 @@ void AWorldGenBootstrapActor::RunBootstrap()
     {
         UE_LOG(LogTemp, Error, TEXT("[WorldGenBootstrap] UWorldMapSubsystem not found."));
         return;
+    }
+
+    // Phase 1 active NPC civilization bridge. Worldgen creates civ data;
+    // CivilizationActivitySubsystem turns that data into active settlements
+    // with agents, stockpiles, farms, jobs, and VSS-visible building growth.
+    if (UCivilizationActivitySubsystem* CivActivity = World->GetSubsystem<UCivilizationActivitySubsystem>())
+    {
+        CivActivity->InitializeFromGeneratedWorld(
+            Pipeline->GetCivilizations(),
+            Pipeline->GetWorldTiles(),
+            Pipeline->GetGridWidth(),
+            Pipeline->GetGridHeight(),
+            true);
+    }
+    else
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[WorldGenBootstrap] CivilizationActivitySubsystem not found; generated civs remain map-only."));
     }
 
     if (UVoxelWorldManager* VM = World->GetSubsystem<UVoxelWorldManager>())

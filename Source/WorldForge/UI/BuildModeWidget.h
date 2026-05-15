@@ -4,6 +4,8 @@
 #include "Blueprint/UserWidget.h"
 #include "GameplayTagContainer.h"
 #include "Player/BuildModeTypes.h"
+#include "Mining/MiningTypes.h"
+#include "Grid/LayerViewTypes.h"
 #include "BuildModeWidget.generated.h"
 
 class UBuildModeManager;
@@ -51,6 +53,45 @@ public:
 	// Custom draw uses this to commit selected cells.
 	UFUNCTION(BlueprintCallable, Category = "WorldForge|BuildUI")
 	void ConfirmBuild();
+
+	// Player toggled the static terrain grid overlay visibility.
+	UFUNCTION(BlueprintCallable, Category = "WorldForge|BuildUI|Grid")
+	void ToggleStaticGridOverlay();
+
+	// Player/UI explicitly enabled or disabled the static terrain grid overlay.
+	UFUNCTION(BlueprintCallable, Category = "WorldForge|BuildUI|Grid")
+	void SetStaticGridOverlayEnabled(bool bEnabled);
+
+	// Returns whether the static terrain grid overlay is currently enabled.
+	UFUNCTION(BlueprintPure, Category = "WorldForge|BuildUI|Grid")
+	bool IsStaticGridOverlayEnabled() const;
+
+	// Player toggled mining removal behavior between exact voxel cube and SDF brush.
+	UFUNCTION(BlueprintCallable, Category = "WorldForge|BuildUI|Mining")
+	void ToggleMiningRemovalMode();
+
+	// Player/UI explicitly selected mining removal behavior.
+	UFUNCTION(BlueprintCallable, Category = "WorldForge|BuildUI|Mining")
+	void SetMiningRemovalMode(EMiningRemovalMode NewMode);
+
+	UFUNCTION(BlueprintPure, Category = "WorldForge|BuildUI|Mining")
+	EMiningRemovalMode GetMiningRemovalMode() const;
+
+	UFUNCTION(BlueprintPure, Category = "WorldForge|BuildUI|Mining")
+	FText GetMiningRemovalModeLabel() const;
+
+	// Player toggled mine selection height between default 2-block column and 1 voxel.
+	UFUNCTION(BlueprintCallable, Category = "WorldForge|BuildUI|Mining")
+	void ToggleMiningHeightMode();
+
+	UFUNCTION(BlueprintCallable, Category = "WorldForge|BuildUI|Mining")
+	void SetMiningHeightMode(EWFMiningHeightMode NewMode);
+
+	UFUNCTION(BlueprintPure, Category = "WorldForge|BuildUI|Mining")
+	EWFMiningHeightMode GetMiningHeightMode() const;
+
+	UFUNCTION(BlueprintPure, Category = "WorldForge|BuildUI|Mining")
+	FText GetMiningHeightModeLabel() const;
 
 	// ================================
 	// Read-only data accessors for Blueprint UI

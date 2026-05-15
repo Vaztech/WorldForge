@@ -141,13 +141,11 @@ public:
     UTexture2D* GetCachedMapTexture() const { return CachedMapTexture; }
 
     // ------------------------------------------------------------------
-    // Detailed map texture — higher resolution, bilinear colour blending
-    // between cells.  Use this for the full-screen map widget.
+    // Detailed map texture — higher resolution terrain view for the full-screen map.
     //
     // Resolution is set by DetailedMapResolution (default 1024).
-    // Each pixel samples the terrain colour grid and bilinearly blends
-    // the four surrounding cell colours, producing smooth gradients
-    // instead of the hard 256x256 tile boundaries.
+    // Keep this lower than 2048 while debugging; rebuilding a 2048 map means
+    // 4 million CPU-side samples/uploads and can hitch the editor.
     // ------------------------------------------------------------------
     UFUNCTION(BlueprintCallable, Category = "WorldForge|WorldMap")
     UTexture2D* GetOrCreateDetailedMapTexture();
@@ -162,7 +160,7 @@ public:
     UTexture2D* GetCachedDetailedMapTexture() const { return DetailedMapTexture; }
 
     UPROPERTY(EditAnywhere, Category = "WorldForge|WorldMap")
-    int32 DetailedMapResolution = 2048;
+    int32 DetailedMapResolution = 1024;
 
     // ------------------------------------------------------------------
     // Overlay layer bitfield — the DF-style multi-overlay system.
@@ -247,6 +245,24 @@ public:
     FColor GetCivColor(int32 CivID) const;
 
     // ------------------------------------------------------------------
+    // Embark / tile selection helpers.
+    // ------------------------------------------------------------------
+    UFUNCTION(BlueprintPure, Category = "WorldForge|WorldMap|Embark")
+    bool IsTileClaimed(int32 TileX, int32 TileY) const;
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|WorldMap|Embark")
+    bool IsTileWaterLike(int32 TileX, int32 TileY) const;
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|WorldMap|Embark")
+    bool IsTileLandLike(int32 TileX, int32 TileY) const;
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|WorldMap|Embark")
+    bool IsTileValidForEmbark(int32 TileX, int32 TileY, FString& OutReason) const;
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|WorldMap|Survey")
+    FString BuildTileSurveyText(int32 TileX, int32 TileY, bool bDebugReveal = true) const;
+
+    // ------------------------------------------------------------------
     // Legacy single-mode API.
     //
     // SetOverlayMode() clears all layer bits, enables Terrain, then
@@ -271,6 +287,17 @@ public:
 
     UFUNCTION(BlueprintPure, Category = "WorldForge|WorldMap")
     bool TileIndexToXY(int32 TileIndex, int32& OutTileX, int32& OutTileY) const;
+
+    // Patch 4C: Convert action-space locations back to strategic world-map tile IDs.
+    // Settlement claims stay authoritative in USettlementManager; these are only coordinate helpers.
+    UFUNCTION(BlueprintPure, Category = "WorldForge|WorldMap")
+    bool WorldPositionToWorldTileIndex(const FVector& WorldPosition, int32& OutWorldTileIndex) const;
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|WorldMap")
+    bool WorldCellToWorldTileIndex(const FIntPoint& WorldCell, int32& OutWorldTileIndex) const;
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|WorldMap")
+    bool VoxelCellToWorldTileIndex(const FIntPoint& VoxelCell, int32& OutWorldTileIndex) const;
 
     UFUNCTION(BlueprintPure, Category = "WorldForge|WorldMap")
     bool NormalizedMapUVToTile(

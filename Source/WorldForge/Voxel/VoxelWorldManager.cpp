@@ -1,4 +1,4 @@
-﻿// VoxelWorldManager.cpp
+// VoxelWorldManager.cpp
 // ============================================================
 // All terrain subsystem implementation in one place.
 // Navigate with Ctrl+F on the section banners below.
@@ -3030,6 +3030,12 @@ FGameplayTag UVoxelWorldManager::GetBlockTypeAt(const FIntVector& GridPos) const
         return FGameplayTag();
     }
 
+    // Exact voxel cube mining removes this one cell with no SDF falloff.
+    if (RuntimeRemovedVoxels.Contains(GridPos))
+    {
+        return FGameplayTag();
+    }
+
     // v5.0: Check if this position has been carved by a modification brush
     const float ModDensity = TerrainSnapshot.SampleModificationDensity(
         static_cast<float>(GridPos.X),
@@ -3088,6 +3094,126 @@ FGameplayTag UVoxelWorldManager::GetBlockTypeAt(const FIntVector& GridPos) const
     }
 }
 
+
+bool UVoxelWorldManager::GetTerrainMaterialLayerAtVoxel(
+    const FIntVector& GridPos,
+    int32& OutMaterialLayer,
+    FGameplayTag& OutBlockType) const
+{
+    // Keep these numeric indices in sync with WorldForgeTerrainGenerator.h
+    constexpr int32 TerrainLayer_Sand = 0;
+    constexpr int32 TerrainLayer_Grass = 1;
+    constexpr int32 TerrainLayer_Dirt = 2;
+    constexpr int32 TerrainLayer_Rock = 3;
+    constexpr int32 TerrainLayer_Snow = 4;
+    constexpr int32 TerrainLayer_Water = 5;
+    constexpr int32 TerrainLayer_Lava = 6;
+    constexpr int32 TerrainLayer_Basalt = 7;
+    constexpr int32 TerrainLayer_DeepRock = 8;
+
+    OutMaterialLayer = TerrainLayer_Dirt;
+    OutBlockType = FGameplayTag();
+
+    if (!IsValidGridPosition(GridPos))
+    {
+        return false;
+    }
+
+    OutBlockType = GetBlockTypeAt(GridPos);
+    if (!OutBlockType.IsValid())
+    {
+        return false;
+    }
+
+    if (OutBlockType == TAG_Terrain_Bedrock)
+    {
+        OutMaterialLayer = TerrainLayer_DeepRock;
+        return true;
+    }
+
+    const FIntPoint VoxelXY(GridPos.X, GridPos.Y);
+
+    int32 SurfaceZ = 0;
+    if (!TryGetTerrainSurfaceVoxelZ(VoxelXY, SurfaceZ))
+    {
+        return false;
+    }
+
+    const int32 DepthBelowSurface = FMath::Max(0, SurfaceZ - GridPos.Z);
+
+    // Match the terrain generator's underground special biome handling.
+    // This allows the overlay/slice helper to visually line up with MC_WorldForge_Terrain.
+    if (HasCachedTerrainData())
+    {
+        const FIntPoint ChunkCell = ClampTerrainCellToBounds(VoxelCellToChunkCell(VoxelXY));
+        const int32 ChunkIndex = TerrainIndex(ChunkCell);
+        if (CachedBiomeTags.IsValidIndex(ChunkIndex))
+        {
+            const FGameplayTag& BiomeTag = CachedBiomeTags[ChunkIndex];
+            const FGameplayTag LavaTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Lava")), false);
+            const FGameplayTag VolcanicTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Volcanic")), false);
+
+            if (LavaTag.IsValid() && BiomeTag.MatchesTag(LavaTag))
+            {
+                OutMaterialLayer = TerrainLayer_Lava;
+                return true;
+            }
+
+            if (VolcanicTag.IsValid() && BiomeTag.MatchesTag(VolcanicTag))
+            {
+                OutMaterialLayer = TerrainLayer_Basalt;
+                return true;
+            }
+        }
+    }
+
+    EWorldForgeTerrainType TerrainType = EWorldForgeTerrainType::Grass;
+    if (!GetTerrainTypeAtVoxelSample(VoxelXY, TerrainType))
+    {
+        TerrainType = EWorldForgeTerrainType::Rock;
+    }
+
+    // These depth bands mirror FWorldForgeTerrainGeneratorInstance::ClassifyUndergroundMaterial.
+    if (DepthBelowSurface <= 4)
+    {
+        switch (TerrainType)
+        {
+        case EWorldForgeTerrainType::Water:
+            OutMaterialLayer = TerrainLayer_Water;
+            break;
+        case EWorldForgeTerrainType::Sand:
+            OutMaterialLayer = TerrainLayer_Sand;
+            break;
+        case EWorldForgeTerrainType::Snow:
+            OutMaterialLayer = TerrainLayer_Dirt;
+            break;
+        case EWorldForgeTerrainType::Rock:
+            OutMaterialLayer = TerrainLayer_Rock;
+            break;
+        case EWorldForgeTerrainType::Lava:
+            OutMaterialLayer = TerrainLayer_Lava;
+            break;
+        case EWorldForgeTerrainType::Dirt:
+            OutMaterialLayer = TerrainLayer_Dirt;
+            break;
+        case EWorldForgeTerrainType::Grass:
+        default:
+            OutMaterialLayer = TerrainLayer_Dirt;
+            break;
+        }
+        return true;
+    }
+
+    if (DepthBelowSurface <= 20)
+    {
+        OutMaterialLayer = TerrainLayer_Rock;
+        return true;
+    }
+
+    OutMaterialLayer = TerrainLayer_DeepRock;
+    return true;
+}
+
 bool UVoxelWorldManager::RemoveBlockAt(const FIntVector& GridPos)
 {
     UE_LOG(LogTemp, Warning,
@@ -3132,11 +3258,79 @@ bool UVoxelWorldManager::RemoveBlockAt(const FIntVector& GridPos)
     return true;
 }
 
+
+
+bool UVoxelWorldManager::RemoveSingleVoxelAt(const FIntVector& GridPos)
+{
+    UE_LOG(LogTemp, Warning,
+        TEXT("[VoxelWorldManager] RemoveSingleVoxelAt called Grid=%s"),
+        *GridPos.ToString());
+
+    if (!IsValidGridPosition(GridPos))
+    {
+        return false;
+    }
+
+    const FGameplayTag BlockType = GetBlockTypeAt(GridPos);
+    if (!BlockType.IsValid() || BlockType == TAG_Terrain_Bedrock)
+    {
+        return false;
+    }
+
+    RuntimeRemovedVoxels.Add(GridPos);
+
+    const bool bApplied = ApplyRuntimeVoxelRemoval(GridPos);
+
+    RemoveRuntimeDigHoleActor(GridPos);
+
+    const FVector WorldPosition = GridToWorld(FIntPoint(GridPos.X, GridPos.Y), GridPos.Z);
+    OnVoxelDigged(WorldPosition);
+
+    UE_LOG(LogTemp, Warning,
+        TEXT("[VoxelWorldManager] RemoveSingleVoxelAt SUCCESS Grid=%s Type=%s RuntimeApplied=%s RemovedVoxels=%d"),
+        *GridPos.ToString(),
+        *BlockType.ToString(),
+        bApplied ? TEXT("true") : TEXT("false"),
+        RuntimeRemovedVoxels.Num());
+
+    return true;
+}
+
+bool UVoxelWorldManager::RemoveVoxelByMode(const FIntVector& GridPos, EMiningRemovalMode RemovalMode)
+{
+    switch (RemovalMode)
+    {
+    case EMiningRemovalMode::VoxelCube:
+        return RemoveSingleVoxelAt(GridPos);
+
+    case EMiningRemovalMode::SDFBrush:
+        return RemoveBlockAt(GridPos);
+
+    default:
+        return RemoveSingleVoxelAt(GridPos);
+    }
+}
+
+
 bool UVoxelWorldManager::RestoreBlockAt(const FIntVector& GridPos, const FGameplayTag& BlockType)
 {
     if (!BlockType.IsValid())
     {
         return false;
+    }
+
+    const bool bHadExactVoxelRemoval = RuntimeRemovedVoxels.Remove(GridPos) > 0;
+    if (bHadExactVoxelRemoval)
+    {
+        RefreshEditedVoxel(GridPos);
+
+        UE_LOG(LogTemp, Log,
+            TEXT("[VoxelWorldManager] RestoreBlockAt exact voxel SUCCESS Grid=%s Type=%s RemovedVoxels=%d"),
+            *GridPos.ToString(),
+            *BlockType.ToString(),
+            RuntimeRemovedVoxels.Num());
+
+        return true;
     }
 
     // ── v5.0: Remove all brushes near this grid position ──
@@ -3163,6 +3357,35 @@ bool UVoxelWorldManager::RestoreBlockAt(const FIntVector& GridPos, const FGamepl
         TerrainSnapshot.NumDirtyChunks());
 
     return true;
+}
+
+bool UVoxelWorldManager::ApplyRuntimeVoxelRemoval(const FIntVector& GridPos)
+{
+#if WITH_VOXEL_PLUGIN
+    AVoxelWorld* VoxelWorld = Cast<AVoxelWorld>(VoxelWorldActor);
+    if (!VoxelWorld || !VoxelWorld->IsCreated())
+    {
+        return false;
+    }
+
+    FVoxelData& Data = VoxelWorld->GetData();
+
+    const FVoxelIntBox Bounds(
+        GridPos - FIntVector(1, 1, 1),
+        GridPos + FIntVector(2, 2, 2)
+    );
+
+    FVoxelWriteScopeLock Lock(Data, Bounds, FUNCTION_FNAME);
+
+    // Exact mining path: remove only this single voxel cell.
+    Data.SetValue(GridPos.X, GridPos.Y, GridPos.Z, FVoxelValue::Empty());
+
+    VoxelWorld->GetLODManager().UpdateBounds(Bounds);
+
+    return true;
+#else
+    return false;
+#endif
 }
 
 bool UVoxelWorldManager::ApplyRuntimeVoxelRestore(const FIntVector& GridPos)
@@ -3283,17 +3506,24 @@ int32 UVoxelWorldManager::GetTerrainDepthAt(const FIntPoint& GridXY) const
 FSDFBrush UVoxelWorldManager::MakeDigBrush(const FIntVector& GridPos) const
 {
     FSDFBrush Brush;
-    Brush.Shape = ESDFBrushShape::Sphere;
+
+    // Default mining must remove one selected 100uu voxel at a time.
+    // The previous sphere brush used Radius=2.0 / HalfHeight=2.5, which could
+    // carve a large crater around a single designation. Keep the SDF/runtime
+    // modification path, but clamp the normal mining brush to a tight single
+    // voxel footprint. Larger organic/metaball excavation should be added later
+    // as an explicit brush mode, not the default Mine action.
+    Brush.Shape = ESDFBrushShape::Box;
     Brush.Mode = ESDFBrushMode::Carve;
     Brush.Center = FVector(
         static_cast<float>(GridPos.X),
         static_cast<float>(GridPos.Y),
         static_cast<float>(GridPos.Z)
     );
-    Brush.Radius = 2.0f;
-    Brush.HalfHeight = 2.5f;
+    Brush.Radius = 0.51f;
+    Brush.HalfHeight = 0.51f;
     Brush.Strength = 1.0f;
-    Brush.FalloffVoxels = 0.5f;
+    Brush.FalloffVoxels = 0.0f;
     return Brush;
 }
 

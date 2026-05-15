@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__nwiro__search_assets",
+      "mcp__nwiro__find_assets",
+      "mcp__nwiro__read_widget_blueprint",
+      "mcp__nwiro__read_blueprint",
+      "mcp__nwiro__get_project_settings",
+      "mcp__nwiro__get_project_info",
+      "mcp__nwiro__execute_python",
+      "mcp__nwiro__read_asset",
+      "mcp__nwiro__read_log",
+      "mcp__nwiro__set_widget_property",
+      "mcp__nwiro__add_widget",
+      "mcp__nwiro__validate_assets",
+      "mcp__nwiro__find_blueprint_nodes",
+      "mcp__nwiro__edit_blueprint",
+      "mcp__nwiro__delete_node",
+      "mcp__nwiro__find_blueprints",
+      "mcp__nwiro__read_file"
+    ]
+  }
+}

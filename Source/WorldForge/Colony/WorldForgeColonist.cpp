@@ -1,11 +1,14 @@
-﻿#include "WorldForgeColonist.h"
+#include "WorldForgeColonist.h"
 
 #include "Components/StaticMeshComponent.h"
+#include "Components/SceneComponent.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 #include "SettlementManager.h"
 #include "SpriteCharacterComponent.h"
+#include "PaperFlipbook.h"
+#include "PaperFlipbookComponent.h"
 #include "UObject/ConstructorHelpers.h"
 #include "VoxelWorldManager.h"
 #include "Utility/WorldForgeTerrainSnapUtility.h"
@@ -14,8 +17,11 @@ AWorldForgeColonist::AWorldForgeColonist()
 {
     PrimaryActorTick.bCanEverTick = true;
 
+    SceneRoot = CreateDefaultSubobject<USceneComponent>(TEXT("SceneRoot"));
+    RootComponent = SceneRoot;
+
     DebugMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("DebugMesh"));
-    RootComponent = DebugMesh;
+    DebugMesh->SetupAttachment(SceneRoot);
 
     static ConstructorHelpers::FObjectFinder<UStaticMesh> CubeMesh(
         TEXT("/Engine/BasicShapes/Cube.Cube"));
@@ -25,14 +31,73 @@ AWorldForgeColonist::AWorldForgeColonist()
         DebugMesh->SetStaticMesh(CubeMesh.Object);
     }
 
+    DebugMesh->SetRelativeLocation(FVector::ZeroVector);
     DebugMesh->SetWorldScale3D(FVector(0.35f, 0.35f, 0.8f));
     DebugMesh->SetCastShadow(true);
-    DebugMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+    DebugMesh->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+    DebugMesh->SetCollisionResponseToAllChannels(ECR_Block);
 
     SpriteVisual = CreateDefaultSubobject<USpriteCharacterComponent>(TEXT("SpriteVisual"));
-    SpriteVisual->SetupAttachment(RootComponent);
+    SpriteVisual->SetupAttachment(SceneRoot);
     SpriteVisual->SetRelativeLocation(FVector::ZeroVector);
     SpriteVisual->SetRelativeScale3D(FVector(5.0f, 5.0f, 5.0f));
+
+    VisualFlipbook = CreateDefaultSubobject<UPaperFlipbookComponent>(TEXT("VisualFlipbook"));
+    VisualFlipbook->SetupAttachment(SpriteVisual);
+    VisualFlipbook->SetRelativeLocation(FVector::ZeroVector);
+    VisualFlipbook->SetRelativeRotation(FRotator::ZeroRotator);
+    VisualFlipbook->SetRelativeScale3D(FVector::OneVector);
+    VisualFlipbook->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+    VisualFlipbook->SetCastShadow(true);
+    VisualFlipbook->SetLooping(true);
+    VisualFlipbook->SetTranslucentSortPriority(100);
+    VisualFlipbook->SetHiddenInGame(true);
+}
+
+FVector AWorldForgeColonist::GetCurrentCameraLocation() const
+{
+    const UWorld* World = GetWorld();
+    if (!World)
+    {
+        return FVector::ZeroVector;
+    }
+
+    const APlayerController* PC = World->GetFirstPlayerController();
+    if (!PC)
+    {
+        return FVector::ZeroVector;
+    }
+
+    FVector CameraLocation = FVector::ZeroVector;
+    FRotator CameraRotation = FRotator::ZeroRotator;
+    PC->GetPlayerViewPoint(CameraLocation, CameraRotation);
+    return CameraLocation;
+}
+
+void AWorldForgeColonist::UpdateFlipbookBillboardRotation()
+{
+    if (!bBillboardFlipbookToCamera || !VisualFlipbook)
+    {
+        return;
+    }
+
+    const FVector CameraLocation = GetCurrentCameraLocation();
+    if (CameraLocation.IsNearlyZero())
+    {
+        return;
+    }
+
+    const FVector ToCamera = CameraLocation - VisualFlipbook->GetComponentLocation();
+    if (ToCamera.IsNearlyZero())
+    {
+        return;
+    }
+
+    // Yaw-only billboard keeps the Paper2D character upright while facing the camera.
+    // PaperFlipbook planes commonly need a 90-degree yaw correction, exposed as
+    // FlipbookBillboardYawOffset for art packs authored with different facing axes.
+    const float TargetYaw = ToCamera.Rotation().Yaw + FlipbookBillboardYawOffset;
+    VisualFlipbook->SetWorldRotation(FRotator(0.0f, TargetYaw, 0.0f));
 }
 
 void AWorldForgeColonist::BeginPlay()
@@ -40,9 +105,9 @@ void AWorldForgeColonist::BeginPlay()
     Super::BeginPlay();
 
     if (DebugMesh)
-{
-    DebugMesh->SetHiddenInGame(true);
-}
+    {
+        DebugMesh->SetHiddenInGame(!bForceDebugMeshVisible);
+    }
 
     if (SpriteVisual)
     {
@@ -51,6 +116,37 @@ void AWorldForgeColonist::BeginPlay()
             SpriteVisual->CameraTarget = PC->GetViewTarget();
         }
     }
+}
+
+
+void AWorldForgeColonist::ApplyVisualDefinition(const FWorldForgeColonistVisualRow& VisualDefinition)
+{
+    ActiveVisualDefinition = VisualDefinition;
+
+    if (SpriteVisual)
+    {
+        SpriteVisual->SetRelativeLocation(VisualDefinition.RelativeLocation);
+        SpriteVisual->SetRelativeRotation(VisualDefinition.RelativeRotation);
+        SpriteVisual->SetRelativeScale3D(VisualDefinition.RelativeScale);
+    }
+
+    if (VisualFlipbook)
+    {
+        VisualFlipbook->SetRelativeLocation(FVector::ZeroVector);
+        VisualFlipbook->SetRelativeRotation(FRotator::ZeroRotator);
+        VisualFlipbook->SetRelativeScale3D(FVector::OneVector);
+        VisualFlipbook->SetTranslucentSortPriority(100);
+    }
+
+    if (DebugMesh)
+    {
+        DebugMesh->SetWorldScale3D(VisualDefinition.DebugMeshScale);
+        DebugMesh->SetVectorParameterValueOnMaterials(
+            TEXT("Color"),
+            FVector(VisualDefinition.DebugColor.R, VisualDefinition.DebugColor.G, VisualDefinition.DebugColor.B));
+    }
+
+    ApplyVisualForCurrentAgentState();
 }
 
 void AWorldForgeColonist::SetSpriteVisualComponent(USpriteCharacterComponent* InSpriteVisual)
@@ -76,6 +172,7 @@ void AWorldForgeColonist::Tick(float DeltaTime)
     }
 
     UpdateMovement(DeltaTime);
+    UpdateFlipbookBillboardRotation();
 }
 
 FVector AWorldForgeColonist::ResolveWorldLocationFromAgentData(const FAgentData& Data, float CellSize) const
@@ -166,12 +263,19 @@ void AWorldForgeColonist::InitializeFromAgentData(const FAgentData& Data, float 
     TargetWorldPos = Position;
     LastKnownState = Data.State;
     bHasVisualData = true;
+    LastAgentData = Data;
+    bHasLastAgentData = true;
 
     if (SpriteVisual)
     {
         SpriteVisual->SetAnimStateFromAgentState(Data.State);
         SpriteVisual->SetRace(Data.RaceTag);
     }
+
+    // Do NOT apply flipbooks here. The manager applies the race visual
+    // definition immediately after initialization; applying before that
+    // causes false "No valid flipbook" warnings and can leave the
+    // component in fallback state.
 }
 
 void AWorldForgeColonist::UpdateVisuals(
@@ -187,12 +291,16 @@ void AWorldForgeColonist::UpdateVisuals(
     TargetWorldPos = ResolveWorldLocationFromAgentData(Data, CellSize);
 
     bHasVisualData = true;
+    LastAgentData = Data;
+    bHasLastAgentData = true;
 
     if (SpriteVisual)
     {
         SpriteVisual->SetAnimStateFromAgentState(Data.State);
         SpriteVisual->SetRace(Data.RaceTag);
     }
+
+    ApplyVisualForCurrentAgentState();
 
     if (Data.State != LastKnownState)
     {
@@ -232,20 +340,248 @@ void AWorldForgeColonist::UpdateVisuals(
     }
 }
 
+
+UPaperFlipbook* AWorldForgeColonist::LoadFlipbookFromSoftObject(const TSoftObjectPtr<UObject>& VisualAsset) const
+{
+    if (VisualAsset.IsNull())
+    {
+        return nullptr;
+    }
+
+    UObject* LoadedObject = VisualAsset.Get();
+    if (!LoadedObject)
+    {
+        LoadedObject = VisualAsset.LoadSynchronous();
+    }
+
+    return Cast<UPaperFlipbook>(LoadedObject);
+}
+
+const TSoftObjectPtr<UObject>& AWorldForgeColonist::SelectWorkVisualAssetByJob() const
+{
+    static const TSoftObjectPtr<UObject> EmptyAsset;
+
+    if (!bHasLastAgentData || !LastAgentData.CurrentJobTag.IsValid())
+    {
+        return ActiveVisualDefinition.WorkVisualAsset;
+    }
+
+    const FString JobString = LastAgentData.CurrentJobTag.ToString();
+
+    if (JobString.Contains(TEXT("Mine")) && !ActiveVisualDefinition.MineVisualAsset.IsNull())
+    {
+        return ActiveVisualDefinition.MineVisualAsset;
+    }
+    if (JobString.Contains(TEXT("Farm")) && !ActiveVisualDefinition.FarmVisualAsset.IsNull())
+    {
+        return ActiveVisualDefinition.FarmVisualAsset;
+    }
+    if (JobString.Contains(TEXT("Build")) && !ActiveVisualDefinition.BuildVisualAsset.IsNull())
+    {
+        return ActiveVisualDefinition.BuildVisualAsset;
+    }
+    if (JobString.Contains(TEXT("Craft")) && !ActiveVisualDefinition.CraftVisualAsset.IsNull())
+    {
+        return ActiveVisualDefinition.CraftVisualAsset;
+    }
+    if (JobString.Contains(TEXT("Research")) && !ActiveVisualDefinition.ResearchVisualAsset.IsNull())
+    {
+        return ActiveVisualDefinition.ResearchVisualAsset;
+    }
+    if (JobString.Contains(TEXT("Haul")) && !ActiveVisualDefinition.HaulVisualAsset.IsNull())
+    {
+        return ActiveVisualDefinition.HaulVisualAsset;
+    }
+    if (JobString.Contains(TEXT("Doctor")) && !ActiveVisualDefinition.DoctorVisualAsset.IsNull())
+    {
+        return ActiveVisualDefinition.DoctorVisualAsset;
+    }
+    if (JobString.Contains(TEXT("Cook")) && !ActiveVisualDefinition.CookVisualAsset.IsNull())
+    {
+        return ActiveVisualDefinition.CookVisualAsset;
+    }
+    if (JobString.Contains(TEXT("Guard")) && !ActiveVisualDefinition.GuardVisualAsset.IsNull())
+    {
+        return ActiveVisualDefinition.GuardVisualAsset;
+    }
+    if (JobString.Contains(TEXT("Trade")) && !ActiveVisualDefinition.TradeVisualAsset.IsNull())
+    {
+        return ActiveVisualDefinition.TradeVisualAsset;
+    }
+    if (JobString.Contains(TEXT("Pray")) && !ActiveVisualDefinition.PrayVisualAsset.IsNull())
+    {
+        return ActiveVisualDefinition.PrayVisualAsset;
+    }
+
+    return ActiveVisualDefinition.WorkVisualAsset.IsNull() ? EmptyAsset : ActiveVisualDefinition.WorkVisualAsset;
+}
+
+const TSoftObjectPtr<UObject>& AWorldForgeColonist::SelectVisualAssetForAgentState() const
+{
+    static const TSoftObjectPtr<UObject> EmptyAsset;
+
+    const EAgentState State = bHasLastAgentData ? LastAgentData.State : LastKnownState;
+
+    switch (State)
+    {
+    case EAgentState::Dead:
+        if (!ActiveVisualDefinition.DeadVisualAsset.IsNull()) return ActiveVisualDefinition.DeadVisualAsset;
+        if (!ActiveVisualDefinition.HurtVisualAsset.IsNull()) return ActiveVisualDefinition.HurtVisualAsset;
+        break;
+
+    case EAgentState::Incapacitated:
+    case EAgentState::Recovering:
+        if (!ActiveVisualDefinition.IncapacitatedVisualAsset.IsNull()) return ActiveVisualDefinition.IncapacitatedVisualAsset;
+        if (!ActiveVisualDefinition.HurtVisualAsset.IsNull()) return ActiveVisualDefinition.HurtVisualAsset;
+        if (!ActiveVisualDefinition.RestVisualAsset.IsNull()) return ActiveVisualDefinition.RestVisualAsset;
+        break;
+
+    case EAgentState::Sleeping:
+        if (!ActiveVisualDefinition.SleepVisualAsset.IsNull()) return ActiveVisualDefinition.SleepVisualAsset;
+        if (!ActiveVisualDefinition.RestVisualAsset.IsNull()) return ActiveVisualDefinition.RestVisualAsset;
+        break;
+
+    case EAgentState::Eating:
+        if (!ActiveVisualDefinition.EatVisualAsset.IsNull()) return ActiveVisualDefinition.EatVisualAsset;
+        break;
+
+    case EAgentState::Socializing:
+        if (!ActiveVisualDefinition.SocialVisualAsset.IsNull()) return ActiveVisualDefinition.SocialVisualAsset;
+        break;
+
+    case EAgentState::Fleeing:
+        if (!ActiveVisualDefinition.FleeVisualAsset.IsNull()) return ActiveVisualDefinition.FleeVisualAsset;
+        if (!ActiveVisualDefinition.WalkVisualAsset.IsNull()) return ActiveVisualDefinition.WalkVisualAsset;
+        break;
+
+    case EAgentState::Fighting:
+        if (!ActiveVisualDefinition.FightVisualAsset.IsNull()) return ActiveVisualDefinition.FightVisualAsset;
+        break;
+
+    case EAgentState::Carrying:
+        if (!ActiveVisualDefinition.HaulVisualAsset.IsNull()) return ActiveVisualDefinition.HaulVisualAsset;
+        if (!ActiveVisualDefinition.CarryVisualAsset.IsNull()) return ActiveVisualDefinition.CarryVisualAsset;
+        if (!ActiveVisualDefinition.WalkVisualAsset.IsNull()) return ActiveVisualDefinition.WalkVisualAsset;
+        break;
+
+    case EAgentState::Working:
+    {
+        const TSoftObjectPtr<UObject>& WorkAsset = SelectWorkVisualAssetByJob();
+        if (!WorkAsset.IsNull()) return WorkAsset;
+        break;
+    }
+
+    case EAgentState::MovingToTarget:
+    case EAgentState::SearchingForJob:
+    case EAgentState::ReservingTarget:
+        if (!ActiveVisualDefinition.WalkVisualAsset.IsNull()) return ActiveVisualDefinition.WalkVisualAsset;
+        break;
+
+    case EAgentState::Idle:
+    default:
+        break;
+    }
+
+    if (!ActiveVisualDefinition.IdleVisualAsset.IsNull()) return ActiveVisualDefinition.IdleVisualAsset;
+    if (!ActiveVisualDefinition.WorkVisualAsset.IsNull()) return ActiveVisualDefinition.WorkVisualAsset;
+    if (!ActiveVisualDefinition.WalkVisualAsset.IsNull()) return ActiveVisualDefinition.WalkVisualAsset;
+    return EmptyAsset;
+}
+
+bool AWorldForgeColonist::ApplyVisualAsset(const TSoftObjectPtr<UObject>& VisualAsset)
+{
+    UPaperFlipbook* Flipbook = LoadFlipbookFromSoftObject(VisualAsset);
+
+    if (VisualFlipbook)
+    {
+        if (Flipbook)
+        {
+            VisualFlipbook->SetFlipbook(Flipbook);
+            VisualFlipbook->SetLooping(true);
+            VisualFlipbook->PlayFromStart();
+            VisualFlipbook->SetHiddenInGame(false);
+            VisualFlipbook->SetVisibility(true, true);
+            VisualFlipbook->SetTranslucentSortPriority(100);
+            UpdateFlipbookBillboardRotation();
+
+            UE_LOG(
+                LogTemp,
+                Log,
+                TEXT("[WorldForgeColonist] Applied flipbook for AgentID=%d Race=%s Row='%s' Flipbook=%s Loc=%s Rot=%s RelLoc=%s RelScale=%s Hidden=%d Visible=%d"),
+                AgentID,
+                bHasLastAgentData ? *LastAgentData.RaceTag.ToString() : TEXT("<unknown>"),
+                *ActiveVisualDefinition.DisplayName.ToString(),
+                *GetNameSafe(Flipbook),
+                *VisualFlipbook->GetComponentLocation().ToString(),
+                *VisualFlipbook->GetComponentRotation().ToString(),
+                *VisualFlipbook->GetRelativeLocation().ToString(),
+                *VisualFlipbook->GetRelativeScale3D().ToString(),
+                VisualFlipbook->bHiddenInGame ? 1 : 0,
+                VisualFlipbook->IsVisible() ? 1 : 0);
+        }
+        else
+        {
+            VisualFlipbook->SetFlipbook(nullptr);
+            VisualFlipbook->SetHiddenInGame(true);
+        }
+    }
+
+    if (SpriteVisual && Flipbook)
+    {
+        SpriteVisual->BroadcastFlipbookChanged(Flipbook);
+    }
+
+    UpdateDebugMeshVisibilityForCurrentVisual(Flipbook != nullptr);
+    return Flipbook != nullptr;
+}
+
+void AWorldForgeColonist::UpdateDebugMeshVisibilityForCurrentVisual(bool bHasValidFlipbook)
+{
+    if (!DebugMesh)
+    {
+        return;
+    }
+
+    const bool bShowDebugMesh = bForceDebugMeshVisible || (ActiveVisualDefinition.bUseDebugMeshWhenNoAnimation && !bHasValidFlipbook);
+    DebugMesh->SetHiddenInGame(!bShowDebugMesh);
+    DebugMesh->SetVisibility(bShowDebugMesh, true);
+}
+
+bool AWorldForgeColonist::ApplyVisualForCurrentAgentState()
+{
+    const TSoftObjectPtr<UObject>& SelectedAsset = SelectVisualAssetForAgentState();
+    const bool bApplied = ApplyVisualAsset(SelectedAsset);
+
+    if (!bApplied)
+    {
+        UE_LOG(
+            LogTemp,
+            Warning,
+            TEXT("[WorldForgeColonist] No valid flipbook for AgentID=%d Race=%s Row='%s'. Using debug mesh fallback=%d"),
+            AgentID,
+            bHasLastAgentData ? *LastAgentData.RaceTag.ToString() : TEXT("<unknown>"),
+            *ActiveVisualDefinition.DisplayName.ToString(),
+            ActiveVisualDefinition.bUseDebugMeshWhenNoAnimation ? 1 : 0);
+    }
+
+    return bApplied;
+}
+
 void AWorldForgeColonist::UpdateMovement(float DeltaTime)
 {
     const FVector CurrentLocation = GetActorLocation();
-    FVector DesiredLocation = TargetWorldPos;
 
-    if (!CurrentLocation.Equals(TargetWorldPos, 1.f))
+    if (CurrentLocation.Equals(TargetWorldPos, 1.0f))
     {
-        DesiredLocation = FMath::VInterpTo(
-            CurrentLocation,
-            TargetWorldPos,
-            DeltaTime,
-            MoveSpeed
-        );
+        return;
     }
+
+    FVector DesiredLocation = FMath::VInterpConstantTo(
+        CurrentLocation,
+        TargetWorldPos,
+        DeltaTime,
+        VisualMoveSpeed
+    );
 
     if (const UWorld* World = GetWorld())
     {

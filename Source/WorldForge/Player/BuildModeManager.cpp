@@ -12,12 +12,17 @@
 #include "GameFramework/Actor.h"
 #include "Components/PrimitiveComponent.h"
 #include "Player/DigGhostActor.h"
+#include "Player/MiningGhostActor.h"
 #include "Voxel/DigSubsystem.h"
 #include "Mining/MiningSubsystem.h"
+#include "Mining/MiningLayerRenderer.h"
 #include "Farming/FarmingSubsystem.h"
 #include "Farming/FarmingTypes.h"
 #include "Grid/GridSelectionSubsystem.h"
+#include "Grid/LayerViewSubsystem.h"
 #include "Grid/GridDesignationTypes.h"
+#include "Colony/WorldForgeColonist.h"
+#include "Actors/WorldResourceActor.h"
 
 
 namespace
@@ -91,6 +96,7 @@ void UBuildModeManager::Deinitialize()
     }
 
     DestroyGridOverlay();
+    DestroyMiningLayerRenderer();
     DestroyGhost();
     Super::Deinitialize();
 }
@@ -150,9 +156,28 @@ UGridSelectionSubsystem* UBuildModeManager::GetGridSelectionSubsystem() const
     return W ? W->GetSubsystem<UGridSelectionSubsystem>() : nullptr;
 }
 
+ULayerViewSubsystem* UBuildModeManager::GetLayerViewSubsystem() const
+{
+    UWorld* W = GetWorld();
+    return W ? W->GetSubsystem<ULayerViewSubsystem>() : nullptr;
+}
+
 int32 UBuildModeManager::GetEffectiveSettlementID() const
 {
-    return ActiveSettlementID >= 0 ? ActiveSettlementID : 0;
+    // Player-facing build/mine/farm tools must always apply to the player colony.
+    // NPC civilization settlements are active now and may occupy IDs 0..N before
+    // the player colony is created, so falling back to settlement 0 is no longer safe.
+    if (const USettlementManager* SettlementManager = GetSettlementManager())
+    {
+        const int32 PlayerSettlementID = SettlementManager->GetPlayerSettlementID();
+        if (PlayerSettlementID >= 0 && SettlementManager->SettlementExists(PlayerSettlementID))
+        {
+            return PlayerSettlementID;
+        }
+    }
+
+    // Before the player colony is created, player tools have no valid settlement target.
+    return INDEX_NONE;
 }
 
 float UBuildModeManager::GetMaxGroundBuildSlopeDegrees() const
@@ -172,6 +197,58 @@ bool UBuildModeManager::IsBuildableTerrainType(EWorldForgeTerrainType TerrainTyp
     default:
         return false;
     }
+}
+
+bool UBuildModeManager::IsBuildVoxelInsidePlayerClaim(const FIntVector& Voxel) const
+{
+    const USettlementManager* SettlementManager = GetSettlementManager();
+    if (!SettlementManager)
+    {
+        return false;
+    }
+
+    // Patch 4D: building operates in voxel placement space; settlement claims are strategic
+    // world-map tiles. Patch 4C owns the voxel-to-world-tile conversion and claim lookup.
+    return SettlementManager->DoesPlayerSettlementClaimVoxelCell(FIntPoint(Voxel.X, Voxel.Y));
+}
+
+bool UBuildModeManager::IsDigVoxelInsidePlayerClaim(const FIntVector& Voxel) const
+{
+    const USettlementManager* SettlementManager = GetSettlementManager();
+    if (!SettlementManager)
+    {
+        return false;
+    }
+
+    // Patch 4E: player dig commands operate in voxel space, while colony claims are
+    // strategic world-map tiles. Patch 4C converts voxel XY back to the claimed tile.
+    return SettlementManager->DoesPlayerSettlementClaimVoxelCell(FIntPoint(Voxel.X, Voxel.Y));
+}
+
+bool UBuildModeManager::IsMineVoxelInsidePlayerClaim(const FIntVector& Voxel) const
+{
+    const USettlementManager* SettlementManager = GetSettlementManager();
+    if (!SettlementManager)
+    {
+        return false;
+    }
+
+    // Patch 4E: mine designations operate in voxel space, while colony claims are
+    // strategic world-map tiles. Patch 4C converts voxel XY back to the claimed tile.
+    return SettlementManager->DoesPlayerSettlementClaimVoxelCell(FIntPoint(Voxel.X, Voxel.Y));
+}
+
+bool UBuildModeManager::IsFarmCellInsidePlayerClaim(const FIntPoint& WorldCell) const
+{
+    const USettlementManager* SettlementManager = GetSettlementManager();
+    if (!SettlementManager)
+    {
+        return false;
+    }
+
+    // Farm-painted cells are exact absolute grid/voxel XY cells. Patch 4C owns
+    // conversion from voxel XY back to the claimed strategic world-map tile.
+    return SettlementManager->DoesPlayerSettlementClaimVoxelCell(WorldCell);
 }
 
 bool UBuildModeManager::ValidateGroundTerrainPlacement(const FIntVector& Voxel, FString& OutReason) const
@@ -314,6 +391,152 @@ bool UBuildModeManager::CanAffordCurrentSelection() const
     return false;
 }
 
+void UBuildModeManager::SetStaticBaseGridEnabled(bool bEnabled)
+{
+    if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
+    {
+        GridSelection->SetStaticBaseGridEnabled(bEnabled);
+        BroadcastFeedback(bEnabled ? TEXT("Static grid overlay enabled.") : TEXT("Static grid overlay disabled."));
+    }
+}
+
+bool UBuildModeManager::ToggleStaticBaseGrid()
+{
+    if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
+    {
+        const bool bEnabled = GridSelection->ToggleStaticBaseGrid();
+        BroadcastFeedback(bEnabled ? TEXT("Static grid overlay enabled.") : TEXT("Static grid overlay disabled."));
+        return bEnabled;
+    }
+
+    return false;
+}
+
+bool UBuildModeManager::IsStaticBaseGridEnabled() const
+{
+    if (const UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
+    {
+        return GridSelection->IsStaticBaseGridEnabled();
+    }
+
+    return false;
+}
+
+void UBuildModeManager::SetToggleSelectedCellsOnReselect(bool bEnabled)
+{
+    bToggleSelectedCellsOnReselect = bEnabled;
+
+    if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
+    {
+        GridSelection->SetToggleSelectedCellsOnReselect(bEnabled);
+    }
+
+    BroadcastFeedback(bEnabled
+        ? TEXT("Selection toggle enabled: selecting an already selected block removes it.")
+        : TEXT("Selection toggle disabled: reselecting a block keeps it selected."));
+}
+
+void UBuildModeManager::SetMiningRemovalMode(EMiningRemovalMode NewMode)
+{
+    if (UMiningSubsystem* MiningSub = GetMiningSubsystem())
+    {
+        MiningSub->SetMiningRemovalMode(NewMode);
+        BroadcastFeedback(MiningSub->GetMiningRemovalModeText().ToString());
+    }
+}
+
+EMiningRemovalMode UBuildModeManager::ToggleMiningRemovalMode()
+{
+    if (UMiningSubsystem* MiningSub = GetMiningSubsystem())
+    {
+        const EMiningRemovalMode NewMode = MiningSub->ToggleMiningRemovalMode();
+        BroadcastFeedback(MiningSub->GetMiningRemovalModeText().ToString());
+        return NewMode;
+    }
+
+    return EMiningRemovalMode::VoxelCube;
+}
+
+EMiningRemovalMode UBuildModeManager::GetMiningRemovalMode() const
+{
+    if (const UMiningSubsystem* MiningSub = GetMiningSubsystem())
+    {
+        return MiningSub->GetMiningRemovalMode();
+    }
+
+    return EMiningRemovalMode::VoxelCube;
+}
+
+FText UBuildModeManager::GetMiningRemovalModeText() const
+{
+    if (const UMiningSubsystem* MiningSub = GetMiningSubsystem())
+    {
+        return MiningSub->GetMiningRemovalModeText();
+    }
+
+    return FText::FromString(TEXT("Mining: Voxel Cube"));
+}
+
+
+void UBuildModeManager::SetMiningHeightMode(EWFMiningHeightMode NewMode)
+{
+    if (ULayerViewSubsystem* LayerView = GetLayerViewSubsystem())
+    {
+        LayerView->SetMiningHeightMode(NewMode);
+        BroadcastFeedback(LayerView->GetMiningHeightModeText().ToString());
+    }
+}
+
+EWFMiningHeightMode UBuildModeManager::ToggleMiningHeightMode()
+{
+    if (ULayerViewSubsystem* LayerView = GetLayerViewSubsystem())
+    {
+        const EWFMiningHeightMode NewMode = LayerView->ToggleMiningHeightMode();
+        BroadcastFeedback(LayerView->GetMiningHeightModeText().ToString());
+        return NewMode;
+    }
+
+    return EWFMiningHeightMode::TwoVoxelColumn;
+}
+
+EWFMiningHeightMode UBuildModeManager::GetMiningHeightMode() const
+{
+    if (const ULayerViewSubsystem* LayerView = GetLayerViewSubsystem())
+    {
+        return LayerView->GetMiningHeightMode();
+    }
+
+    return EWFMiningHeightMode::TwoVoxelColumn;
+}
+
+FText UBuildModeManager::GetMiningHeightModeText() const
+{
+    if (const ULayerViewSubsystem* LayerView = GetLayerViewSubsystem())
+    {
+        return LayerView->GetMiningHeightModeText();
+    }
+
+    return FText::FromString(TEXT("Mine Height: 2 Block Column"));
+}
+
+int32 UBuildModeManager::GetActiveVoxelLayerZ() const
+{
+    if (const ULayerViewSubsystem* LayerView = GetLayerViewSubsystem())
+    {
+        if (LayerView->HasActiveVoxelLayer())
+        {
+            return LayerView->GetActiveVoxelLayerZ();
+        }
+    }
+
+    if (const UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
+    {
+        return GridSelection->GetActiveVoxelLayerZ();
+    }
+
+    return CurrentHoveredVoxel.Z;
+}
+
 void UBuildModeManager::EnterPrefabMode(FGameplayTag BuildingTag)
 {
     if (!BuildingTag.IsValid())
@@ -346,6 +569,7 @@ void UBuildModeManager::EnterPrefabMode(FGameplayTag BuildingTag)
     SpawnGhost();
     if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
     {
+        GridSelection->SetToggleSelectedCellsOnReselect(bToggleSelectedCellsOnReselect);
         GridSelection->BeginSelectionTool(EBuildToolMode::Place, EGridSelectionShape::Single);
     }
 
@@ -395,6 +619,7 @@ void UBuildModeManager::EnterCustomDrawMode(FGameplayTag MaterialTag)
     SpawnGhost();
     if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
     {
+        GridSelection->SetToggleSelectedCellsOnReselect(bToggleSelectedCellsOnReselect);
         GridSelection->BeginSelectionTool(EBuildToolMode::Place, EGridSelectionShape::Rectangle);
     }
 
@@ -465,6 +690,74 @@ void UBuildModeManager::SetActiveSettlement(int32 SettlementID)
 void UBuildModeManager::SetBuildAgentID(int32 AgentID)
 {
     BuildAgentID = AgentID;
+}
+
+void UBuildModeManager::AdjustActiveToolLayer(int32 Delta)
+{
+    if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
+    {
+        GridSelection->AdjustActiveToolLayer(Delta);
+
+        if (APlayerController* PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr)
+        {
+            GridSelection->TickSelectionFromMouse(PC);
+        }
+
+        BroadcastFeedback(FString::Printf(TEXT("Tool layer: %+d"), GridSelection->GetActiveToolLayerOffset()));
+    }
+}
+
+void UBuildModeManager::ResetActiveToolLayer()
+{
+    if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
+    {
+        GridSelection->ResetActiveToolLayer();
+
+        if (APlayerController* PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr)
+        {
+            GridSelection->TickSelectionFromMouse(PC);
+        }
+
+        BroadcastFeedback(TEXT("Tool layer reset to surface."));
+    }
+}
+
+int32 UBuildModeManager::GetActiveToolLayerOffset() const
+{
+    if (const UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
+    {
+        return GridSelection->GetActiveToolLayerOffset();
+    }
+
+    return 0;
+}
+
+void UBuildModeManager::AdjustActiveViewLayer(int32 Delta)
+{
+    if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
+    {
+        GridSelection->AdjustActiveViewLayer(Delta);
+        BroadcastFeedback(FString::Printf(TEXT("View layer: %+d"), GridSelection->GetActiveViewLayerOffset()));
+    }
+}
+
+void UBuildModeManager::ResetActiveViewLayer()
+{
+    if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
+    {
+        GridSelection->ResetActiveViewLayer();
+        BroadcastFeedback(TEXT("View layer reset to surface."));
+    }
+}
+
+int32 UBuildModeManager::GetActiveViewLayerOffset() const
+{
+    if (const UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
+    {
+        return GridSelection->GetActiveViewLayerOffset();
+    }
+
+    return 0;
 }
 
 void UBuildModeManager::SetDragBuildActive(bool bActive)
@@ -960,7 +1253,16 @@ void UBuildModeManager::HandleCancel()
             GridSelection->EndSelectionTool(true);
         }
         DeactivateGridOverlay();
+        RestoreMiningPresentationVisibility();
+        DestroyMiningLayerRenderer();
         DestroyGhost();
+
+        if (ActiveMiningGhost)
+        {
+            ActiveMiningGhost->Destroy();
+            ActiveMiningGhost = nullptr;
+        }
+
         BroadcastSelectionChanged();
         BroadcastFeedback(TEXT("Mine mode exited."));
         return;
@@ -1022,6 +1324,7 @@ void UBuildModeManager::EnterFarmMode()
     SpawnGhost();
     if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
     {
+        GridSelection->SetToggleSelectedCellsOnReselect(bToggleSelectedCellsOnReselect);
         GridSelection->BeginSelectionTool(EBuildToolMode::Farm, EGridSelectionShape::Rectangle);
     }
 
@@ -1043,7 +1346,13 @@ void UBuildModeManager::EnterMineMode()
             GridSelection->EndSelectionTool(true);
         }
         DeactivateGridOverlay();
+        DestroyMiningLayerRenderer();
         DestroyGhost();
+        if (ActiveMiningGhost)
+        {
+            ActiveMiningGhost->Destroy();
+            ActiveMiningGhost = nullptr;
+        }
         BroadcastSelectionChanged();
         BroadcastFeedback(TEXT("Mine mode exited."));
         return;
@@ -1071,10 +1380,78 @@ void UBuildModeManager::EnterMineMode()
     bDragStartedFromBlock = false;
 
     SpawnGhost();
+
+    // Spawn 3D hover ghost cube for mine mode.
+    // Shows at the hovered voxel while the player selects cells to mine.
+    if (UWorld* W = GetWorld())
+    {
+        TSubclassOf<AMiningGhostActor> ClassToSpawn = MiningGhostClass;
+        if (!ClassToSpawn)
+        {
+            static const TCHAR* CandidateGhostPaths[] =
+            {
+                TEXT("/Game/WorldForge/BluePrints/BP_MiningGhostActor.BP_MiningGhostActor_C"),
+                TEXT("/Game/WorldForge/Blueprints/BP_MiningGhostActor.BP_MiningGhostActor_C"),
+                TEXT("/Game/WorldForge/Blueprints/Player/BP_MiningGhostActor.BP_MiningGhostActor_C"),
+                TEXT("/Game/WorldForge/Player/BP_MiningGhostActor.BP_MiningGhostActor_C"),
+                TEXT("/Game/WorldForge/Build/BP_MiningGhostActor.BP_MiningGhostActor_C"),
+                TEXT("/Game/BP_MiningGhostActor.BP_MiningGhostActor_C")
+            };
+
+            for (const TCHAR* CandidatePath : CandidateGhostPaths)
+            {
+                if (UClass* LoadedClass = LoadClass<AMiningGhostActor>(nullptr, CandidatePath))
+                {
+                    ClassToSpawn = LoadedClass;
+                    UE_LOG(LogTemp, Log, TEXT("[BuildMode] Auto-loaded MiningGhostClass: %s"), CandidatePath);
+                    break;
+                }
+            }
+        }
+
+        if (!ClassToSpawn)
+        {
+            ClassToSpawn = AMiningGhostActor::StaticClass();
+            UE_LOG(LogTemp, Warning, TEXT("[BuildMode] MiningGhostClass not assigned and BP fallback was not found. Using native AMiningGhostActor."));
+        }
+        FActorSpawnParameters MineGhostParams;
+        MineGhostParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+        ActiveMiningGhost = W->SpawnActor<AMiningGhostActor>(ClassToSpawn, FTransform::Identity, MineGhostParams);
+
+        if (ActiveMiningGhost)
+        {
+            UE_LOG(LogTemp, Log, TEXT("[BuildMode] Mining ghost cube spawned."));
+        }
+    }
+
+    if (ULayerViewSubsystem* LayerView = GetLayerViewSubsystem())
+    {
+        LayerView->EnterLayerView(EBuildToolMode::Mine);
+    }
+
     if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
     {
+        GridSelection->SetActiveMineSettlementID(GetEffectiveSettlementID());
+        GridSelection->SetToggleSelectedCellsOnReselect(bToggleSelectedCellsOnReselect);
         GridSelection->BeginSelectionTool(EBuildToolMode::Mine, EGridSelectionShape::Rectangle);
+
+        if (ActiveMiningGhost)
+        {
+            const FLinearColor SurfaceTint = ActiveMiningGhost->ConfirmedTint;
+            const FLinearColor UndergroundTint = FLinearColor(1.0f, 0.95f, 0.05f, 1.0f);
+            GridSelection->SetMiningGhostVisualAssets(
+                ActiveMiningGhost->GetResolvedGhostCubeMesh(),
+                ActiveMiningGhost->GetResolvedGhostMaterial(),
+                SurfaceTint,
+                UndergroundTint,
+                FMath::Clamp(ActiveMiningGhost->ConfirmedOpacity, 0.45f, 0.80f),
+                0.90f,
+                0.97f);
+        }
     }
+
+    InitializeMiningLayerRenderer();
+    UpdateMiningLayerRenderer();
 
     UE_LOG(LogTemp, Log, TEXT("[BuildMode] Entered Mine mode."));
     OnBuildModeChanged.Broadcast(CurrentMode);
@@ -1180,10 +1557,26 @@ void UBuildModeManager::ExecuteMineDesignation()
         return;
     }
 
+    if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
+    {
+        GridSelection->SetActiveMineSettlementID(GetEffectiveSettlementID());
+    }
+
     UMiningSubsystem* MiningSub = GetMiningSubsystem();
     if (!MiningSub)
     {
         BroadcastFeedback(TEXT("Mining system unavailable."));
+        return;
+    }
+
+    if (!IsMineVoxelInsidePlayerClaim(CurrentHoveredVoxel))
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[BuildMode] Mine designation skipped: unclaimed land. Voxel=(%d,%d,%d)"),
+            CurrentHoveredVoxel.X,
+            CurrentHoveredVoxel.Y,
+            CurrentHoveredVoxel.Z);
+        BroadcastFeedback(TEXT("Cannot mine here. This land is not claimed by your colony."));
         return;
     }
 
@@ -1267,6 +1660,17 @@ void UBuildModeManager::ExecuteDig()
             BroadcastFeedback(TEXT("Maximum dig depth reached."));
             return;
         }
+    }
+
+    if (!IsDigVoxelInsidePlayerClaim(Params.TargetGridPos))
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[BuildMode] Dig blocked: unclaimed land. Voxel=(%d,%d,%d)"),
+            Params.TargetGridPos.X,
+            Params.TargetGridPos.Y,
+            Params.TargetGridPos.Z);
+        BroadcastFeedback(TEXT("Cannot dig here. This land is not claimed by your colony."));
+        return;
     }
 
     FDigResult Result = DigSub->DigAt(Params);
@@ -1463,53 +1867,93 @@ void UBuildModeManager::UpdateFromMouse(APlayerController* PC)
         if (GridSelection->IsSelectionActive())
         {
             GridSelection->TickSelectionFromMouse(PC);
+
+            const bool bUseSharedGridHover =
+                CurrentToolMode == EBuildToolMode::Mine ||
+                CurrentToolMode == EBuildToolMode::Farm ||
+                (CurrentMode == EBuildMode::CustomDraw && CurrentToolMode == EBuildToolMode::Place);
+
+            if (bUseSharedGridHover && GridSelection->HasValidHover())
+            {
+                const FIntVector NewGridHover = GridSelection->GetHoveredVoxel();
+                const bool bChanged = (NewGridHover != CurrentHoveredVoxel) || !bHoveredCellValid;
+
+                CurrentHoveredVoxel = NewGridHover;
+                CurrentOverlayVoxel = NewGridHover;
+                CurrentHoveredCell = FIntPoint(NewGridHover.X, NewGridHover.Y);
+                CurrentHoveredTerrainZ = GridSelection->GetHoveredTerrainZ();
+                LastHitZ = CurrentHoveredTerrainZ;
+                LastValidVoxel = NewGridHover;
+                bHasLastValidVoxel = true;
+                bHoveredCellValid = true;
+
+                if (bChanged)
+                {
+                    OnHoveredCellChanged.Broadcast(CurrentHoveredCell);
+                }
+
+                UpdateGhost();
+                UpdateGridOverlay();
+
+                // Mine hover visual: always use flat GridSelection tile only.
+                // The 3D cube ghost is hidden; the GridSelection hover highlight
+                // (single cell flat tile) covers the visual need at both surface
+                // and underground. The ghost actor stays alive for internal state
+                // tracking but its mesh is never shown.
+                if (CurrentToolMode == EBuildToolMode::Mine && ActiveMiningGhost)
+                {
+                    ActiveMiningGhost->HideGhost();
+                }
+
+                if (CurrentToolMode == EBuildToolMode::Mine)
+                {
+                    UpdateMiningLayerRenderer();
+                }
+
+                // For shared grid tools, GridSelectionSubsystem is now the authoritative
+                // X/Y + tool-layer Z hover source. Returning here prevents legacy terrain
+                // hover logic from snapping the target back to surface Z.
+                return;
+            }
         }
     }
 
-    // Mine uses the same 2D overlay selection as build/farm, but keeps
-    // CurrentHoveredVoxel as the true mine/dig target for the mining subsystem.
+    // ── PRIORITY 2 FIX: mine mode fallback ──────────────────────────────────
+    //
+    // This path is reached only when GridSelectionSubsystem either:
+    //   (a) has no active selection tool (shouldn't happen — EnterMineMode calls
+    //       BeginSelectionTool — but defended here for safety), or
+    //   (b) TickSelectionFromMouse ran but returned HasValidHover()=false (cursor
+    //       is at the map edge, the synthetic layer plane didn't intersect, etc.).
+    //
+    // Previously this fell back to RaycastDigTarget → RaycastToTerrain (SDF
+    // geometry collision). Underground, that collision returns whichever terrain
+    // polygon is still visible through the cutaway — typically the clipped surface
+    // face at the wrong Z — so the hover voxel slipped to the terrain surface
+    // instead of staying on the active layer plane. Clicks then designated the
+    // wrong layer.
+    //
+    // Correct behaviour: if GridSelection (which owns the authoritative layer-plane
+    // projection) says "no valid hover," clear hover state and hide the ghost.
+    // Do NOT override with terrain collision. The ghost reappears the instant the
+    // cursor moves back over a position where the layer plane can be resolved.
+    // ─────────────────────────────────────────────────────────────────────────
     if (CurrentToolMode == EBuildToolMode::Mine)
     {
-        FIntVector GridPos = FIntVector::ZeroValue;
-        FVector WorldPos = FVector::ZeroVector;
-        const bool bHit = RaycastDigTarget(GridPos, WorldPos);
-        UVoxelWorldManager* VM = GetVoxelManager();
+        bHoveredCellValid = false;
 
-        if (bHit && VM)
+        if (ActiveMiningGhost)
         {
-            CurrentHoveredVoxel = GridPos;
-            CurrentHoveredCell = VM->WorldToTerrainCell(WorldPos);
-
-            // Overlay uses true voxel-space coordinates. Do not feed it
-            // terrain/farm cells because TileGridOverlayActor converts
-            // VoxelCoord.X/Y directly to world space using CellSizeUU.
-            CurrentOverlayVoxel = WorldToVoxel(WorldPos, 100.0f);
-
-            LastValidVoxel = GridPos;
-            bHasLastValidVoxel = true;
-            bHoveredCellValid = true;
-            LastHitZ = WorldPos.Z;
-            CurrentHoveredTerrainZ = WorldPos.Z;
-
-            OnHoveredCellChanged.Broadcast(CurrentHoveredCell);
-
-            // GridSelectionSubsystem owns drag preview/selection visuals.
-            UpdateGhost();
-            UpdateGridOverlay();
-        }
-        else
-        {
-            bHoveredCellValid = false;
-
-            if (GhostActor)
-            {
-                GhostActor->SetGhostState(EBuildGhostState::Invalid);
-                UpdateGhost();
-            }
-
-            UpdateGridOverlay();
+            ActiveMiningGhost->HideGhost();
         }
 
+        if (GhostActor)
+        {
+            GhostActor->SetGhostState(EBuildGhostState::Invalid);
+        }
+
+        UpdateGridOverlay();
+        UpdateMiningLayerRenderer();
         return;
     }
 
@@ -1988,6 +2432,20 @@ bool UBuildModeManager::CommitPrefabBuild()
         return false;
     }
 
+    if (!IsBuildVoxelInsidePlayerClaim(CurrentHoveredVoxel))
+    {
+        UE_LOG(
+            LogTemp,
+            Warning,
+            TEXT("[BuildMode] Build blocked: unclaimed land. Voxel=(%d,%d,%d)"),
+            CurrentHoveredVoxel.X,
+            CurrentHoveredVoxel.Y,
+            CurrentHoveredVoxel.Z
+        );
+        BroadcastFeedback(TEXT("Cannot build here. This land is not claimed by your colony."));
+        return false;
+    }
+
     UPlayerBuildContext* Ctx = GetBuildContext();
     if (!Ctx)
     {
@@ -2037,13 +2495,13 @@ bool UBuildModeManager::CommitFarmZone()
     // That old mixed-coordinate path could turn a handful of selected cells into
     // a massive bounding rectangle, e.g. 9 selected cells becoming 57k farm tiles.
     // FarmPaintedWorldCells is the only accepted farm/world-cell source here.
-    TSet<FIntPoint> UniqueWorldCells;
+    TSet<FIntPoint> RequestedWorldCells;
     for (const FIntPoint& WorldCell : FarmPaintedWorldCells)
     {
-        UniqueWorldCells.Add(WorldCell);
+        RequestedWorldCells.Add(WorldCell);
     }
 
-    if (UniqueWorldCells.Num() == 0)
+    if (RequestedWorldCells.Num() == 0)
     {
         UE_LOG(
             LogTemp,
@@ -2055,6 +2513,74 @@ bool UBuildModeManager::CommitFarmZone()
 
         BroadcastFeedback(TEXT("No farm tiles selected."));
         return false;
+    }
+
+    TSet<FIntPoint> ClaimedWorldCells;
+    ClaimedWorldCells.Reserve(RequestedWorldCells.Num());
+
+    int32 SkippedUnclaimedCount = 0;
+    for (const FIntPoint& WorldCell : RequestedWorldCells)
+    {
+        if (IsFarmCellInsidePlayerClaim(WorldCell))
+        {
+            ClaimedWorldCells.Add(WorldCell);
+            continue;
+        }
+
+        ++SkippedUnclaimedCount;
+        UE_LOG(LogTemp, Warning,
+            TEXT("[BuildMode] Farm cell skipped: unclaimed land. WorldCell=(%d,%d)"),
+            WorldCell.X,
+            WorldCell.Y);
+    }
+
+    if (ClaimedWorldCells.Num() == 0)
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[BuildMode] Farm zone blocked: no selected cells inside claimed land."));
+        BroadcastFeedback(TEXT("Cannot farm here. This land is not claimed by your colony."));
+        return false;
+    }
+
+    if (SkippedUnclaimedCount > 0)
+    {
+        FarmPaintedWorldCells = ClaimedWorldCells;
+
+        SelectedCells.RemoveAll([&ClaimedWorldCells](const FIntPoint& Cell)
+            {
+                return !ClaimedWorldCells.Contains(Cell);
+            });
+
+        SelectedCells3D.RemoveAll([&ClaimedWorldCells](const FIntVector& Voxel)
+            {
+                return !ClaimedWorldCells.Contains(FIntPoint(Voxel.X, Voxel.Y));
+            });
+
+        if (UPlayerBuildContext* Ctx = GetBuildContext())
+        {
+            Ctx->ClearSelection();
+            for (const FIntPoint& Cell : FarmPaintedWorldCells)
+            {
+                Ctx->AddCell(Cell);
+            }
+        }
+
+        if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
+        {
+            TSet<FIntVector> ClaimedSelectionVoxels;
+            ClaimedSelectionVoxels.Reserve(SelectedCells3D.Num());
+            for (const FIntVector& Voxel : SelectedCells3D)
+            {
+                ClaimedSelectionVoxels.Add(Voxel);
+            }
+
+            if (ClaimedSelectionVoxels.Num() > 0)
+            {
+                GridSelection->RetainSelectedCells(ClaimedSelectionVoxels);
+            }
+        }
+
+        OnCellCountChanged.Broadcast(FarmPaintedWorldCells.Num());
     }
 
     // FarmPaintedWorldCells stores exact absolute grid/voxel XY cells.
@@ -2071,7 +2597,7 @@ bool UBuildModeManager::CommitFarmZone()
     }
 
     TSet<FIntPoint> UniqueLocalCells;
-    for (const FIntPoint& WorldCell : UniqueWorldCells)
+    for (const FIntPoint& WorldCell : ClaimedWorldCells)
     {
         UniqueLocalCells.Add(WorldCell - FarmGridOrigin);
     }
@@ -2120,9 +2646,11 @@ bool UBuildModeManager::CommitFarmZone()
     }
 
     UE_LOG(LogTemp, Log,
-        TEXT("[BuildMode] Exact farm zone committed. ZoneID=%d ExactCells=%d BoundsLocal=(%d,%d)->(%d,%d) FarmGridOrigin=(%d,%d) Crop=%s Settlement=%d"),
+        TEXT("[BuildMode] Exact farm zone committed. ZoneID=%d ExactCells=%d Requested=%d SkippedUnclaimed=%d BoundsLocal=(%d,%d)->(%d,%d) FarmGridOrigin=(%d,%d) Crop=%s Settlement=%d"),
         ZoneID,
         UniqueLocalCells.Num(),
+        RequestedWorldCells.Num(),
+        SkippedUnclaimedCount,
         MinX,
         MinY,
         MaxX,
@@ -2165,6 +2693,21 @@ bool UBuildModeManager::CommitCustomBuild()
         if (!ValidateGroundTerrainPlacement(Cell, TerrainFailure))
         {
             BroadcastFeedback(TerrainFailure);
+            return false;
+        }
+
+        if (!IsBuildVoxelInsidePlayerClaim(Cell))
+        {
+            UE_LOG(
+                LogTemp,
+                Warning,
+                TEXT("[BuildMode] Build blocked: unclaimed land. Voxel=(%d,%d,%d) SelectedCells=%d"),
+                Cell.X,
+                Cell.Y,
+                Cell.Z,
+                SelectedCells3D.Num()
+            );
+            BroadcastFeedback(TEXT("Cannot build here. This land is not claimed by your colony."));
             return false;
         }
     }
@@ -2286,6 +2829,315 @@ void UBuildModeManager::UpdateGhost()
     }
 }
 
+
+
+void UBuildModeManager::InitializeMiningLayerRenderer()
+{
+    if (MiningLayerRenderer)
+    {
+        return;
+    }
+
+    UWorld* W = GetWorld();
+    if (!W)
+    {
+        return;
+    }
+
+    FActorSpawnParameters Params;
+    Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+    MiningLayerRenderer = W->SpawnActor<AMiningLayerRenderer>(
+        AMiningLayerRenderer::StaticClass(),
+        FTransform::Identity,
+        Params);
+
+    if (MiningLayerRenderer)
+    {
+        MiningLayerRenderer->SetCellSizeUU(100.0f);
+        MiningLayerRenderer->SetRendererVisible(false);
+        UE_LOG(LogTemp, Log, TEXT("[BuildMode] MiningLayerRenderer spawned."));
+    }
+    else
+    {
+        UE_LOG(LogTemp, Error, TEXT("[BuildMode] Failed to spawn MiningLayerRenderer."));
+    }
+}
+
+void UBuildModeManager::DestroyMiningLayerRenderer()
+{
+    RestoreMiningPresentationVisibility();
+
+    if (MiningLayerRenderer)
+    {
+        MiningLayerRenderer->Destroy();
+        MiningLayerRenderer = nullptr;
+    }
+
+    bMiningLayerAnchorValid = false;
+    MiningLayerAnchorVoxel = FIntVector::ZeroValue;
+    MiningLayerAnchorZ = MIN_int32;
+}
+
+void UBuildModeManager::UpdateMiningLayerRenderer()
+{
+    // Camera bounds are clamped every call regardless of state-change deduplication.
+    // This prevents the player from panning outside the diorama walls and seeing the
+    // underlying grass terrain that bleeds through the clip plane.
+    if (CurrentToolMode == EBuildToolMode::Mine && bMiningLayerAnchorValid)
+    {
+        ClampCameraToMineRegion();
+    }
+
+    if (CurrentToolMode != EBuildToolMode::Mine)
+    {
+        if (MiningLayerRenderer)
+        {
+            MiningLayerRenderer->ClearLayer();
+        }
+
+        RestoreMiningPresentationVisibility();
+
+        bMiningLayerAnchorValid = false;
+        MiningLayerAnchorVoxel = FIntVector::ZeroValue;
+        MiningLayerAnchorZ = MIN_int32;
+        return;
+    }
+
+    InitializeMiningLayerRenderer();
+    if (!MiningLayerRenderer)
+    {
+        return;
+    }
+
+    if (!bHoveredCellValid && !bHasLastValidVoxel && !bMiningLayerAnchorValid)
+    {
+        MiningLayerRenderer->ClearLayer();
+        return;
+    }
+
+    const int32 ActiveZ = GetActiveVoxelLayerZ();
+
+    // ─── Anchor policy ───────────────────────────────────────────────────────────
+    //
+    // The anchor is SET once when first going underground (or when the layer
+    // changes) using the current hover position as the center. After that it
+    // is FROZEN — it only moves when the dynamic radius expansion logic (below)
+    // determines confirmed mine cells have grown beyond the wall edge.
+    //
+    // Removing per-frame cursor drift eliminates the two main visual problems:
+    //   1. Flickering: every anchor move triggered ForceNextRebuild → full HISM
+    //      clear+rebuild every frame while the cursor was near the edge.
+    //   2. Box jitter: anchor visibly sliding around while just hovering.
+    //
+    // If the player wants to mine in a completely different area they should exit
+    // and re-enter mine mode, which re-anchors to the new cursor position.
+    // ─────────────────────────────────────────────────────────────────────────────
+    const int32 DioramaRadiusCells = 10;
+    const bool bLayerChanged = !bMiningLayerAnchorValid || MiningLayerAnchorZ != ActiveZ;
+
+    if (bLayerChanged || !bMiningLayerAnchorValid)
+    {
+        // Set anchor from current cursor position on initial entry or layer change.
+        FIntVector NewAnchor = bHoveredCellValid
+            ? CurrentHoveredVoxel
+            : (bHasLastValidVoxel ? LastValidVoxel : MiningLayerAnchorVoxel);
+        NewAnchor.Z = ActiveZ;
+
+        MiningLayerAnchorVoxel = NewAnchor;
+        MiningLayerAnchorZ     = ActiveZ;
+        bMiningLayerAnchorValid = true;
+
+        if (MiningLayerRenderer)
+        {
+            MiningLayerRenderer->ForceNextRebuild();
+        }
+
+        UE_LOG(LogTemp, Log,
+            TEXT("[BuildMode] Mining diorama anchor SET. Anchor=(%d,%d,%d) ActiveZ=%d Reason=%s"),
+            MiningLayerAnchorVoxel.X, MiningLayerAnchorVoxel.Y, MiningLayerAnchorVoxel.Z,
+            ActiveZ,
+            !bMiningLayerAnchorValid ? TEXT("InitialEntry") : TEXT("LayerChanged"));
+    }
+    // Anchor does NOT drift with cursor hover — only dynamic radius expansion moves the wall.
+
+    FIntVector CenterVoxel = MiningLayerAnchorVoxel;
+    CenterVoxel.Z = ActiveZ;
+
+    TArray<FIntVector> ConfirmedMineCells;
+    if (UMiningSubsystem* Mining = GetMiningSubsystem())
+    {
+        TArray<FMiningDesignation> Designations;
+        Mining->GetAllDesignations(GetEffectiveSettlementID(), Designations);
+        for (const FMiningDesignation& Designation : Designations)
+        {
+            if (Designation.State == EMiningDesignationState::Cancelled ||
+                Designation.State == EMiningDesignationState::Complete ||
+                Designation.State == EMiningDesignationState::Failed)
+            {
+                continue;
+            }
+            ConfirmedMineCells.AddUnique(Designation.GridPosition);
+        }
+    }
+
+    // ─── Dynamic radius expansion ────────────────────────────────────────────────
+    //
+    // If a confirmed (active) mine designation sits within EdgeBufferCells of the
+    // current diorama edge, expand VisibleRadius to keep all designations at least
+    // 5 voxels inside the wall. This preserves the diorama illusion when the player
+    // is mining outward from the initial area.
+    //
+    // Expansion cap: DioramaRadiusCells + 20 to prevent unbounded growth.
+    // ─────────────────────────────────────────────────────────────────────────────
+    if (MiningLayerRenderer && ConfirmedMineCells.Num() > 0)
+    {
+        const int32 BaseRadius  = DioramaRadiusCells;
+        const int32 MaxRadius   = BaseRadius + 20;
+        const int32 ExpandBuffer = 5; // keep designations this far inside the wall
+
+        int32 DesiredRadius = MiningLayerRenderer->VisibleRadius;
+
+        for (const FIntVector& Cell : ConfirmedMineCells)
+        {
+            if (Cell.Z != ActiveZ) { continue; }
+            const int32 DX = FMath::Abs(Cell.X - MiningLayerAnchorVoxel.X);
+            const int32 DY = FMath::Abs(Cell.Y - MiningLayerAnchorVoxel.Y);
+            const int32 MaxDist = FMath::Max(DX, DY);
+            // If this designation would be within ExpandBuffer of the wall, push the wall out
+            if (MaxDist >= DesiredRadius - ExpandBuffer)
+            {
+                DesiredRadius = MaxDist + ExpandBuffer;
+            }
+        }
+
+        DesiredRadius = FMath::Clamp(DesiredRadius, BaseRadius, MaxRadius);
+
+        if (MiningLayerRenderer->VisibleRadius != DesiredRadius)
+        {
+            MiningLayerRenderer->VisibleRadius = DesiredRadius;
+            MiningLayerRenderer->ForceNextRebuild();
+
+            UE_LOG(LogTemp, Log,
+                TEXT("[BuildMode] Diorama radius expanded to %d (base=%d) due to confirmed mine near edge."),
+                DesiredRadius, BaseRadius);
+        }
+    }
+
+    // ─── End dynamic expansion ───────────────────────────────────────────────────
+
+    // ─── Anchor nudge for lateral mining ────────────────────────────────────────
+    //
+    // Radius expansion above handles outward mining in all directions from center.
+    // But when the player mines laterally (one direction only), the anchor stays
+    // fixed and the far edge stays at radius+20 while the near edge drifts away.
+    // This nudge slides the anchor toward confirmed mine cells that are within 2
+    // voxels of the current wall edge, keeping the work area centered.
+    //
+    // Key difference from the old cursor-based drift we removed: this only fires
+    // when confirmed designations change, not every hover tick — no flicker.
+    // ─────────────────────────────────────────────────────────────────────────────
+    if (bMiningLayerAnchorValid && ConfirmedMineCells.Num() > 0)
+    {
+        const int32 CurrentRadius = MiningLayerRenderer
+            ? MiningLayerRenderer->VisibleRadius
+            : DioramaRadiusCells;
+
+        // Nudge when a confirmed cell is within 2 voxels of the wall edge.
+        const int32 NudgeTrigger = CurrentRadius - 2;
+
+        FIntVector NudgeOffset = FIntVector::ZeroValue;
+
+        for (const FIntVector& Cell : ConfirmedMineCells)
+        {
+            if (Cell.Z != ActiveZ) { continue; }
+            const int32 DX = Cell.X - MiningLayerAnchorVoxel.X;
+            const int32 DY = Cell.Y - MiningLayerAnchorVoxel.Y;
+
+            // X axis
+            if      (DX >  NudgeTrigger) NudgeOffset.X = FMath::Max(NudgeOffset.X,  DX - NudgeTrigger);
+            else if (DX < -NudgeTrigger) NudgeOffset.X = FMath::Min(NudgeOffset.X,  DX + NudgeTrigger);
+
+            // Y axis
+            if      (DY >  NudgeTrigger) NudgeOffset.Y = FMath::Max(NudgeOffset.Y,  DY - NudgeTrigger);
+            else if (DY < -NudgeTrigger) NudgeOffset.Y = FMath::Min(NudgeOffset.Y,  DY + NudgeTrigger);
+        }
+
+        if (NudgeOffset.X != 0 || NudgeOffset.Y != 0)
+        {
+            MiningLayerAnchorVoxel.X += NudgeOffset.X;
+            MiningLayerAnchorVoxel.Y += NudgeOffset.Y;
+
+            // CenterVoxel is computed from anchor before this block — re-sync it.
+            CenterVoxel.X = MiningLayerAnchorVoxel.X;
+            CenterVoxel.Y = MiningLayerAnchorVoxel.Y;
+
+            if (MiningLayerRenderer)
+            {
+                MiningLayerRenderer->ForceNextRebuild();
+            }
+
+            UE_LOG(LogTemp, Log,
+                TEXT("[BuildMode] Diorama anchor nudged (%+d,%+d) for lateral mining. "
+                     "NewAnchor=(%d,%d,%d) Radius=%d"),
+                NudgeOffset.X, NudgeOffset.Y,
+                MiningLayerAnchorVoxel.X, MiningLayerAnchorVoxel.Y, MiningLayerAnchorVoxel.Z,
+                CurrentRadius);
+        }
+    }
+
+    // ─── End anchor nudge ────────────────────────────────────────────────────────
+
+    // Selection preview is owned by TileGridOverlayActor:
+    //   surface     = flat marker tiles
+    //   underground = M_WF_MiningGhost cube instances
+    // MiningLayerRenderer should only draw the underground cap/floor and confirmed designations.
+    const bool bUnderground = GetLayerViewSubsystem() && GetLayerViewSubsystem()->GetRelativeLayerOffset() < 0;
+    UpdateMiningPresentationVisibility(CenterVoxel, ActiveZ, bUnderground);
+
+    const TArray<FIntVector> NoSelectedPreviewCells;
+    MiningLayerRenderer->SetLayerState(
+        CenterVoxel,
+        ActiveZ,
+        NoSelectedPreviewCells,
+        ConfirmedMineCells);
+}
+
+void UBuildModeManager::ClampCameraToMineRegion()
+{
+    if (!MiningLayerRenderer || !bMiningLayerAnchorValid) { return; }
+
+    UWorld* World = GetWorld();
+    if (!World) { return; }
+
+    APlayerController* PC = World->GetFirstPlayerController();
+    if (!PC) { return; }
+
+    APawn* CamPawn = PC->GetPawn();
+    if (!CamPawn) { return; }
+
+    // Allow the camera pawn to sit at most VisibleRadius/2+1 voxels from the anchor
+    // in XY.  The tighter radius ensures that even at max pitch -45° the spring arm
+    // tip (camera eye) stays inside or at most in the extended dark-earth floor ring,
+    // never in the visible grass terrain beyond radius 25.
+    // Z is unconstrained — pitch/zoom govern vertical perspective.
+    const float CellSizeUU = 100.0f;
+    const float HalfBound  = static_cast<float>(MiningLayerRenderer->VisibleRadius / 2 + 1) * CellSizeUU;
+
+    const float AnchorWorldX = (static_cast<float>(MiningLayerAnchorVoxel.X) + 0.5f) * CellSizeUU;
+    const float AnchorWorldY = (static_cast<float>(MiningLayerAnchorVoxel.Y) + 0.5f) * CellSizeUU;
+
+    FVector Loc = CamPawn->GetActorLocation();
+    const float ClampedX = FMath::Clamp(Loc.X, AnchorWorldX - HalfBound, AnchorWorldX + HalfBound);
+    const float ClampedY = FMath::Clamp(Loc.Y, AnchorWorldY - HalfBound, AnchorWorldY + HalfBound);
+
+    if (FMath::Abs(ClampedX - Loc.X) > 0.5f || FMath::Abs(ClampedY - Loc.Y) > 0.5f)
+    {
+        Loc.X = ClampedX;
+        Loc.Y = ClampedY;
+        CamPawn->SetActorLocation(Loc, false, nullptr, ETeleportType::TeleportPhysics);
+    }
+}
 
 void UBuildModeManager::InitializeGridOverlay()
 {
@@ -2416,6 +3268,197 @@ void UBuildModeManager::ActivateGridOverlayForMode(EBuildToolMode ToolMode)
     GridOverlay->ShowOverlay();
 }
 
+
+void UBuildModeManager::UpdateMiningPresentationVisibility(const FIntVector& CenterVoxel, int32 ActiveVoxelZ, bool bUnderground)
+{
+    if (!bUnderground)
+    {
+        RestoreMiningPresentationVisibility();
+        return;
+    }
+
+    UWorld* World = GetWorld();
+    if (!World)
+    {
+        return;
+    }
+
+    const float CellSize = 100.0f;
+    const float CenterWorldX = (static_cast<float>(CenterVoxel.X) + 0.5f) * CellSize;
+    const float CenterWorldY = (static_cast<float>(CenterVoxel.Y) + 0.5f) * CellSize;
+    const float ActiveWorldZ = static_cast<float>(ActiveVoxelZ) * CellSize;
+    const float VisibleRadiusUU = 1350.0f; // 20x20 workspace plus a small wall/camera buffer.
+    const float AboveLayerBufferUU = 250.0f;
+
+    TSet<TWeakObjectPtr<AActor>> StillHidden;
+
+    for (TActorIterator<AWorldForgeColonist> It(World); It; ++It)
+    {
+        AWorldForgeColonist* Colonist = *It;
+        if (!IsValid(Colonist))
+        {
+            continue;
+        }
+
+        const FVector Loc = Colonist->GetActorLocation();
+        const bool bOutsideXY =
+            FMath::Abs(Loc.X - CenterWorldX) > VisibleRadiusUU ||
+            FMath::Abs(Loc.Y - CenterWorldY) > VisibleRadiusUU;
+        const bool bAboveSlice = Loc.Z > (ActiveWorldZ + AboveLayerBufferUU);
+        const bool bShouldHide = bOutsideXY || bAboveSlice;
+
+        if (bShouldHide)
+        {
+            Colonist->SetActorHiddenInGame(true);
+            MiningPresentationHiddenActors.Add(Colonist);
+            StillHidden.Add(Colonist);
+        }
+        else if (MiningPresentationHiddenActors.Contains(Colonist))
+        {
+            Colonist->SetActorHiddenInGame(false);
+        }
+    }
+
+    // ─── Surface resource node actors (AWorldResourceActor base — catches BP_MetalOreNode etc.) ──
+    //
+    // These are the ShatterStone-driven ore node BPs spawned at or near the terrain surface.
+    // They are not clipped by ViewLayerClipZ (which only applies to terrain materials), so they
+    // float visibly above the underground cut. Hide any node that is above the active slice or
+    // outside the diorama XY footprint.
+    for (TActorIterator<AWorldResourceActor> It(World); It; ++It)
+    {
+        AWorldResourceActor* ResourceActor = *It;
+        if (!IsValid(ResourceActor))
+        {
+            continue;
+        }
+
+        const FVector Loc = ResourceActor->GetActorLocation();
+        const bool bOutsideXY =
+            FMath::Abs(Loc.X - CenterWorldX) > VisibleRadiusUU ||
+            FMath::Abs(Loc.Y - CenterWorldY) > VisibleRadiusUU;
+        const bool bAboveSlice = Loc.Z > (ActiveWorldZ + AboveLayerBufferUU);
+        const bool bShouldHide = bOutsideXY || bAboveSlice;
+
+        if (bShouldHide)
+        {
+            ResourceActor->SetActorHiddenInGame(true);
+            MiningPresentationHiddenActors.Add(ResourceActor);
+            StillHidden.Add(ResourceActor);
+        }
+        else if (MiningPresentationHiddenActors.Contains(ResourceActor))
+        {
+            ResourceActor->SetActorHiddenInGame(false);
+        }
+    }
+
+    // ─── Surface decoration actors (WorldDecorationSubsystem: trees, bushes, props) ──────────
+    //
+    // WorldDecorationSubsystem stamps its spawned actors with the FName actor tag
+    // "WorldForgeDecoration" so we can filter them here without a subsystem pointer.
+    // Same hide/restore logic as colonists and resource nodes.
+    static const FName GDecorationActorTag = FName("WorldForgeDecoration");
+    for (TActorIterator<AActor> It(World); It; ++It)
+    {
+        AActor* DecoActor = *It;
+        if (!IsValid(DecoActor) || !DecoActor->ActorHasTag(GDecorationActorTag))
+        {
+            continue;
+        }
+
+        const FVector Loc = DecoActor->GetActorLocation();
+        const bool bOutsideXY =
+            FMath::Abs(Loc.X - CenterWorldX) > VisibleRadiusUU ||
+            FMath::Abs(Loc.Y - CenterWorldY) > VisibleRadiusUU;
+        const bool bAboveSlice = Loc.Z > (ActiveWorldZ + AboveLayerBufferUU);
+        const bool bShouldHide = bOutsideXY || bAboveSlice;
+
+        if (bShouldHide)
+        {
+            DecoActor->SetActorHiddenInGame(true);
+            MiningPresentationHiddenActors.Add(DecoActor);
+            StillHidden.Add(DecoActor);
+        }
+        else if (MiningPresentationHiddenActors.Contains(DecoActor))
+        {
+            DecoActor->SetActorHiddenInGame(false);
+        }
+    }
+
+    // ─── WildHarvest crop patch actors (BP_CropPatch_LowPoly_C etc.) ─────────────
+    //
+    // WildHarvest crop patches are not tagged WorldForgeDecoration and do not
+    // inherit from AWorldResourceActor, so they need their own pass. We match by
+    // class name substring ("CropPatch") which catches all LowPoly / HighPoly / etc.
+    // variants without requiring a hard C++ base class reference.
+    //
+    // All crop patches above the active layer are hidden underground; patches that
+    // happen to be at or below the layer (unusual, but possible near stairs/ramps)
+    // are left visible.
+    // ─────────────────────────────────────────────────────────────────────────────
+    for (TActorIterator<AActor> It(World); It; ++It)
+    {
+        AActor* CropActor = *It;
+        if (!IsValid(CropActor)) { continue; }
+
+        const FString ClassName = CropActor->GetClass()->GetName();
+        if (!ClassName.Contains(TEXT("CropPatch"), ESearchCase::IgnoreCase) &&
+            !ClassName.Contains(TEXT("WildHarvest"), ESearchCase::IgnoreCase))
+        {
+            continue;
+        }
+
+        const FVector Loc = CropActor->GetActorLocation();
+        const bool bAboveSlice = Loc.Z > (ActiveWorldZ + AboveLayerBufferUU);
+        const bool bOutsideXY  =
+            FMath::Abs(Loc.X - CenterWorldX) > VisibleRadiusUU ||
+            FMath::Abs(Loc.Y - CenterWorldY) > VisibleRadiusUU;
+        const bool bShouldHide = bAboveSlice || bOutsideXY;
+
+        if (bShouldHide)
+        {
+            CropActor->SetActorHiddenInGame(true);
+            MiningPresentationHiddenActors.Add(CropActor);
+            StillHidden.Add(CropActor);
+        }
+        else if (MiningPresentationHiddenActors.Contains(CropActor))
+        {
+            CropActor->SetActorHiddenInGame(false);
+        }
+    }
+
+    TArray<TWeakObjectPtr<AActor>> ToRestore;
+    for (const TWeakObjectPtr<AActor>& HiddenActor : MiningPresentationHiddenActors)
+    {
+        if (!StillHidden.Contains(HiddenActor))
+        {
+            ToRestore.Add(HiddenActor);
+        }
+    }
+
+    for (const TWeakObjectPtr<AActor>& HiddenActor : ToRestore)
+    {
+        if (AActor* Actor = HiddenActor.Get())
+        {
+            Actor->SetActorHiddenInGame(false);
+        }
+        MiningPresentationHiddenActors.Remove(HiddenActor);
+    }
+}
+
+void UBuildModeManager::RestoreMiningPresentationVisibility()
+{
+    for (const TWeakObjectPtr<AActor>& HiddenActor : MiningPresentationHiddenActors)
+    {
+        if (AActor* Actor = HiddenActor.Get())
+        {
+            Actor->SetActorHiddenInGame(false);
+        }
+    }
+
+    MiningPresentationHiddenActors.Reset();
+}
+
 void UBuildModeManager::DeactivateGridOverlay()
 {
     if (!GridOverlay)
@@ -2481,7 +3524,15 @@ void UBuildModeManager::SyncSelectionFromGridSelection()
 
     for (const FGridSelectionCell& GridCell : GridCells)
     {
-        SelectedCells3D.AddUnique(GridCell.VoxelCoord);
+        if (CurrentToolMode == EBuildToolMode::Mine && GetMiningHeightMode() == EWFMiningHeightMode::TwoVoxelColumn)
+        {
+            SelectedCells3D.AddUnique(GridCell.VoxelCoord);
+            SelectedCells3D.AddUnique(FIntVector(GridCell.VoxelCoord.X, GridCell.VoxelCoord.Y, GridCell.VoxelCoord.Z - 1));
+        }
+        else
+        {
+            SelectedCells3D.AddUnique(GridCell.VoxelCoord);
+        }
 
         FIntPoint ToolCell = FIntPoint::ZeroValue;
 
@@ -2530,6 +3581,26 @@ void UBuildModeManager::SyncSelectionFromGridSelection()
 
     OnCellCountChanged.Broadcast(Count);
 
+    if (CurrentToolMode == EBuildToolMode::Mine)
+    {
+        // Visual preview should show the cells the player directly marked.
+        // CommitMineDesignations may expand to a two-voxel column, but previewing
+        // both layers at the surface creates confusing stacked markers.
+        TArray<FIntVector> VisualMineCells;
+        VisualMineCells.Reserve(GridCells.Num());
+        for (const FGridSelectionCell& GridCell : GridCells)
+        {
+            VisualMineCells.AddUnique(GridCell.VoxelCoord);
+        }
+
+        GridSelection->SetMiningVolumePreviewCells(VisualMineCells);
+        UpdateMiningLayerRenderer();
+    }
+    else
+    {
+        GridSelection->ClearMiningVolumePreviewCells();
+    }
+
     UE_LOG(LogTemp, Log,
         TEXT("[BuildMode] Synced grid selection. Tool=%d GridCells=%d Selected2D=%d Selected3D=%d FarmCells=%d"),
         static_cast<int32>(CurrentToolMode),
@@ -2549,6 +3620,7 @@ void UBuildModeManager::ClearTileSelectionState()
     {
         GridSelection->ClearSelectedCells();
         GridSelection->ClearPreviewCells();
+        GridSelection->ClearMiningVolumePreviewCells();
     }
 
     if (GridOverlay)
@@ -2575,7 +3647,7 @@ void UBuildModeManager::AddOrToggleCurrentTileSelection(bool bToggleExisting)
     const bool bAlreadySelected2D = SelectedCells.Contains(CurrentHoveredCell);
     const bool bAlreadySelected3D = SelectedCells3D.Contains(CurrentHoveredVoxel);
 
-    if (bToggleExisting && (bAlreadySelected2D || bAlreadySelected3D))
+    if (bToggleExisting && bToggleSelectedCellsOnReselect && (bAlreadySelected2D || bAlreadySelected3D))
     {
         SelectedCells.Remove(CurrentHoveredCell);
         SelectedCells3D.Remove(CurrentHoveredVoxel);
@@ -2645,8 +3717,57 @@ bool UBuildModeManager::CommitMineDesignations()
         return false;
     }
 
-    int32 CreatedCount = 0;
+    TSet<FIntVector> RequestedMineVoxels;
+    RequestedMineVoxels.Reserve(SelectedCells3D.Num() * 2);
+
     for (const FIntVector& MineVoxel : SelectedCells3D)
+    {
+        RequestedMineVoxels.Add(MineVoxel);
+
+        if (GetMiningHeightMode() == EWFMiningHeightMode::TwoVoxelColumn)
+        {
+            RequestedMineVoxels.Add(FIntVector(MineVoxel.X, MineVoxel.Y, MineVoxel.Z - 1));
+        }
+    }
+
+    TSet<FIntVector> ClaimedMineVoxels;
+    ClaimedMineVoxels.Reserve(RequestedMineVoxels.Num());
+
+    int32 SkippedUnclaimedCount = 0;
+    for (const FIntVector& MineVoxel : RequestedMineVoxels)
+    {
+        if (IsMineVoxelInsidePlayerClaim(MineVoxel))
+        {
+            ClaimedMineVoxels.Add(MineVoxel);
+            continue;
+        }
+
+        ++SkippedUnclaimedCount;
+        UE_LOG(LogTemp, Warning,
+            TEXT("[BuildMode] Mine designation skipped: unclaimed land. Voxel=(%d,%d,%d)"),
+            MineVoxel.X,
+            MineVoxel.Y,
+            MineVoxel.Z);
+    }
+
+    if (ClaimedMineVoxels.Num() == 0)
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[BuildMode] Mine designation blocked: no selected cells inside claimed land."));
+        BroadcastFeedback(TEXT("Cannot mine here. This land is not claimed by your colony."));
+        return false;
+    }
+
+    if (SkippedUnclaimedCount > 0)
+    {
+        if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
+        {
+            GridSelection->RetainSelectedCells(ClaimedMineVoxels);
+        }
+    }
+
+    int32 CreatedCount = 0;
+    for (const FIntVector& MineVoxel : ClaimedMineVoxels)
     {
         int32 OutDesignationID = INDEX_NONE;
         const bool bCreated = MiningSub->CreateMiningDesignation(
@@ -2662,14 +3783,26 @@ bool UBuildModeManager::CommitMineDesignations()
     }
 
     UE_LOG(LogTemp, Log,
-        TEXT("[BuildMode] Mine designations committed. Created=%d Requested=%d Settlement=%d"),
+        TEXT("[BuildMode] Mine designations committed. Created=%d Requested=%d Claimed=%d SkippedUnclaimed=%d Settlement=%d"),
         CreatedCount,
-        SelectedCells3D.Num(),
+        RequestedMineVoxels.Num(),
+        ClaimedMineVoxels.Num(),
+        SkippedUnclaimedCount,
         GetEffectiveSettlementID());
 
-    BroadcastFeedback(FString::Printf(
-        TEXT("Mining designated: %d tile(s)."),
-        CreatedCount));
+    if (SkippedUnclaimedCount > 0)
+    {
+        BroadcastFeedback(FString::Printf(
+            TEXT("Mining designated: %d voxel(s). Skipped %d unclaimed voxel(s)."),
+            CreatedCount,
+            SkippedUnclaimedCount));
+    }
+    else
+    {
+        BroadcastFeedback(FString::Printf(
+            TEXT("Mining designated: %d voxel(s)."),
+            CreatedCount));
+    }
 
     return CreatedCount > 0;
 }

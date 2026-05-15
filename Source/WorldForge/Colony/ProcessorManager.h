@@ -46,6 +46,24 @@ public:
     UFUNCTION(BlueprintPure, Category = "WorldForge|Processor")
     const TArray<FAgentData>& GetAllAgents() const { return Agents; }
 
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Processor|Agents")
+    bool GetAgentInspectionData(int32 AgentID, FColonistInspectionData& OutData) const;
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Processor|Jobs")
+    bool SetAgentJobPriority(int32 AgentID, FGameplayTag JobTag, int32 Priority);
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Processor|Jobs")
+    int32 GetAgentJobPriority(int32 AgentID, FGameplayTag JobTag) const;
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Processor|Jobs")
+    TArray<FColonistJobPriority> GetAgentJobPriorities(int32 AgentID) const;
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Processor|Jobs")
+    void ResetAgentJobPrioritiesToDefault(int32 AgentID);
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Processor|Jobs")
+    TArray<FGameplayTag> GetDefaultJobPriorityTags() const;
+
     const TArray<FAgentData>& GetAgentsForSettlement(int32 SettlementID) const;
 
     UFUNCTION(BlueprintPure, Category = "WorldForge|Processor")
