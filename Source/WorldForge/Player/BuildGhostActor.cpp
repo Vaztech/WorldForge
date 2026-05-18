@@ -12,6 +12,19 @@ namespace
     static const FName PendingGhostSupportTag(TEXT("WorldForgePendingBlockGhost"));
     static const FName PendingGhostCursorTag(TEXT("WorldForgePendingCursorGhost"));
 
+    static void MakeGhostComponentVisible(UStaticMeshComponent* Comp)
+    {
+        if (!Comp)
+        {
+            return;
+        }
+
+        Comp->SetHiddenInGame(false);
+        Comp->SetVisibility(true, true);
+        Comp->SetRenderCustomDepth(true);
+        Comp->SetCustomDepthStencilValue(252);
+    }
+
     static void ConfigureAsPendingGhostSupport(UStaticMeshComponent* Comp)
     {
         if (!Comp)
@@ -75,7 +88,10 @@ ABuildGhostActor::ABuildGhostActor()
     GhostMesh->SetupAttachment(Root);
     GhostMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
     GhostMesh->SetCastShadow(false);
-    GhostMesh->SetVisibility(false);
+    GhostMesh->SetHiddenInGame(false);
+    GhostMesh->SetRenderCustomDepth(true);
+    GhostMesh->SetCustomDepthStencilValue(252);
+    GhostMesh->SetVisibility(false, true);
 
     static ConstructorHelpers::FObjectFinder<UStaticMesh> CubeFinder(
         TEXT("/Engine/BasicShapes/Cube.Cube"));
@@ -105,24 +121,107 @@ void ABuildGhostActor::BeginPlay()
         CellValidMaterial = UMaterialInstanceDynamic::Create(BaseMat, this);
         if (CellValidMaterial)
         {
-            CellValidMaterial->SetVectorParameterValue(FName("BaseColor"), FLinearColor(0.1f, 0.8f, 0.2f, GhostOpacity));
+            CellValidMaterial->SetVectorParameterValue(FName("BaseColor"), FLinearColor(0.0f, 1.0f, 0.25f, GhostOpacity));
             CellValidMaterial->SetScalarParameterValue(FName("Opacity"), GhostOpacity);
         }
 
         CellCursorMaterial = UMaterialInstanceDynamic::Create(BaseMat, this);
         if (CellCursorMaterial)
         {
-            CellCursorMaterial->SetVectorParameterValue(FName("BaseColor"), FLinearColor(0.2f, 0.5f, 1.0f, GhostOpacity));
+            CellCursorMaterial->SetVectorParameterValue(FName("BaseColor"), FLinearColor(0.0f, 0.9f, 1.0f, GhostOpacity));
             CellCursorMaterial->SetScalarParameterValue(FName("Opacity"), GhostOpacity);
         }
 
         CellInvalidMaterial = UMaterialInstanceDynamic::Create(BaseMat, this);
         if (CellInvalidMaterial)
         {
-            CellInvalidMaterial->SetVectorParameterValue(FName("BaseColor"), FLinearColor(0.9f, 0.1f, 0.1f, GhostOpacity));
+            CellInvalidMaterial->SetVectorParameterValue(FName("BaseColor"), FLinearColor(1.0f, 0.05f, 0.05f, GhostOpacity));
             CellInvalidMaterial->SetScalarParameterValue(FName("Opacity"), GhostOpacity);
         }
     }
+}
+
+bool ABuildGhostActor::SetPreviewMesh(UStaticMesh* PreviewMesh)
+{
+    if (!PreviewMesh)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[BuildGhost] Preview mesh update ignored: PreviewMesh is null."));
+        return false;
+    }
+
+    if (!GhostMesh)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[BuildGhost] Preview mesh update ignored: GhostMesh is unavailable."));
+        return false;
+    }
+
+    GhostMesh->SetStaticMesh(PreviewMesh);
+    GhostMesh->SetHiddenInGame(false);
+    GhostMesh->SetVisibility(true, true);
+    GhostMesh->SetRenderCustomDepth(true);
+    GhostMesh->SetCustomDepthStencilValue(252);
+
+    for (UStaticMeshComponent* HighlightComp : CellHighlightPool)
+    {
+        if (HighlightComp)
+        {
+            HighlightComp->SetStaticMesh(PreviewMesh);
+            HighlightComp->SetHiddenInGame(false);
+            HighlightComp->SetRenderCustomDepth(true);
+            HighlightComp->SetCustomDepthStencilValue(252);
+        }
+    }
+
+    UE_LOG(LogTemp, Log, TEXT("[BuildGhost] Preview mesh updated: %s"), *PreviewMesh->GetPathName());
+    LogPreviewDiagnostics(TEXT("SetPreviewMesh"));
+    return true;
+}
+
+void ABuildGhostActor::SetPreviewMeshVisible(bool bVisible)
+{
+    if (!GhostMesh)
+    {
+        return;
+    }
+
+    GhostMesh->SetVisibility(bVisible, true);
+    GhostMesh->SetHiddenInGame(!bVisible);
+
+    if (bVisible)
+    {
+        GhostMesh->SetRenderCustomDepth(true);
+        GhostMesh->SetCustomDepthStencilValue(252);
+    }
+
+    UE_LOG(LogTemp, Verbose,
+        TEXT("[BuildGhost] SetPreviewMeshVisible: bVisible=%s Mesh=%s"),
+        bVisible ? TEXT("true") : TEXT("false"),
+        GhostMesh->GetStaticMesh() ? *GhostMesh->GetStaticMesh()->GetName() : TEXT("None"));
+}
+
+void ABuildGhostActor::LogPreviewDiagnostics(const TCHAR* Context) const
+{
+    int32 VisibleHighlightCount = 0;
+    for (const UStaticMeshComponent* HighlightComp : CellHighlightPool)
+    {
+        if (HighlightComp && HighlightComp->IsVisible() && !HighlightComp->bHiddenInGame)
+        {
+            ++VisibleHighlightCount;
+        }
+    }
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[BuildGhost] Preview diagnostics [%s]: ActorValid=%s ActorHidden=%s Location=%s GhostMesh=%s GhostMeshVisible=%s GhostMeshHiddenInGame=%s ActiveHighlights=%d VisibleHighlights=%d State=%d"),
+        Context ? Context : TEXT("None"),
+        IsValid(this) ? TEXT("true") : TEXT("false"),
+        IsHidden() ? TEXT("true") : TEXT("false"),
+        *GetActorLocation().ToString(),
+        GhostMesh && GhostMesh->GetStaticMesh() ? *GhostMesh->GetStaticMesh()->GetPathName() : TEXT("None"),
+        GhostMesh && GhostMesh->IsVisible() ? TEXT("true") : TEXT("false"),
+        GhostMesh && GhostMesh->bHiddenInGame ? TEXT("true") : TEXT("false"),
+        ActiveHighlightCount,
+        VisibleHighlightCount,
+        static_cast<int32>(CurrentState));
 }
 
 void ABuildGhostActor::SetGhostState(EBuildGhostState State)
@@ -131,12 +230,12 @@ void ABuildGhostActor::SetGhostState(EBuildGhostState State)
 
     if (State == EBuildGhostState::Hidden)
     {
-        GhostMesh->SetVisibility(false);
+        GhostMesh->SetVisibility(false, true);
         for (int32 i = 0; i < ActiveHighlightCount; ++i)
         {
             if (CellHighlightPool.IsValidIndex(i) && CellHighlightPool[i])
             {
-                CellHighlightPool[i]->SetVisibility(false);
+                CellHighlightPool[i]->SetVisibility(false, true);
                 DisableGhostTrace(CellHighlightPool[i]);
             }
         }
@@ -154,9 +253,9 @@ FLinearColor ABuildGhostActor::GetColorForState(EBuildGhostState State) const
     switch (State)
     {
     case EBuildGhostState::Valid:
-        return FLinearColor(0.1f, 0.8f, 0.2f, GhostOpacity);
+        return FLinearColor(0.0f, 1.0f, 0.25f, GhostOpacity);
     case EBuildGhostState::Invalid:
-        return FLinearColor(0.9f, 0.1f, 0.1f, GhostOpacity);
+        return FLinearColor(1.0f, 0.05f, 0.05f, GhostOpacity);
     default:
         return FLinearColor(0.5f, 0.5f, 0.5f, 0.0f);
     }
@@ -197,7 +296,7 @@ void ABuildGhostActor::UpdatePrefabGhost(
         return;
     }
 
-    GhostMesh->SetVisibility(false);
+    GhostMesh->SetVisibility(false, true);
 
     TArray<FIntVector> PreviewBlocks;
 
@@ -262,7 +361,7 @@ void ABuildGhostActor::UpdatePrefabGhost(
             );
 
             Comp->SetWorldLocation(Pos);
-            Comp->SetVisibility(true);
+            MakeGhostComponentVisible(Comp);
             Comp->SetWorldScale3D(FVector(GhostCubeInsetScale));
             DisableGhostTrace(Comp);
 
@@ -282,7 +381,7 @@ void ABuildGhostActor::UpdatePrefabGhost(
     {
         if (CellHighlightPool.IsValidIndex(i) && CellHighlightPool[i])
         {
-            CellHighlightPool[i]->SetVisibility(false);
+            CellHighlightPool[i]->SetVisibility(false, true);
             DisableGhostTrace(CellHighlightPool[i]);
         }
     }
@@ -298,7 +397,7 @@ void ABuildGhostActor::UpdateCustomDrawCells(
 {
     if (!VoxelManager) return;
 
-    GhostMesh->SetVisibility(false);
+    GhostMesh->SetVisibility(false, true);
 
     const int32 TotalNeeded = SelectedCells.Num() + 1;
     EnsurePoolSize(TotalNeeded);
@@ -313,7 +412,7 @@ void ABuildGhostActor::UpdateCustomDrawCells(
             FVector Pos = VoxelManager->GridToWorld(Cell, 0);
             Pos.Z = SurfaceZ;
             Comp->SetWorldLocation(Pos);
-            Comp->SetVisibility(true);
+            MakeGhostComponentVisible(Comp);
 
             if (CurrentState == EBuildGhostState::Invalid && CellInvalidMaterial)
             {
@@ -337,7 +436,7 @@ void ABuildGhostActor::UpdateCustomDrawCells(
             FVector Pos = VoxelManager->GridToWorld(CursorCell, 0);
             Pos.Z = SurfaceZ;
             Comp->SetWorldLocation(Pos);
-            Comp->SetVisibility(true);
+            MakeGhostComponentVisible(Comp);
 
             if (CurrentState == EBuildGhostState::Invalid && CellInvalidMaterial)
             {
@@ -358,7 +457,7 @@ void ABuildGhostActor::UpdateCustomDrawCells(
     {
         if (CellHighlightPool.IsValidIndex(i) && CellHighlightPool[i])
         {
-            CellHighlightPool[i]->SetVisibility(false);
+            CellHighlightPool[i]->SetVisibility(false, true);
             DisableGhostTrace(CellHighlightPool[i]);
         }
     }
@@ -373,7 +472,7 @@ void ABuildGhostActor::UpdateCustomDrawCells3D(
 {
     if (!VoxelManager) return;
 
-    GhostMesh->SetVisibility(false);
+    GhostMesh->SetVisibility(false, true);
 
     const int32 TotalNeeded = SelectedCells3D.Num() + 1;
     EnsurePoolSize(TotalNeeded);
@@ -391,7 +490,7 @@ void ABuildGhostActor::UpdateCustomDrawCells3D(
             );
 
             Comp->SetWorldLocation(Pos);
-            Comp->SetVisibility(true);
+            MakeGhostComponentVisible(Comp);
 
             if (CurrentState == EBuildGhostState::Invalid && CellInvalidMaterial)
             {
@@ -418,7 +517,7 @@ void ABuildGhostActor::UpdateCustomDrawCells3D(
             );
 
             Comp->SetWorldLocation(Pos);
-            Comp->SetVisibility(true);
+            MakeGhostComponentVisible(Comp);
 
             if (CurrentState == EBuildGhostState::Invalid && CellInvalidMaterial)
             {
@@ -439,7 +538,7 @@ void ABuildGhostActor::UpdateCustomDrawCells3D(
     {
         if (CellHighlightPool.IsValidIndex(i) && CellHighlightPool[i])
         {
-            CellHighlightPool[i]->SetVisibility(false);
+            CellHighlightPool[i]->SetVisibility(false, true);
             DisableGhostTrace(CellHighlightPool[i]);
         }
     }
@@ -453,13 +552,13 @@ void ABuildGhostActor::ClearAllHighlights()
     {
         if (CellHighlightPool[i])
         {
-            CellHighlightPool[i]->SetVisibility(false);
+            CellHighlightPool[i]->SetVisibility(false, true);
             DisableGhostTrace(CellHighlightPool[i]);
         }
     }
     ActiveHighlightCount = 0;
 
-    GhostMesh->SetVisibility(false);
+    GhostMesh->SetVisibility(false, true);
 }
 
 UStaticMeshComponent* ABuildGhostActor::GetOrCreateHighlight(int32 Index)
@@ -478,7 +577,10 @@ UStaticMeshComponent* ABuildGhostActor::GetOrCreateHighlight(int32 Index)
     NewComp->SetCollisionResponseToAllChannels(ECR_Ignore);
     NewComp->SetGenerateOverlapEvents(false);
     NewComp->SetCastShadow(false);
-    NewComp->SetVisibility(false);
+    NewComp->SetVisibility(false, true);
+    NewComp->SetHiddenInGame(false);
+    NewComp->SetRenderCustomDepth(true);
+    NewComp->SetCustomDepthStencilValue(252);
 
     if (GhostMesh && GhostMesh->GetStaticMesh())
     {

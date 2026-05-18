@@ -16,6 +16,69 @@ void UVoxelConstructionSystem::Initialize(FSubsystemCollectionBase& C)
     UE_LOG(LogTemp, Log, TEXT("[VoxelConstruction] Initialized."));
 }
 
+bool UVoxelConstructionSystem::AreBlocksInsidePlayerClaimIfNeeded(int32 SettlementID, const TArray<FIntVector>& Blocks) const
+{
+    UWorld* World = GetWorld();
+    const USettlementManager* SettlementManager = World ? World->GetSubsystem<USettlementManager>() : nullptr;
+    if (!SettlementManager)
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[VoxelConstruction] Build claim check failed: SettlementManager missing. SettlementID=%d Blocks=%d"),
+            SettlementID,
+            Blocks.Num());
+        return false;
+    }
+
+    const int32 PlayerSettlementID = SettlementManager->GetPlayerSettlementID();
+    if (PlayerSettlementID == INDEX_NONE || SettlementID != PlayerSettlementID)
+    {
+        return true;
+    }
+
+    for (const FIntVector& Block : Blocks)
+    {
+        int32 WorldTileID = INDEX_NONE;
+        FIntPoint WorldTileXY(INDEX_NONE, INDEX_NONE);
+        int32 ResolvedPlayerSettlementID = INDEX_NONE;
+        int32 ClaimedWorldTileCount = 0;
+        const bool bClaimed = SettlementManager->DoesPlayerSettlementClaimVoxelCellDetailed(
+            FIntPoint(Block.X, Block.Y),
+            WorldTileID,
+            WorldTileXY,
+            ResolvedPlayerSettlementID,
+            ClaimedWorldTileCount);
+
+        UE_LOG(LogTemp, Log,
+            TEXT("[VoxelConstruction] Build claim check: Voxel=(%d,%d,%d) WorldTile=(%d,%d) WorldTileID=%d PlayerSettlementID=%d ClaimedTileCount=%d Claimed=%s"),
+            Block.X,
+            Block.Y,
+            Block.Z,
+            WorldTileXY.X,
+            WorldTileXY.Y,
+            WorldTileID,
+            ResolvedPlayerSettlementID,
+            ClaimedWorldTileCount,
+            bClaimed ? TEXT("true") : TEXT("false"));
+
+        if (!bClaimed)
+        {
+            UE_LOG(LogTemp, Warning,
+                TEXT("[VoxelConstruction] Build task blocked: unclaimed land. SettlementID=%d Voxel=(%d,%d,%d) WorldTile=(%d,%d) WorldTileID=%d Blocks=%d"),
+                SettlementID,
+                Block.X,
+                Block.Y,
+                Block.Z,
+                WorldTileXY.X,
+                WorldTileXY.Y,
+                WorldTileID,
+                Blocks.Num());
+            return false;
+        }
+    }
+
+    return true;
+}
+
 int32 UVoxelConstructionSystem::StartBuildTask(int32 SID, FGameplayTag Tag, FIntPoint Origin, int32 AgentID)
 {
     if (HasConflictingTaskAtOrigin(SID, Origin))
@@ -66,6 +129,11 @@ int32 UVoxelConstructionSystem::StartBuildTaskFromBlocks(
             *BuildTag.ToString(),
             SID
         );
+        return -1;
+    }
+
+    if (!AreBlocksInsidePlayerClaimIfNeeded(SID, Blocks))
+    {
         return -1;
     }
 
@@ -210,6 +278,11 @@ int32 UVoxelConstructionSystem::StartCustomBuildTask3D(
             TEXT("[VoxelConstruction] Cannot start custom task for settlement %d: explicit block list conflicts with an active task"),
             SID
         );
+        return -1;
+    }
+
+    if (!AreBlocksInsidePlayerClaimIfNeeded(SID, Blocks))
+    {
         return -1;
     }
 

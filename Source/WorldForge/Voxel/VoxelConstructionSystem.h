@@ -88,6 +88,7 @@ private:
 
     bool HasConflictingTaskAtOrigin(int32 SettlementID, FIntPoint Origin) const;
     bool HasConflictingTaskInBlockList(int32 SettlementID, const TArray<FIntVector>& Blocks) const;
+    bool AreBlocksInsidePlayerClaimIfNeeded(int32 SettlementID, const TArray<FIntVector>& Blocks) const;
 
     FGameplayTag ResolveRequiredStockpileItem(FGameplayTag MaterialTag) const;
 

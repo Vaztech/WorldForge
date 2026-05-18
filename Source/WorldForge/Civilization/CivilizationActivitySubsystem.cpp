@@ -243,7 +243,7 @@ void UCivilizationActivitySubsystem::SeedNPCFarmZone(int32 SettlementID)
         NPCFarmSize,
         NPCFarmSize,
         ECropCategory::Grains,
-        FName(TEXT("Wheat")),
+        FName(TEXT("LP_Wheat")),
         true);
 
     if (ZoneID != INDEX_NONE)

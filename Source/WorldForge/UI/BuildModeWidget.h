@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Blueprint/UserWidget.h"
+#include "Components/Button.h"
 #include "GameplayTagContainer.h"
 #include "Player/BuildModeTypes.h"
 #include "Mining/MiningTypes.h"
@@ -10,6 +11,55 @@
 
 class UBuildModeManager;
 class UWorldForgeDataRegistry;
+class UWorldForgeBuildPrefabDataSubsystem;
+class UStaticMesh;
+class UCanvasPanel;
+class UHorizontalBox;
+class UScrollBox;
+class UTextBlock;
+class UVerticalBox;
+class UWidget;
+
+USTRUCT(BlueprintType)
+struct FBuildModeFarmSeedSummary
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly, Category = "WorldForge|BuildUI|Farming")
+	FName SeedID = NAME_None;
+
+	UPROPERTY(BlueprintReadOnly, Category = "WorldForge|BuildUI|Farming")
+	FText DisplayName;
+
+	UPROPERTY(BlueprintReadOnly, Category = "WorldForge|BuildUI|Farming")
+	int32 Quantity = 0;
+};
+
+enum class EBuildModeOptionButtonKind : uint8
+{
+	BuildPiece,
+	Prefab,
+	FarmSeed
+};
+
+class UBuildModeWidget;
+
+UCLASS()
+class WORLDFORGE_API UBuildModeOptionButton : public UButton
+{
+	GENERATED_BODY()
+
+public:
+	void InitializeOption(UBuildModeWidget* InOwner, EBuildModeOptionButtonKind InKind, FName InOptionID);
+
+private:
+	TWeakObjectPtr<UBuildModeWidget> OwnerWidget;
+	EBuildModeOptionButtonKind OptionKind = EBuildModeOptionButtonKind::Prefab;
+	FName OptionID = NAME_None;
+
+	UFUNCTION()
+	void HandleClicked();
+};
 
 UCLASS(BlueprintType, Blueprintable)
 class WORLDFORGE_API UBuildModeWidget : public UUserWidget
@@ -105,6 +155,72 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "WorldForge|BuildUI")
 	TArray<FGameplayTag> GetAvailableMaterialTags() const;
 
+	// DataTable-driven category summaries for read-only build menu display.
+	UFUNCTION(BlueprintCallable, Category = "WorldForge|BuildUI|Data")
+	TArray<FString> GetBuildDataCategorySummaries() const;
+
+	// DataTable-driven build piece summaries. Pass None to include every category.
+	UFUNCTION(BlueprintCallable, Category = "WorldForge|BuildUI|Data")
+	TArray<FString> GetBuildDataBuildPieceSummaries(FName Category) const;
+
+	// DataTable-driven prefab summaries. Pass None to include every category.
+	UFUNCTION(BlueprintCallable, Category = "WorldForge|BuildUI|Data")
+	TArray<FString> GetBuildDataPrefabSummaries(FName Category) const;
+
+	// Read-only seed summaries for the farm panel. SeedID is the crop row name used by farming.
+	UFUNCTION(BlueprintCallable, Category = "WorldForge|BuildUI|Farming")
+	TArray<FBuildModeFarmSeedSummary> GetAvailableFarmSeedSummaries() const;
+
+	// Selects a currently owned seed for the next farm zone without consuming inventory.
+	UFUNCTION(BlueprintCallable, Category = "WorldForge|BuildUI|Farming")
+	void SelectFarmSeedFromInventory(FName SeedID);
+
+	void HandleRuntimeOptionClicked(EBuildModeOptionButtonKind Kind, FName OptionID);
+
+	// Logs the current DataTable counts and a few sample rows from the build menu UI.
+	UFUNCTION(BlueprintCallable, Category = "WorldForge|BuildUI|Data")
+	void LogBuildPrefabDataTableSummary() const;
+
+	// Log-only selection handlers for future DataTable-driven UI buttons.
+	UFUNCTION(BlueprintCallable, Category = "WorldForge|BuildUI|Data")
+	void LogSelectedBuildPieceID(FName BuildID) const;
+
+	UFUNCTION(BlueprintCallable, Category = "WorldForge|BuildUI|Data")
+	void LogSelectedBuildPrefabID(FName PrefabID) const;
+
+	// Stores a validated DataTable build piece selection without entering placement mode.
+	UFUNCTION(BlueprintCallable, Category = "WorldForge|BuildUI|Data")
+	void SelectBuildPieceFromDataTable(FName BuildID);
+
+	// Stores a validated DataTable prefab selection without entering placement mode.
+	UFUNCTION(BlueprintCallable, Category = "WorldForge|BuildUI|Data")
+	void SelectBuildingPrefabFromDataTable(FName PrefabID);
+
+	// Clears any DataTable-driven build piece/prefab UI selection.
+	UFUNCTION(BlueprintCallable, Category = "WorldForge|BuildUI|Data")
+	void ClearDataTableBuildSelection();
+
+	UFUNCTION(BlueprintPure, Category = "WorldForge|BuildUI|Data")
+	FName GetSelectedBuildPieceID() const;
+
+	UFUNCTION(BlueprintPure, Category = "WorldForge|BuildUI|Data")
+	FName GetSelectedBuildingPrefabID() const;
+
+	UFUNCTION(BlueprintPure, Category = "WorldForge|BuildUI|Data")
+	bool HasSelectedBuildPiece() const;
+
+	UFUNCTION(BlueprintPure, Category = "WorldForge|BuildUI|Data")
+	bool HasSelectedBuildingPrefab() const;
+
+	UFUNCTION(BlueprintPure, Category = "WorldForge|BuildUI|Data")
+	bool GetSelectedBuildPiecePreviewMesh(UStaticMesh*& OutMesh) const;
+
+	UFUNCTION(BlueprintPure, Category = "WorldForge|BuildUI|Data")
+	bool GetSelectedBuildingPrefabPreviewMesh(UStaticMesh*& OutMesh) const;
+
+	UFUNCTION(BlueprintPure, Category = "WorldForge|BuildUI|Data")
+	bool GetSelectedBuildDataPreviewMesh(UStaticMesh*& OutMesh) const;
+
 	UFUNCTION(BlueprintPure, Category = "WorldForge|BuildUI")
 	FText GetBuildingDisplayName(FGameplayTag BuildingTag) const;
 
@@ -182,10 +298,180 @@ protected:
 
 private:
 
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<UCanvasPanel> CanvasPanel_0 = nullptr;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<UButton> HouseButton = nullptr;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<UButton> FreeBuildButton = nullptr;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<UButton> BTN_Dig = nullptr;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<UButton> BTN_Confirm = nullptr;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<UButton> BTN_Cancel = nullptr;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<UButton> BTN_ToggleGrid = nullptr;
+
+	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional, AllowPrivateAccess = "true"))
+	TObjectPtr<UTextBlock> TXT_Dig = nullptr;
+
+	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional, AllowPrivateAccess = "true"))
+	TObjectPtr<UTextBlock> TXT_Cancel = nullptr;
+
+	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional, AllowPrivateAccess = "true"))
+	TObjectPtr<UTextBlock> TXT_Mode = nullptr;
+
+	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional, AllowPrivateAccess = "true"))
+	TObjectPtr<UTextBlock> TXT_Building = nullptr;
+
+	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional, AllowPrivateAccess = "true"))
+	TObjectPtr<UTextBlock> TXT_Material = nullptr;
+
+	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional, AllowPrivateAccess = "true"))
+	TObjectPtr<UTextBlock> TXT_HoveredCell = nullptr;
+
+	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional, AllowPrivateAccess = "true"))
+	TObjectPtr<UTextBlock> TXT_CellCount = nullptr;
+
+	UPROPERTY(BlueprintReadOnly, meta = (BindWidgetOptional, AllowPrivateAccess = "true"))
+	TObjectPtr<UTextBlock> TXT_Status = nullptr;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<UWidget> CB_ModeSelect = nullptr;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<UWidget> SizeBox_0 = nullptr;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UHorizontalBox> BottomToolbar = nullptr;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UButton> BTN_Build = nullptr;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UButton> BTN_Mine = nullptr;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UButton> BTN_Farm = nullptr;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UButton> BTN_OpenPrefabs = nullptr;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UButton> BTN_OpenBuildPieces = nullptr;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UButton> BTN_OpenFreeBuild = nullptr;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UVerticalBox> Panel_BuildPopup = nullptr;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UVerticalBox> Panel_BuildPieceList = nullptr;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UScrollBox> ScrollBox_BuildPieceOptions = nullptr;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UVerticalBox> Panel_PrefabList = nullptr;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UScrollBox> ScrollBox_PrefabOptions = nullptr;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UVerticalBox> Panel_FarmSeeds = nullptr;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UTextBlock> Text_FarmSeedsHeader = nullptr;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UScrollBox> ScrollBox_SeedOptions = nullptr;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UTextBlock> Text_NoSeedsAvailable = nullptr;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UTextBlock> Text_StatusToast = nullptr;
+
+	UPROPERTY(Transient)
+	bool bRuntimeBuildModeLayoutCreated = false;
+
+	void BuildCompactRuntimeLayout();
+	void HideLegacyPlayerFacingWidgets();
+	void HideRuntimeWidget(UWidget* Widget) const;
+	UTextBlock* CreateRuntimeTextBlock(FName Name, const FText& Text, int32 FontSize);
+	UButton* CreateRuntimeTextButton(FName Name, const FText& Text, int32 FontSize);
+	void AddToolbarEntry(UWidget* Widget, const FVector2D& Size);
+	void AddSizedVerticalEntry(UVerticalBox* Parent, UWidget* Widget, const FVector2D& Size, const FMargin& Padding);
+	void CreateBuildPopup(UCanvasPanel* RootCanvas);
+	void CreateBuildPiecePanel(UCanvasPanel* RootCanvas);
+	void CreatePrefabPanel(UCanvasPanel* RootCanvas);
+	void CreateFarmSeedsPanel(UCanvasPanel* RootCanvas);
+	void CreateStatusToast(UCanvasPanel* RootCanvas);
+	void CollapseTransientPanels();
+	void ShowStatusToast(const FText& Message);
+	void RefreshBuildPieceList();
+	void RefreshPrefabList();
+	void RefreshFarmSeedPanel();
+	FName ParseBuildPieceIDFromSummary(const FString& Summary) const;
+	FName ParsePrefabIDFromSummary(const FString& Summary) const;
+	FText MakeFarmSeedDisplayName(FName SeedID) const;
+
+	UFUNCTION()
+	void HandleBuildClicked();
+
+	UFUNCTION()
+	void HandleOpenBuildPiecesClicked();
+
+	UFUNCTION()
+	void HandleOpenPrefabsClicked();
+
+	UFUNCTION()
+	void HandleOpenFreeBuildClicked();
+
+	UFUNCTION()
+	void HandleFarmClicked();
+
+	UFUNCTION()
+	void HandleDigChromeClicked();
+
+	UFUNCTION()
+	void HandleMineChromeClicked();
+
+	UFUNCTION()
+	void HandleConfirmChromeClicked();
+
+	UFUNCTION()
+	void HandleCancelChromeClicked();
+
+	UFUNCTION()
+	void HandleNativeBuildFeedbackMessage(const FString& Message);
+
 	UPROPERTY()
 	UBuildModeManager* CachedManager = nullptr;
+
+	UPROPERTY(Transient)
+	FName SelectedBuildPieceID = NAME_None;
+
+	UPROPERTY(Transient)
+	FName SelectedBuildingPrefabID = NAME_None;
+
+	UPROPERTY(Transient)
+	bool bHasSelectedBuildPiece = false;
+
+	UPROPERTY(Transient)
+	bool bHasSelectedBuildingPrefab = false;
 
 	UBuildModeManager* GetManager();
 
 	UWorldForgeDataRegistry* GetRegistry() const;
+
+	UWorldForgeBuildPrefabDataSubsystem* GetBuildDataSubsystem() const;
 };

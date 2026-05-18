@@ -409,6 +409,52 @@ void UGridSelectionSubsystem::CommitSelectedCellsToConfirmedOverlay(EGridDesigna
         SelectedCells.Num());
 }
 
+void UGridSelectionSubsystem::CommitFarmCellsToConfirmedOverlay(const TSet<FIntPoint>& FarmWorldCells)
+{
+    if (!GridOverlay)
+    {
+        UE_LOG(LogGridSelection, Warning,
+            TEXT("[GridOverlay] CommitFarmCellsToConfirmedOverlay: GridOverlay not available. Farm markers will not be visible."));
+        return;
+    }
+
+    if (FarmWorldCells.Num() == 0)
+    {
+        UE_LOG(LogGridSelection, Warning,
+            TEXT("[GridOverlay] CommitFarmCellsToConfirmedOverlay: FarmWorldCells is empty — nothing to confirm."));
+        return;
+    }
+
+    UVoxelWorldManager* VM = GetWorld() ? GetWorld()->GetSubsystem<UVoxelWorldManager>() : nullptr;
+    int32 AddedCount = 0;
+
+    for (const FIntPoint& WorldCell : FarmWorldCells)
+    {
+        int32 SurfaceZ = 0;
+        float TerrainZ = 0.0f;
+
+        if (VM)
+        {
+            VM->TryGetTerrainSurfaceVoxelZ(WorldCell, SurfaceZ);
+            const FVector WorldPos = VM->GridToWorld(WorldCell, SurfaceZ);
+            TerrainZ = WorldPos.Z;
+        }
+
+        const FIntVector VoxelCoord(WorldCell.X, WorldCell.Y, SurfaceZ);
+        GridOverlay->AddConfirmedDesignationCell(VoxelCoord, TerrainZ, EGridDesignationType::Farm);
+        ++AddedCount;
+    }
+
+    if (AddedCount > 0)
+    {
+        GridOverlay->ShowOverlay();
+    }
+
+    UE_LOG(LogGridSelection, Log,
+        TEXT("[GridOverlay] Confirmed farm markers visible. Count=%d"),
+        AddedCount);
+}
+
 void UGridSelectionSubsystem::SetMiningVolumePreviewCells(const TArray<FIntVector>& VoxelCoords)
 {
     if (GridOverlay)

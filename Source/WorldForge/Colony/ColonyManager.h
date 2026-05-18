@@ -50,6 +50,7 @@ private:
     void InitializeNavigation();
     void SetupAgents();
     void SetupInitialResources();
+    void ApplyEmbarkLoadoutSeeds();
     void StartSimulation();
 
     void BindDebugInput();
@@ -149,6 +150,11 @@ private:
 
     UPROPERTY(EditAnywhere, Category = "Colony|Setup")
     int32 SpawnSearchRadius = 16;
+
+    // Radius in strategic world-map tiles around the resolved starting colony center.
+    // 4 = 9x9 tiles, roughly 288m x 288m when world-map tiles are 32m.
+    UPROPERTY(EditAnywhere, Category = "Colony|Claims", meta = (ClampMin = "0", UIMin = "0"))
+    int32 InitialPlayerClaimRadius = 4;
 
     UPROPERTY(EditAnywhere, Category = "Colony|Camera")
     bool bPositionRTSCameraOnBootstrap = true;

@@ -6,11 +6,13 @@
 #include "VoxelConstructionSystem.h"
 #include "SettlementManager.h"
 #include "Engine/World.h"
+#include "Engine/StaticMeshActor.h"
 #include "GameFramework/PlayerController.h"
 #include "CollisionQueryParams.h"
 #include "EngineUtils.h"
 #include "GameFramework/Actor.h"
 #include "Components/PrimitiveComponent.h"
+#include "Components/StaticMeshComponent.h"
 #include "Player/DigGhostActor.h"
 #include "Player/MiningGhostActor.h"
 #include "Voxel/DigSubsystem.h"
@@ -18,9 +20,11 @@
 #include "Mining/MiningLayerRenderer.h"
 #include "Farming/FarmingSubsystem.h"
 #include "Farming/FarmingTypes.h"
+#include "Farming/WildHarvestAdapter.h"
 #include "Grid/GridSelectionSubsystem.h"
 #include "Grid/LayerViewSubsystem.h"
 #include "Grid/GridDesignationTypes.h"
+#include "WorldMapSubsystem.h"
 #include "Colony/WorldForgeColonist.h"
 #include "Actors/WorldResourceActor.h"
 
@@ -36,6 +40,34 @@ namespace
     {
         return Component && Component->ComponentHasTag(FName(TEXT("WorldForgePendingBlockGhost")));
     }
+
+    static FString GetCropDisplayName(FName CropRow)
+    {
+        FString Result = CropRow.ToString();
+        if (Result.StartsWith(TEXT("LP_")))
+        {
+            Result.RightChopInline(3);
+        }
+        return Result;
+    }
+    static bool IsCropRowKnownToWildHarvest(const UWildHarvestAdapter* Adapter, FName CropRow, bool& bOutWasValidated)
+    {
+        bOutWasValidated = false;
+
+        if (CropRow.IsNone())
+        {
+            return false;
+        }
+
+        if (!IsValid(Adapter) || !Adapter->GetCropDataTable())
+        {
+            return true;
+        }
+
+        bOutWasValidated = true;
+        return Adapter->GetAllCropRowNames().Contains(CropRow);
+    }
+
 
     static FIntVector GetFaceOffsetFromNormal(const FVector& InNormal)
     {
@@ -199,56 +231,63 @@ bool UBuildModeManager::IsBuildableTerrainType(EWorldForgeTerrainType TerrainTyp
     }
 }
 
-bool UBuildModeManager::IsBuildVoxelInsidePlayerClaim(const FIntVector& Voxel) const
+bool UBuildModeManager::IsVoxelCellInsidePlayerClaim(const FIntPoint& VoxelCell, const TCHAR* ToolLabel) const
 {
     const USettlementManager* SettlementManager = GetSettlementManager();
     if (!SettlementManager)
     {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[BuildMode] %s claim check failed: SettlementManager missing. CellXY=(%d,%d)"),
+            ToolLabel ? ToolLabel : TEXT("Tool"),
+            VoxelCell.X,
+            VoxelCell.Y);
         return false;
     }
 
-    // Patch 4D: building operates in voxel placement space; settlement claims are strategic
-    // world-map tiles. Patch 4C owns the voxel-to-world-tile conversion and claim lookup.
-    return SettlementManager->DoesPlayerSettlementClaimVoxelCell(FIntPoint(Voxel.X, Voxel.Y));
+    int32 WorldTileID = INDEX_NONE;
+    FIntPoint WorldTileXY(INDEX_NONE, INDEX_NONE);
+    int32 PlayerSettlementID = INDEX_NONE;
+    int32 ClaimedWorldTileCount = 0;
+    const bool bClaimed = SettlementManager->DoesPlayerSettlementClaimVoxelCellDetailed(
+        VoxelCell,
+        WorldTileID,
+        WorldTileXY,
+        PlayerSettlementID,
+        ClaimedWorldTileCount);
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[BuildMode] %s claim check: CellXY=(%d,%d) WorldTile=(%d,%d) WorldTileID=%d PlayerSettlementID=%d ClaimedTileCount=%d Claimed=%s"),
+        ToolLabel ? ToolLabel : TEXT("Tool"),
+        VoxelCell.X,
+        VoxelCell.Y,
+        WorldTileXY.X,
+        WorldTileXY.Y,
+        WorldTileID,
+        PlayerSettlementID,
+        ClaimedWorldTileCount,
+        bClaimed ? TEXT("true") : TEXT("false"));
+
+    return bClaimed;
+}
+
+bool UBuildModeManager::IsBuildVoxelInsidePlayerClaim(const FIntVector& Voxel) const
+{
+    return IsVoxelCellInsidePlayerClaim(FIntPoint(Voxel.X, Voxel.Y), TEXT("Build"));
 }
 
 bool UBuildModeManager::IsDigVoxelInsidePlayerClaim(const FIntVector& Voxel) const
 {
-    const USettlementManager* SettlementManager = GetSettlementManager();
-    if (!SettlementManager)
-    {
-        return false;
-    }
-
-    // Patch 4E: player dig commands operate in voxel space, while colony claims are
-    // strategic world-map tiles. Patch 4C converts voxel XY back to the claimed tile.
-    return SettlementManager->DoesPlayerSettlementClaimVoxelCell(FIntPoint(Voxel.X, Voxel.Y));
+    return IsVoxelCellInsidePlayerClaim(FIntPoint(Voxel.X, Voxel.Y), TEXT("Dig"));
 }
 
 bool UBuildModeManager::IsMineVoxelInsidePlayerClaim(const FIntVector& Voxel) const
 {
-    const USettlementManager* SettlementManager = GetSettlementManager();
-    if (!SettlementManager)
-    {
-        return false;
-    }
-
-    // Patch 4E: mine designations operate in voxel space, while colony claims are
-    // strategic world-map tiles. Patch 4C converts voxel XY back to the claimed tile.
-    return SettlementManager->DoesPlayerSettlementClaimVoxelCell(FIntPoint(Voxel.X, Voxel.Y));
+    return IsVoxelCellInsidePlayerClaim(FIntPoint(Voxel.X, Voxel.Y), TEXT("Mine"));
 }
 
 bool UBuildModeManager::IsFarmCellInsidePlayerClaim(const FIntPoint& WorldCell) const
 {
-    const USettlementManager* SettlementManager = GetSettlementManager();
-    if (!SettlementManager)
-    {
-        return false;
-    }
-
-    // Farm-painted cells are exact absolute grid/voxel XY cells. Patch 4C owns
-    // conversion from voxel XY back to the claimed strategic world-map tile.
-    return SettlementManager->DoesPlayerSettlementClaimVoxelCell(WorldCell);
+    return IsVoxelCellInsidePlayerClaim(WorldCell, TEXT("Farm"));
 }
 
 bool UBuildModeManager::ValidateGroundTerrainPlacement(const FIntVector& Voxel, FString& OutReason) const
@@ -549,6 +588,11 @@ void UBuildModeManager::EnterPrefabMode(FGameplayTag BuildingTag)
     ExitDigMode();
     CurrentToolMode = EBuildToolMode::Place;
 
+    bDataTablePreviewActive = false;
+    DataTablePreviewSourceID = NAME_None;
+    bDataTablePreviewIsPrefab = false;
+    DataTablePreviewMesh = nullptr;
+
     CurrentMode = EBuildMode::Prefab;
     SelectedBuildingTag = BuildingTag;
     SelectedMaterialTag = FGameplayTag::EmptyTag;
@@ -591,6 +635,11 @@ void UBuildModeManager::EnterCustomDrawMode(FGameplayTag MaterialTag)
 
     ExitDigMode();
     CurrentToolMode = EBuildToolMode::Place;
+
+    bDataTablePreviewActive = false;
+    DataTablePreviewSourceID = NAME_None;
+    bDataTablePreviewIsPrefab = false;
+    DataTablePreviewMesh = nullptr;
 
     CurrentMode = EBuildMode::CustomDraw;
     SelectedMaterialTag = MaterialTag;
@@ -646,6 +695,10 @@ void UBuildModeManager::ExitBuildMode()
     CurrentToolMode = EBuildToolMode::None;
     SelectedBuildingTag = FGameplayTag::EmptyTag;
     SelectedMaterialTag = FGameplayTag::EmptyTag;
+    bDataTablePreviewActive = false;
+    DataTablePreviewSourceID = NAME_None;
+    bDataTablePreviewIsPrefab = false;
+    DataTablePreviewMesh = nullptr;
     SelectedCells.Empty();
     SelectedCells3D.Empty();
     FarmPaintedWorldCells.Empty();
@@ -822,6 +875,12 @@ void UBuildModeManager::HandlePrimaryClick()
         return;
     }
 
+    if (bDataTablePreviewActive && CurrentMode == EBuildMode::Prefab && CurrentToolMode == EBuildToolMode::Place)
+    {
+        CommitDataTableBuildPiecePlacement();
+        return;
+    }
+
     bJustCommitted = false;
 
     UE_LOG(
@@ -973,6 +1032,27 @@ void UBuildModeManager::HandlePrimaryClick()
                     return;
                 }
             }
+        }
+
+        if (CurrentToolMode == EBuildToolMode::Farm && !IsFarmCellInsidePlayerClaim(FIntPoint(CurrentOverlayVoxel.X, CurrentOverlayVoxel.Y)))
+        {
+            UE_LOG(LogTemp, Warning,
+                TEXT("[BuildMode] Farm selection rejected: unclaimed land. FarmCell=(%d,%d)"),
+                CurrentOverlayVoxel.X,
+                CurrentOverlayVoxel.Y);
+            BroadcastFeedback(TEXT("Cannot farm here. This land is not claimed by your colony."));
+            return;
+        }
+
+        if (CurrentToolMode == EBuildToolMode::Place && !IsBuildVoxelInsidePlayerClaim(CurrentHoveredVoxel))
+        {
+            UE_LOG(LogTemp, Warning,
+                TEXT("[BuildMode] Build selection rejected: unclaimed land. Voxel=(%d,%d,%d)"),
+                CurrentHoveredVoxel.X,
+                CurrentHoveredVoxel.Y,
+                CurrentHoveredVoxel.Z);
+            BroadcastFeedback(TEXT("Cannot build here. This land is not claimed by your colony."));
+            return;
         }
 
         SelectedCells3D.Add(CurrentHoveredVoxel);
@@ -1142,6 +1222,20 @@ void UBuildModeManager::HandleConfirm()
         return;
     }
 
+    if (bDataTablePreviewActive && CurrentMode == EBuildMode::Prefab && CurrentToolMode == EBuildToolMode::Place)
+    {
+        if (CommitDataTableBuildPiecePlacement())
+        {
+            bJustCommitted = true;
+            bIsDraggingBuild = false;
+            LastPlacedDragVoxel = FIntVector(INT32_MIN);
+            bHasDragStart = false;
+            DragStartVoxel = FIntVector::ZeroValue;
+            bDragStartedFromBlock = false;
+        }
+        return;
+    }
+
     if (CurrentToolMode == EBuildToolMode::Mine)
     {
         if (CommitMineDesignations())
@@ -1181,15 +1275,24 @@ void UBuildModeManager::HandleConfirm()
 
         if (CommitFarmZone())
         {
+            UE_LOG(LogTemp, Log,
+                TEXT("[BuildMode] Farm zone committed. Confirming %d farm cells to overlay."),
+                FarmPaintedWorldCells.Num());
+
             if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
             {
-                GridSelection->CommitSelectedCellsToConfirmedOverlay(EGridDesignationType::Farm);
+                // Use FarmPaintedWorldCells as the authoritative source for confirmed markers.
+                // CommitSelectedCellsToConfirmedOverlay reads GridOverlay::SelectedCells which
+                // can be empty when selection went through the legacy paint path (bSelectionActive
+                // was false at click time). FarmPaintedWorldCells is always correct regardless
+                // of which selection path was used.
+                GridSelection->CommitFarmCellsToConfirmedOverlay(FarmPaintedWorldCells);
                 GridSelection->ClearPreviewCells();
                 GridSelection->ClearSelectedCells();
                 GridSelection->EndSelectionTool(false);
             }
 
-            bJustCommitted = true;
+            bJustCommitted = false;
             bIsDraggingBuild = false;
             LastPlacedDragVoxel = FIntVector(INT32_MIN);
             bHasDragStart = false;
@@ -1200,8 +1303,43 @@ void UBuildModeManager::HandleConfirm()
             SelectedCells3D.Empty();
             FarmPaintedWorldCells.Empty();
 
+            if (UPlayerBuildContext* Ctx = GetBuildContext())
+            {
+                Ctx->ClearSelection();
+            }
+
             OnCellCountChanged.Broadcast(0);
-            BroadcastFeedback(TEXT("Farm zone committed."));
+
+            if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
+            {
+                GridSelection->SetToggleSelectedCellsOnReselect(bToggleSelectedCellsOnReselect);
+                GridSelection->BeginSelectionTool(EBuildToolMode::Farm, EGridSelectionShape::Rectangle);
+                GridSelection->ClearSelectedCells();
+                GridSelection->ClearPreviewCells();
+                GridSelection->ClearMiningVolumePreviewCells();
+            }
+
+            UpdateGridOverlay();
+
+            // Re-check inventory after seed consumption and auto-select the next available seed.
+            // This prevents the next confirm from silently failing with a depleted crop.
+            const bool bHasSeedsRemaining = SelectNextAvailableFarmSeed(GetEffectiveSettlementID());
+
+            UE_LOG(LogTemp, Log,
+                TEXT("[BuildMode] Farm selection tool re-armed. SelectedFarmCropRow=%s HasSeeds=%s"),
+                SelectedFarmCropRow.IsNone() ? TEXT("None") : *SelectedFarmCropRow.ToString(),
+                bHasSeedsRemaining ? TEXT("true") : TEXT("false"));
+
+            if (bHasSeedsRemaining)
+            {
+                BroadcastFeedback(FString::Printf(
+                    TEXT("Farm zone committed. Next seed: %s."),
+                    *GetCropDisplayName(SelectedFarmCropRow)));
+            }
+            else
+            {
+                BroadcastFeedback(TEXT("Farm zone committed. No farm seeds remain."));
+            }
         }
 
         return;
@@ -1278,6 +1416,31 @@ void UBuildModeManager::HandleCancel()
     ExitBuildMode();
 }
 
+void UBuildModeManager::SetSelectedFarmCropSeed(FName CropRowName)
+{
+    if (CropRowName.IsNone())
+    {
+        ClearSelectedFarmCropSeed();
+        return;
+    }
+
+    SelectedFarmCropRow = CropRowName;
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[BuildMode] Selected farm crop seed: %s"),
+        *SelectedFarmCropRow.ToString());
+
+    BroadcastFeedback(FString::Printf(
+        TEXT("Farm seed selected: %s"),
+        *GetCropDisplayName(SelectedFarmCropRow)));
+}
+
+void UBuildModeManager::ClearSelectedFarmCropSeed()
+{
+    SelectedFarmCropRow = NAME_None;
+    UE_LOG(LogTemp, Log, TEXT("[BuildMode] Selected farm crop seed cleared."));
+}
+
 void UBuildModeManager::EnterFarmMode()
 {
     if (CurrentToolMode == EBuildToolMode::Farm)
@@ -1328,7 +1491,57 @@ void UBuildModeManager::EnterFarmMode()
         GridSelection->BeginSelectionTool(EBuildToolMode::Farm, EGridSelectionShape::Rectangle);
     }
 
-    UE_LOG(LogTemp, Log, TEXT("[BuildMode] Entered Farm mode."));
+    // Auto-select the first available seed if none is currently selected (or current selection is depleted).
+    if (SelectedFarmCropRow.IsNone())
+    {
+        if (const USettlementManager* SM = GetSettlementManager())
+        {
+            const int32 SID = GetEffectiveSettlementID();
+            const TArray<FName> SeedOrder = SM->GetStartingSeedInventoryOrder(SID);
+            for (const FName& CropRow : SeedOrder)
+            {
+                if (SM->GetStartingSeedInventoryAmount(SID, CropRow) > 0)
+                {
+                    SetSelectedFarmCropSeed(CropRow);
+                    UE_LOG(LogTemp, Log,
+                        TEXT("[BuildMode] Auto-selected farm seed on enter: %s (Settlement=%d)"),
+                        *CropRow.ToString(), SID);
+                    break;
+                }
+            }
+        }
+    }
+    else
+    {
+        // Verify the existing selection still has seeds available.
+        if (const USettlementManager* SM = GetSettlementManager())
+        {
+            const int32 SID = GetEffectiveSettlementID();
+            if (SM->GetStartingSeedInventoryAmount(SID, SelectedFarmCropRow) <= 0)
+            {
+                UE_LOG(LogTemp, Warning,
+                    TEXT("[BuildMode] Previously selected farm seed depleted: %s. Re-selecting."),
+                    *SelectedFarmCropRow.ToString());
+                ClearSelectedFarmCropSeed();
+
+                const TArray<FName> SeedOrder = SM->GetStartingSeedInventoryOrder(SID);
+                for (const FName& CropRow : SeedOrder)
+                {
+                    if (SM->GetStartingSeedInventoryAmount(SID, CropRow) > 0)
+                    {
+                        SetSelectedFarmCropSeed(CropRow);
+                        UE_LOG(LogTemp, Log,
+                            TEXT("[BuildMode] Auto-selected replacement farm seed: %s (Settlement=%d)"),
+                            *CropRow.ToString(), SID);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    UE_LOG(LogTemp, Log, TEXT("[BuildMode] Entered Farm mode. SelectedFarmCropRow=%s"),
+        SelectedFarmCropRow.IsNone() ? TEXT("None") : *SelectedFarmCropRow.ToString());
     OnBuildModeChanged.Broadcast(CurrentMode);
     OnCellCountChanged.Broadcast(0);
     BroadcastSelectionChanged();
@@ -2000,17 +2213,14 @@ void UBuildModeManager::UpdateFromMouse(APlayerController* PC)
         return;
     }
 
-    const FIntPoint TerrainCell = VM->WorldToTerrainCell(HitLocation);
-
     // True voxel-space coordinate for the visual grid overlay.
     CurrentOverlayVoxel = WorldToVoxel(HitLocation, 100.0f);
     CurrentHoveredTerrainZ = HitLocation.Z;
 
-    // Existing gameplay coordinate path.
-    // Keep this because farming/building currently depend on terrain-cell X/Y.
+    // Gameplay/tool coordinate path. Build, mine, dig, and farm claim checks all
+    // operate on exact voxel XY, then SettlementManager converts that voxel cell
+    // to the strategic world-map tile.
     FIntVector NewVoxel = VM->WorldToGrid3D(HitLocation);
-    NewVoxel.X = TerrainCell.X;
-    NewVoxel.Y = TerrainCell.Y;
 
     if (bHitPlacedBlock)
     {
@@ -2025,7 +2235,7 @@ void UBuildModeManager::UpdateFromMouse(APlayerController* PC)
 
             for (const FIntVector& Cell : SelectedCells3D)
             {
-                if (Cell.X == TerrainCell.X && Cell.Y == TerrainCell.Y)
+                if (Cell.X == NewVoxel.X && Cell.Y == NewVoxel.Y)
                 {
                     if (Cell.Z >= HighestZ)
                     {
@@ -2074,6 +2284,19 @@ void UBuildModeManager::UpdateFromMouse(APlayerController* PC)
 
             return;
         }
+    }
+
+    if (CurrentMode == EBuildMode::Prefab && CurrentToolMode == EBuildToolMode::Place && !IsBuildVoxelInsidePlayerClaim(NewVoxel))
+    {
+        bHoveredCellValid = false;
+
+        if (GhostActor)
+        {
+            GhostActor->SetGhostState(EBuildGhostState::Invalid);
+            UpdateGhost();
+        }
+
+        return;
     }
 
     LastValidVoxel = NewVoxel;
@@ -2229,16 +2452,39 @@ void UBuildModeManager::UpdateFromMouse(APlayerController* PC)
         }
     }
 
-    SelectedCells3D = LineCells3D;
-    SelectedCells = LineCells2D;
-
     if (CurrentToolMode == EBuildToolMode::Farm)
     {
+        SelectedCells3D.Empty();
+        SelectedCells.Empty();
         FarmPaintedWorldCells.Reset();
-        for (const FIntPoint& Cell : SelectedCells)
+
+        int32 SkippedUnclaimedPreviewCount = 0;
+        for (const FIntVector& Voxel : LineCells3D)
         {
-            FarmPaintedWorldCells.Add(Cell);
+            const FIntPoint FarmCell(Voxel.X, Voxel.Y);
+            if (!IsFarmCellInsidePlayerClaim(FarmCell))
+            {
+                ++SkippedUnclaimedPreviewCount;
+                continue;
+            }
+
+            SelectedCells3D.AddUnique(Voxel);
+            SelectedCells.AddUnique(FarmCell);
+            FarmPaintedWorldCells.Add(FarmCell);
         }
+
+        if (SkippedUnclaimedPreviewCount > 0)
+        {
+            UE_LOG(LogTemp, Warning,
+                TEXT("[BuildMode] Farm drag preview filtered unclaimed cells. ClaimedPreview=%d SkippedUnclaimed=%d"),
+                FarmPaintedWorldCells.Num(),
+                SkippedUnclaimedPreviewCount);
+        }
+    }
+    else
+    {
+        SelectedCells3D = LineCells3D;
+        SelectedCells = LineCells2D;
     }
 
     LastPlacedDragVoxel = CurrentHoveredVoxel;
@@ -2409,8 +2655,215 @@ bool UBuildModeManager::RaycastToTerrain(
     return false;
 }
 
+bool UBuildModeManager::CanPlaceDataTableBuildPiece(FString& OutFailureReason) const
+{
+    if (!bDataTablePreviewActive || CurrentMode != EBuildMode::Prefab || CurrentToolMode != EBuildToolMode::Place)
+    {
+        OutFailureReason = TEXT("DataTable preview mode is not active.");
+        return false;
+    }
+
+    if (bDataTablePreviewIsPrefab)
+    {
+        OutFailureReason = TEXT("DataTable prefab placement not implemented yet.");
+        return false;
+    }
+
+    if (DataTablePreviewSourceID.IsNone())
+    {
+        OutFailureReason = TEXT("DataTable build piece placement failed: missing source ID.");
+        return false;
+    }
+
+    if (!DataTablePreviewMesh)
+    {
+        OutFailureReason = TEXT("DataTable build piece placement failed: missing mesh.");
+        return false;
+    }
+
+    UWorld* World = GetWorld();
+    if (!World)
+    {
+        OutFailureReason = TEXT("DataTable build piece placement failed: world unavailable.");
+        return false;
+    }
+
+    if (!IsValid(GhostActor))
+    {
+        OutFailureReason = TEXT("DataTable build piece placement failed: missing ghost.");
+        return false;
+    }
+
+    if (!bHoveredCellValid)
+    {
+        OutFailureReason = TEXT("Hover a valid placement location first.");
+        return false;
+    }
+
+    FString TerrainFailure;
+    if (!ValidateGroundTerrainPlacement(CurrentHoveredVoxel, TerrainFailure))
+    {
+        OutFailureReason = TerrainFailure;
+        if (OutFailureReason.IsEmpty())
+        {
+            OutFailureReason = TEXT("DataTable build piece placement failed: invalid terrain.");
+        }
+        return false;
+    }
+
+    if (!IsBuildVoxelInsidePlayerClaim(CurrentHoveredVoxel))
+    {
+        OutFailureReason = TEXT("Cannot build here. This land is not claimed by your colony.");
+        UE_LOG(LogTemp, Warning,
+            TEXT("[BuildMode] DataTable BuildPiece placement blocked: unclaimed land. SourceID=%s Voxel=(%d,%d,%d)"),
+            *DataTablePreviewSourceID.ToString(),
+            CurrentHoveredVoxel.X,
+            CurrentHoveredVoxel.Y,
+            CurrentHoveredVoxel.Z);
+        return false;
+    }
+
+    const FTransform PlacementTransform = GhostActor->GetActorTransform();
+    if (PlacementTransform.ContainsNaN())
+    {
+        OutFailureReason = TEXT("DataTable build piece placement failed: invalid transform.");
+        return false;
+    }
+
+    if (PlacementTransform.GetScale3D().IsNearlyZero())
+    {
+        OutFailureReason = TEXT("DataTable build piece placement failed: invalid transform scale.");
+        return false;
+    }
+
+    OutFailureReason.Empty();
+    return true;
+}
+
+bool UBuildModeManager::CommitDataTableBuildPiecePlacement()
+{
+    FString FailureReason;
+    if (!CanPlaceDataTableBuildPiece(FailureReason))
+    {
+        if (FailureReason == TEXT("DataTable prefab placement not implemented yet."))
+        {
+            UE_LOG(LogTemp, Log,
+                TEXT("[BuildMode] DataTable prefab placement not implemented yet. SourceID=%s"),
+                *DataTablePreviewSourceID.ToString());
+        }
+        else
+        {
+            UE_LOG(LogTemp, Warning,
+                TEXT("[BuildMode] DataTable BuildPiece placement failed. SourceID=%s Reason=%s"),
+                *DataTablePreviewSourceID.ToString(),
+                *FailureReason);
+        }
+
+        if (FailureReason.IsEmpty())
+        {
+            FailureReason = TEXT("DataTable build piece placement failed.");
+        }
+
+        BroadcastFeedback(FailureReason);
+        return false;
+    }
+
+    UpdateGhost();
+
+    const FTransform PlacementTransform = GhostActor->GetActorTransform();
+    UWorld* World = GetWorld();
+    if (!World)
+    {
+        FailureReason = TEXT("DataTable build piece placement failed: world unavailable.");
+        UE_LOG(LogTemp, Warning,
+            TEXT("[BuildMode] DataTable BuildPiece placement failed. SourceID=%s Reason=%s"),
+            *DataTablePreviewSourceID.ToString(),
+            *FailureReason);
+        BroadcastFeedback(FailureReason);
+        return false;
+    }
+
+    if (PlacementTransform.ContainsNaN() || PlacementTransform.GetScale3D().IsNearlyZero())
+    {
+        FailureReason = TEXT("DataTable build piece placement failed: invalid transform.");
+        UE_LOG(LogTemp, Warning,
+            TEXT("[BuildMode] DataTable BuildPiece placement failed. SourceID=%s Reason=%s"),
+            *DataTablePreviewSourceID.ToString(),
+            *FailureReason);
+        BroadcastFeedback(FailureReason);
+        return false;
+    }
+
+    FActorSpawnParameters SpawnParams;
+    SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+    SpawnParams.Name = NAME_None;
+
+    AStaticMeshActor* PlacedActor = World->SpawnActor<AStaticMeshActor>(
+        AStaticMeshActor::StaticClass(),
+        PlacementTransform,
+        SpawnParams);
+
+    if (!PlacedActor)
+    {
+        FailureReason = TEXT("DataTable build piece placement failed: spawn failed.");
+        UE_LOG(LogTemp, Warning,
+            TEXT("[BuildMode] DataTable BuildPiece placement failed. SourceID=%s Reason=%s Mesh=%s Location=%s"),
+            *DataTablePreviewSourceID.ToString(),
+            *FailureReason,
+            *DataTablePreviewMesh->GetName(),
+            *PlacementTransform.GetLocation().ToString());
+        BroadcastFeedback(FailureReason);
+        return false;
+    }
+
+    UStaticMeshComponent* MeshComp = PlacedActor->GetStaticMeshComponent();
+    if (!MeshComp)
+    {
+        FailureReason = TEXT("DataTable build piece placement failed: mesh component missing.");
+        UE_LOG(LogTemp, Warning,
+            TEXT("[BuildMode] DataTable BuildPiece placement failed. SourceID=%s Reason=%s Actor=%s"),
+            *DataTablePreviewSourceID.ToString(),
+            *FailureReason,
+            *PlacedActor->GetName());
+        PlacedActor->Destroy();
+        BroadcastFeedback(FailureReason);
+        return false;
+    }
+
+    MeshComp->SetMobility(EComponentMobility::Movable);
+    MeshComp->SetStaticMesh(DataTablePreviewMesh);
+    MeshComp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+    MeshComp->SetCollisionResponseToAllChannels(ECR_Ignore);
+    MeshComp->SetGenerateOverlapEvents(false);
+    MeshComp->SetCastShadow(true);
+
+    PlacedActor->SetActorTransform(PlacementTransform);
+    PlacedActor->SetActorEnableCollision(false);
+    PlacedActor->Tags.AddUnique(FName(TEXT("WorldForgeDataTableBuildPiece")));
+    PlacedActor->Tags.AddUnique(DataTablePreviewSourceID);
+
+#if WITH_EDITOR
+    PlacedActor->SetActorLabel(FString::Printf(TEXT("DT_BuildPiece_%s"), *DataTablePreviewSourceID.ToString()));
+#endif
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[BuildMode] DataTable BuildPiece placement succeeded. SourceID=%s Mesh=%s Location=%s Rotation=%s"),
+        *DataTablePreviewSourceID.ToString(),
+        *DataTablePreviewMesh->GetName(),
+        *PlacementTransform.GetLocation().ToString(),
+        *PlacementTransform.Rotator().ToString());
+    BroadcastFeedback(FString::Printf(TEXT("Placed build piece: %s"), *DataTablePreviewSourceID.ToString()));
+
+    return true;
+}
+
 bool UBuildModeManager::CommitPrefabBuild()
 {
+    if (bDataTablePreviewActive && CurrentMode == EBuildMode::Prefab && CurrentToolMode == EBuildToolMode::Place)
+    {
+        return CommitDataTableBuildPiecePlacement();
+    }
+
     const int32 EffectiveSettlementID = GetEffectiveSettlementID();
 
     if (!bHoveredCellValid || EffectiveSettlementID < 0)
@@ -2464,6 +2917,37 @@ bool UBuildModeManager::CommitPrefabBuild()
 
     BroadcastFeedback(Ctx->GetLastCommitResultMessage());
     return bSuccess;
+}
+
+bool UBuildModeManager::SelectNextAvailableFarmSeed(int32 SettlementID)
+{
+    USettlementManager* SM = GetSettlementManager();
+    if (!SM)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[BuildMode] SelectNextAvailableFarmSeed: SettlementManager unavailable."));
+        SelectedFarmCropRow = NAME_None;
+        return false;
+    }
+
+    const TArray<FName> SeedOrder = SM->GetStartingSeedInventoryOrder(SettlementID);
+    for (const FName& CropRow : SeedOrder)
+    {
+        const int32 Qty = SM->GetStartingSeedInventoryAmount(SettlementID, CropRow);
+        if (Qty > 0)
+        {
+            SelectedFarmCropRow = CropRow;
+            UE_LOG(LogTemp, Log,
+                TEXT("[BuildMode] SelectNextAvailableFarmSeed: auto-selected CropRow=%s Qty=%d Settlement=%d"),
+                *CropRow.ToString(), Qty, SettlementID);
+            return true;
+        }
+    }
+
+    SelectedFarmCropRow = NAME_None;
+    UE_LOG(LogTemp, Warning,
+        TEXT("[BuildMode] SelectNextAvailableFarmSeed: no seeds available. Settlement=%d"),
+        SettlementID);
+    return false;
 }
 
 bool UBuildModeManager::CommitFarmZone()
@@ -2521,7 +3005,29 @@ bool UBuildModeManager::CommitFarmZone()
     int32 SkippedUnclaimedCount = 0;
     for (const FIntPoint& WorldCell : RequestedWorldCells)
     {
-        if (IsFarmCellInsidePlayerClaim(WorldCell))
+        int32 WorldTileID = INDEX_NONE;
+        FIntPoint WorldTileXY(INDEX_NONE, INDEX_NONE);
+        int32 PlayerSettlementID = INDEX_NONE;
+        int32 ClaimedWorldTileCount = 0;
+        const bool bClaimed = SettlementManager->DoesPlayerSettlementClaimVoxelCellDetailed(
+            WorldCell,
+            WorldTileID,
+            WorldTileXY,
+            PlayerSettlementID,
+            ClaimedWorldTileCount);
+
+        UE_LOG(LogTemp, Log,
+            TEXT("[BuildMode] Farm claim check: FarmCell=(%d,%d) WorldTile=(%d,%d) WorldTileID=%d SettlementID=%d ClaimedTileCount=%d Claimed=%s"),
+            WorldCell.X,
+            WorldCell.Y,
+            WorldTileXY.X,
+            WorldTileXY.Y,
+            WorldTileID,
+            PlayerSettlementID,
+            ClaimedWorldTileCount,
+            bClaimed ? TEXT("true") : TEXT("false"));
+
+        if (bClaimed)
         {
             ClaimedWorldCells.Add(WorldCell);
             continue;
@@ -2529,16 +3035,21 @@ bool UBuildModeManager::CommitFarmZone()
 
         ++SkippedUnclaimedCount;
         UE_LOG(LogTemp, Warning,
-            TEXT("[BuildMode] Farm cell skipped: unclaimed land. WorldCell=(%d,%d)"),
+            TEXT("[BuildMode] Farm cell skipped: unclaimed land. FarmCell=(%d,%d) WorldTile=(%d,%d) WorldTileID=%d SettlementID=%d ClaimedTileCount=%d"),
             WorldCell.X,
-            WorldCell.Y);
+            WorldCell.Y,
+            WorldTileXY.X,
+            WorldTileXY.Y,
+            WorldTileID,
+            PlayerSettlementID,
+            ClaimedWorldTileCount);
     }
 
     if (ClaimedWorldCells.Num() == 0)
     {
         UE_LOG(LogTemp, Warning,
             TEXT("[BuildMode] Farm zone blocked: no selected cells inside claimed land."));
-        BroadcastFeedback(TEXT("Cannot farm here. This land is not claimed by your colony."));
+        BroadcastFeedback(TEXT("Cannot farm here. Selected tiles are outside claimed territory."));
         return false;
     }
 
@@ -2615,8 +3126,152 @@ bool UBuildModeManager::CommitFarmZone()
         return false;
     }
 
-    const ECropCategory Category = ECropCategory::Grains;
-    const FName CropRow = FName(TEXT("LP_Wheat"));
+    ECropCategory Category = ECropCategory::Grains;
+    FName CropRow = NAME_None;
+    const int32 RequestedTileCount = UniqueLocalCells.Num();
+    // 1 seed per farm tile: each crop plot costs exactly 1 seed to designate.
+    const int32 RequiredSeedCount = RequestedTileCount;
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[BuildMode] CommitFarmZone pre-check: RawTiles=%d ClaimedTiles=%d SelectedFarmCropRow=%s RequiredSeeds=%d SettlementID=%d"),
+        RequestedWorldCells.Num(),
+        ClaimedWorldCells.Num(),
+        SelectedFarmCropRow.IsNone() ? TEXT("None") : *SelectedFarmCropRow.ToString(),
+        RequiredSeedCount,
+        SettlementID);
+
+    if (!SelectedFarmCropRow.IsNone())
+    {
+        bool bWasCropRowValidated = false;
+        const UWildHarvestAdapter* WildHarvestAdapter = GetWorld()
+            ? GetWorld()->GetSubsystem<UWildHarvestAdapter>()
+            : nullptr;
+
+        if (!IsCropRowKnownToWildHarvest(WildHarvestAdapter, SelectedFarmCropRow, bWasCropRowValidated))
+        {
+            UE_LOG(LogTemp, Warning,
+                TEXT("[BuildMode] CommitFarmZone blocked: selected crop row invalid or missing. SelectedFarmCropRow=%s Validated=%s Settlement=%d"),
+                *SelectedFarmCropRow.ToString(),
+                bWasCropRowValidated ? TEXT("true") : TEXT("false"),
+                SettlementID);
+            BroadcastFeedback(FString::Printf(
+                TEXT("Selected %s seed cannot be planted. Select another seed."),
+                *GetCropDisplayName(SelectedFarmCropRow)));
+            return false;
+        }
+
+        const int32 SelectedSeedQuantity = SettlementManager->GetStartingSeedInventoryAmount(SettlementID, SelectedFarmCropRow);
+
+        UE_LOG(LogTemp, Log,
+            TEXT("[BuildMode] Selected seed inventory check: CropRow=%s Available=%d RequiredSeeds=%d TileCount=%d"),
+            *SelectedFarmCropRow.ToString(),
+            SelectedSeedQuantity,
+            RequiredSeedCount,
+            RequestedTileCount);
+
+        if (SelectedSeedQuantity >= RequiredSeedCount)
+        {
+            CropRow = SelectedFarmCropRow;
+            Category = FarmingSub->ResolveCategoryForCropRow(CropRow);
+
+            UE_LOG(LogTemp, Log,
+                TEXT("[BuildMode] Using selected farm crop seed for zone: CropRow=%s Available=%d RequiredSeeds=%d TileCount=%d Category=%d"),
+                *CropRow.ToString(),
+                SelectedSeedQuantity,
+                RequiredSeedCount,
+                RequestedTileCount,
+                static_cast<int32>(Category));
+        }
+        else
+        {
+            UE_LOG(LogTemp, Warning,
+                TEXT("[BuildMode] Selected farm crop seed insufficient at commit: CropRow=%s Settlement=%d Available=%d RequiredSeeds=%d TileCount=%d"),
+                *SelectedFarmCropRow.ToString(),
+                SettlementID,
+                SelectedSeedQuantity,
+                RequiredSeedCount,
+                RequestedTileCount);
+            BroadcastFeedback(FString::Printf(
+                TEXT("Creating this farm zone needs %d %s seed(s). Available: %d."),
+                RequiredSeedCount,
+                *GetCropDisplayName(SelectedFarmCropRow),
+                SelectedSeedQuantity));
+            return false;
+        }
+    }
+
+    if (CropRow.IsNone())
+    {
+        CropRow = FarmingSub->ResolveDefaultPlayerFarmCropRow(SettlementID, Category);
+
+        if (CropRow.IsNone())
+        {
+            UE_LOG(LogTemp, Warning,
+                TEXT("[BuildMode] CommitFarmZone blocked: no crop row resolved and no player seed selection. Settlement=%d TileCount=%d RequiredSeeds=%d"),
+                SettlementID,
+                RequestedTileCount,
+                RequiredSeedCount);
+            BroadcastFeedback(TEXT("No seeds available. Select a seed before creating a farm zone."));
+            return false;
+        }
+
+        bool bWasDefaultCropRowValidated = false;
+        const UWildHarvestAdapter* WildHarvestAdapter = GetWorld()
+            ? GetWorld()->GetSubsystem<UWildHarvestAdapter>()
+            : nullptr;
+
+        if (!IsCropRowKnownToWildHarvest(WildHarvestAdapter, CropRow, bWasDefaultCropRowValidated))
+        {
+            UE_LOG(LogTemp, Warning,
+                TEXT("[BuildMode] CommitFarmZone blocked: default crop row invalid or missing. CropRow=%s Validated=%s Settlement=%d TileCount=%d RequiredSeeds=%d"),
+                *CropRow.ToString(),
+                bWasDefaultCropRowValidated ? TEXT("true") : TEXT("false"),
+                SettlementID,
+                RequestedTileCount,
+                RequiredSeedCount);
+            BroadcastFeedback(TEXT("Default farm crop is unavailable. Select a seed before creating a farm zone."));
+            return false;
+        }
+
+        const int32 DefaultSeedQuantity = SettlementManager->GetStartingSeedInventoryAmount(SettlementID, CropRow);
+        UE_LOG(LogTemp, Log,
+            TEXT("[BuildMode] Using default crop: CropRow=%s Available=%d RequiredSeeds=%d TileCount=%d"),
+            *CropRow.ToString(),
+            DefaultSeedQuantity,
+            RequiredSeedCount,
+            RequestedTileCount);
+
+        if (DefaultSeedQuantity < RequiredSeedCount)
+        {
+            UE_LOG(LogTemp, Warning,
+                TEXT("[BuildMode] Default farm crop seed insufficient at commit: CropRow=%s Settlement=%d Available=%d RequiredSeeds=%d TileCount=%d"),
+                *CropRow.ToString(),
+                SettlementID,
+                DefaultSeedQuantity,
+                RequiredSeedCount,
+                RequestedTileCount);
+            BroadcastFeedback(FString::Printf(
+                TEXT("Creating this farm zone needs %d %s seed(s). Available: %d."),
+                RequiredSeedCount,
+                *GetCropDisplayName(CropRow),
+                DefaultSeedQuantity));
+            return false;
+        }
+    }
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[BuildMode] CommitFarmZone final crop: CropRow=%s Category=%d TileCount=%d RequiredSeeds=%d"),
+        *CropRow.ToString(),
+        static_cast<int32>(Category),
+        RequestedTileCount,
+        RequiredSeedCount);
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[BuildMode] Calling CreateFarmZoneFromCells: CropRow=%s Category=%d TileCount=%d Settlement=%d"),
+        *CropRow.ToString(),
+        static_cast<int32>(Category),
+        UniqueLocalCells.Num(),
+        SettlementID);
 
     const int32 ZoneID = FarmingSub->CreateFarmZoneFromCells(
         SettlementID,
@@ -2630,6 +3285,50 @@ bool UBuildModeManager::CommitFarmZone()
     {
         BroadcastFeedback(TEXT("Farm zone creation failed."));
         return false;
+    }
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[BuildMode] Created farm zone ZoneID=%d CropRow=%s TileCount=%d RequiredSeeds=%d"),
+        ZoneID,
+        *CropRow.ToString(),
+        RequestedTileCount,
+        RequiredSeedCount);
+
+    // Consume seeds from TemporarySeedInventories now that the zone is confirmed.
+    {
+        const int32 SeedsBefore = SettlementManager->GetStartingSeedInventoryAmount(SettlementID, CropRow);
+        const bool bConsumed = SettlementManager->ConsumeStartingSeedInventory(SettlementID, CropRow, RequiredSeedCount);
+        const int32 SeedsAfter = SettlementManager->GetStartingSeedInventoryAmount(SettlementID, CropRow);
+
+        UE_LOG(LogTemp, Log,
+            TEXT("[BuildMode] Farm seed consumption: ZoneID=%d CropRow=%s TileCount=%d SeedsBefore=%d Consuming=%d SeedsAfter=%d Success=%s"),
+            ZoneID,
+            *CropRow.ToString(),
+            RequestedTileCount,
+            SeedsBefore,
+            RequiredSeedCount,
+            SeedsAfter,
+            bConsumed ? TEXT("true") : TEXT("false"));
+
+        if (bConsumed)
+        {
+            UE_LOG(LogTemp, Log,
+                TEXT("[BuildMode] Consumed %d %s seed(s). ZoneID=%d CropRow=%s TileCount=%d"),
+                RequiredSeedCount,
+                *GetCropDisplayName(CropRow),
+                ZoneID,
+                *CropRow.ToString(),
+                RequestedTileCount);
+        }
+        else
+        {
+            UE_LOG(LogTemp, Error,
+                TEXT("[BuildMode] Farm zone created but seed consumption failed. ZoneID=%d CropRow=%s TileCount=%d RequiredSeeds=%d"),
+                ZoneID,
+                *CropRow.ToString(),
+                RequestedTileCount,
+                RequiredSeedCount);
+        }
     }
 
     int32 MinX = TNumericLimits<int32>::Max();
@@ -2646,7 +3345,7 @@ bool UBuildModeManager::CommitFarmZone()
     }
 
     UE_LOG(LogTemp, Log,
-        TEXT("[BuildMode] Exact farm zone committed. ZoneID=%d ExactCells=%d Requested=%d SkippedUnclaimed=%d BoundsLocal=(%d,%d)->(%d,%d) FarmGridOrigin=(%d,%d) Crop=%s Settlement=%d"),
+        TEXT("[BuildMode] Exact farm zone committed. ZoneID=%d ExactCells=%d RawRequested=%d SkippedUnclaimed=%d BoundsLocal=(%d,%d)->(%d,%d) FarmGridOrigin=(%d,%d) Crop=%s SeedsConsumed=%d Settlement=%d"),
         ZoneID,
         UniqueLocalCells.Num(),
         RequestedWorldCells.Num(),
@@ -2658,6 +3357,7 @@ bool UBuildModeManager::CommitFarmZone()
         FarmGridOrigin.X,
         FarmGridOrigin.Y,
         *CropRow.ToString(),
+        RequiredSeedCount,
         SettlementID);
 
     // Do not clear BuildMode/GridSelection state here. HandleConfirm() must first
@@ -2665,8 +3365,10 @@ bool UBuildModeManager::CommitFarmZone()
     // Cleanup happens in HandleConfirm after CommitSelectedCellsToConfirmedOverlay().
 
     BroadcastFeedback(FString::Printf(
-        TEXT("Farm zone created: %d exact tile(s) wheat field. Auto-replant: OFF."),
-        UniqueLocalCells.Num()));
+        TEXT("Farm zone created: %d tile(s) planted with %s (%d seed(s) used)."),
+        UniqueLocalCells.Num(),
+        *GetCropDisplayName(CropRow),
+        RequiredSeedCount));
 
     return true;
 }
@@ -2780,6 +3482,47 @@ void UBuildModeManager::UpdateGhost()
     UVoxelWorldManager* VM = GetVoxelManager();
     if (!VM)
     {
+        return;
+    }
+
+    if (bDataTablePreviewActive && CurrentMode == EBuildMode::Prefab && CurrentToolMode == EBuildToolMode::Place)
+    {
+        const FVector PreviewWorldPos = VM->GridToWorld(
+            FIntPoint(CurrentHoveredVoxel.X, CurrentHoveredVoxel.Y),
+            CurrentHoveredVoxel.Z
+        );
+
+        // Position GhostMesh (the actual preview mesh) directly at the hover voxel.
+        // Clear any stale cell-pool highlights left over from other modes.
+        GhostActor->ClearAllHighlights();
+        GhostActor->SetActorLocation(PreviewWorldPos);
+        GhostActor->SetGhostState(bHoveredCellValid ? EBuildGhostState::Valid : EBuildGhostState::Invalid);
+
+        // Force the GhostMesh visible for DataTable preview mode.
+        // ClearAllHighlights() hides GhostMesh and SetGhostState() only sets color,
+        // so without this the preview mesh stays invisible.
+        GhostActor->SetPreviewMeshVisible(true);
+
+        static double LastDataTablePreviewGhostLogTime = -1000.0;
+        if (UWorld* World = GetWorld())
+        {
+            const double Now = World->GetTimeSeconds();
+            if (Now - LastDataTablePreviewGhostLogTime >= 1.0)
+            {
+                LastDataTablePreviewGhostLogTime = Now;
+                UE_LOG(LogTemp, Log,
+                    TEXT("[BuildMode] DataTable preview ghost update: SourceID=%s Mesh=%s GhostActor=%s HoverValid=%s Voxel=(%d,%d,%d) WorldLocation=%s"),
+                    *DataTablePreviewSourceID.ToString(),
+                    DataTablePreviewMesh ? *DataTablePreviewMesh->GetPathName() : TEXT("None"),
+                    GhostActor ? TEXT("valid") : TEXT("invalid"),
+                    bHoveredCellValid ? TEXT("true") : TEXT("false"),
+                    CurrentHoveredVoxel.X,
+                    CurrentHoveredVoxel.Y,
+                    CurrentHoveredVoxel.Z,
+                    *PreviewWorldPos.ToString());
+                GhostActor->LogPreviewDiagnostics(TEXT("UpdateGhost DataTablePreview"));
+            }
+        }
         return;
     }
 
@@ -3521,19 +4264,11 @@ void UBuildModeManager::SyncSelectionFromGridSelection()
     }
 
     UVoxelWorldManager* VM = GetVoxelManager();
+    TSet<FIntVector> FarmClaimedSelectionVoxels;
+    int32 FarmUnclaimedPreviewCount = 0;
 
     for (const FGridSelectionCell& GridCell : GridCells)
     {
-        if (CurrentToolMode == EBuildToolMode::Mine && GetMiningHeightMode() == EWFMiningHeightMode::TwoVoxelColumn)
-        {
-            SelectedCells3D.AddUnique(GridCell.VoxelCoord);
-            SelectedCells3D.AddUnique(FIntVector(GridCell.VoxelCoord.X, GridCell.VoxelCoord.Y, GridCell.VoxelCoord.Z - 1));
-        }
-        else
-        {
-            SelectedCells3D.AddUnique(GridCell.VoxelCoord);
-        }
-
         FIntPoint ToolCell = FIntPoint::ZeroValue;
 
         if (CurrentToolMode == EBuildToolMode::Farm)
@@ -3548,7 +4283,15 @@ void UBuildModeManager::SyncSelectionFromGridSelection()
             //   3 clicks      = 3 farm cells
             //   2x5 drag      = 10 farm cells
             ToolCell = FIntPoint(GridCell.VoxelCoord.X, GridCell.VoxelCoord.Y);
+
+            if (!IsFarmCellInsidePlayerClaim(ToolCell))
+            {
+                ++FarmUnclaimedPreviewCount;
+                continue;
+            }
+
             FarmPaintedWorldCells.Add(ToolCell);
+            FarmClaimedSelectionVoxels.Add(GridCell.VoxelCoord);
         }
         else
         {
@@ -3567,12 +4310,32 @@ void UBuildModeManager::SyncSelectionFromGridSelection()
             }
         }
 
+        if (CurrentToolMode == EBuildToolMode::Mine && GetMiningHeightMode() == EWFMiningHeightMode::TwoVoxelColumn)
+        {
+            SelectedCells3D.AddUnique(GridCell.VoxelCoord);
+            SelectedCells3D.AddUnique(FIntVector(GridCell.VoxelCoord.X, GridCell.VoxelCoord.Y, GridCell.VoxelCoord.Z - 1));
+        }
+        else
+        {
+            SelectedCells3D.AddUnique(GridCell.VoxelCoord);
+        }
+
         SelectedCells.AddUnique(ToolCell);
 
         if (Ctx)
         {
             Ctx->AddCell(ToolCell);
         }
+    }
+
+    if (CurrentToolMode == EBuildToolMode::Farm && FarmUnclaimedPreviewCount > 0)
+    {
+        GridSelection->RetainSelectedCells(FarmClaimedSelectionVoxels);
+
+        UE_LOG(LogTemp, Warning,
+            TEXT("[BuildMode] Farm preview filtered unclaimed cells. ClaimedPreview=%d SkippedUnclaimed=%d"),
+            FarmClaimedSelectionVoxels.Num(),
+            FarmUnclaimedPreviewCount);
     }
 
     const int32 Count = CurrentToolMode == EBuildToolMode::Farm
@@ -3646,8 +4409,22 @@ void UBuildModeManager::AddOrToggleCurrentTileSelection(bool bToggleExisting)
 
     const bool bAlreadySelected2D = SelectedCells.Contains(CurrentHoveredCell);
     const bool bAlreadySelected3D = SelectedCells3D.Contains(CurrentHoveredVoxel);
+    const bool bWillRemoveExisting =
+        bToggleExisting &&
+        bToggleSelectedCellsOnReselect &&
+        (bAlreadySelected2D || bAlreadySelected3D);
 
-    if (bToggleExisting && bToggleSelectedCellsOnReselect && (bAlreadySelected2D || bAlreadySelected3D))
+    if (CurrentToolMode == EBuildToolMode::Farm && !bWillRemoveExisting && !IsFarmCellInsidePlayerClaim(CurrentHoveredCell))
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[BuildMode] Farm selection rejected: unclaimed land. FarmCell=(%d,%d)"),
+            CurrentHoveredCell.X,
+            CurrentHoveredCell.Y);
+        BroadcastFeedback(TEXT("Cannot farm here. This land is not claimed by your colony."));
+        return;
+    }
+
+    if (bWillRemoveExisting)
     {
         SelectedCells.Remove(CurrentHoveredCell);
         SelectedCells3D.Remove(CurrentHoveredVoxel);

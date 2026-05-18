@@ -158,16 +158,29 @@ bool UMiningSubsystem::CreateMiningDesignation(
 		if (const USettlementManager* SettlementManager = World->GetSubsystem<USettlementManager>())
 		{
 			const int32 PlayerSettlementID = SettlementManager->GetPlayerSettlementID();
+			int32 WorldTileID = INDEX_NONE;
+			FIntPoint WorldTileXY(INDEX_NONE, INDEX_NONE);
+			int32 ResolvedPlayerSettlementID = INDEX_NONE;
+			int32 ClaimedWorldTileCount = 0;
 			if (PlayerSettlementID != INDEX_NONE &&
 				SettlementID == PlayerSettlementID &&
-				!SettlementManager->DoesPlayerSettlementClaimVoxelCell(FIntPoint(ResolvedGridPosition.X, ResolvedGridPosition.Y)))
+				!SettlementManager->DoesPlayerSettlementClaimVoxelCellDetailed(
+					FIntPoint(ResolvedGridPosition.X, ResolvedGridPosition.Y),
+					WorldTileID,
+					WorldTileXY,
+					ResolvedPlayerSettlementID,
+					ClaimedWorldTileCount))
 			{
 				UE_LOG(LogTemp, Warning,
-					TEXT("[MiningSubsystem] CreateMiningDesignation blocked: unclaimed land. Settlement=%d Voxel=(%d,%d,%d)"),
+					TEXT("[MiningSubsystem] CreateMiningDesignation blocked: unclaimed land. Settlement=%d Voxel=(%d,%d,%d) WorldTile=(%d,%d) WorldTileID=%d ClaimedTileCount=%d"),
 					SettlementID,
 					ResolvedGridPosition.X,
 					ResolvedGridPosition.Y,
-					ResolvedGridPosition.Z);
+					ResolvedGridPosition.Z,
+					WorldTileXY.X,
+					WorldTileXY.Y,
+					WorldTileID,
+					ClaimedWorldTileCount);
 				return false;
 			}
 		}

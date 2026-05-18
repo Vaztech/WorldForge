@@ -953,6 +953,15 @@ void ATileGridOverlayActor::AddConfirmedVisualInstance(const FGridDesignationCel
 	ConfirmedTileMeshHISM->SetCustomDataValue(TileIdx, 4, Style.BorderColor.A, true);
 	ConfirmedTileInstances.Add(CellVisual.VoxelCoord, TileIdx);
 
+	if (CellVisual.DesignationType == EGridDesignationType::Farm)
+	{
+		UE_LOG(LogGridOverlay, Log,
+			TEXT("[GridOverlay] Farm confirmed marker added. Cell=(%d,%d,%d) TileColor.A=%.2f HasIcon=%s"),
+			CellVisual.VoxelCoord.X, CellVisual.VoxelCoord.Y, CellVisual.VoxelCoord.Z,
+			Style.TileColor.A,
+			(Style.IconTexture != nullptr) ? TEXT("yes") : TEXT("no"));
+	}
+
 	if (Style.IconTexture && IconMaterialBase)
 	{
 		if (UHierarchicalInstancedStaticMeshComponent* IconHISM = GetOrCreateIconHISM(CellVisual.DesignationType, Style))
@@ -1801,6 +1810,11 @@ void ATileGridOverlayActor::LoadDesignationStylesFromDataTable()
 			TEXT("Loaded %d grid designation styles from DataTable %s"),
 			Rows.Num(),
 			*DesignationStyleTable->GetName());
+
+		const bool bFarmStyleFound = RegisteredStyles.Contains(EBuildToolMode::Farm);
+		UE_LOG(LogGridOverlay, Log,
+			TEXT("[GridOverlay] Farm designation style loaded: %s"),
+			bFarmStyleFound ? TEXT("OK") : TEXT("NULL — using hardcoded fallback green"));
 	}
 }
 

@@ -118,6 +118,9 @@ protected:
     UPROPERTY(meta = (BindWidgetOptional), BlueprintReadOnly)
     UButton* BTN_MapKey = nullptr;
 
+    UPROPERTY(meta = (BindWidgetOptional), BlueprintReadOnly)
+    UButton* BTN_DebugClaimTile = nullptr;
+
     // ------------------------------------------------------------------
     // Panels toggled by the bottom-bar buttons above.
     //
@@ -165,6 +168,9 @@ protected:
 
     UPROPERTY(meta = (BindWidgetOptional), BlueprintReadOnly)
     UTextBlock* TXT_MapKeyLabel = nullptr;
+
+    UPROPERTY(meta = (BindWidgetOptional), BlueprintReadOnly)
+    UTextBlock* TXT_DebugClaimTileLabel = nullptr;
 
     UPROPERTY(meta = (BindWidgetOptional), BlueprintReadOnly)
     UTextBlock* Political = nullptr;
@@ -355,6 +361,7 @@ protected:
 
     bool bSelectedTileEmbarkValid = false;
     FString SelectedTileBlockReason;
+    FString LastDebugClaimMessage;
 
     // ------------------------------------------------------------------
     // Full-map markers
@@ -424,6 +431,9 @@ protected:
 
     UFUNCTION()
     void HandleMapKeyClicked();
+
+    UFUNCTION()
+    void HandleDebugClaimTileClicked();
 
     // ── Legacy button handlers (solo-mode backwards compat) ──────
     UFUNCTION()
@@ -500,6 +510,7 @@ protected:
     bool IsScreenPositionInsideWidget(const UWidget* Widget, const FVector2D& ScreenPosition) const;
     bool IsScreenPositionOverBlockingMapPanel(const FVector2D& ScreenPosition) const;
     void SetSelectedTileFromXY(int32 TileX, int32 TileY, int32 TileIndex);
+    bool TryDebugClaimHoveredOrSelectedTile();
     FLinearColor GetMarkerColorForSettlement(int32 SettlementID, int32 OwnerCivID) const;
     void DrawSelectedTileX(
         const FGeometry& AllottedGeometry,

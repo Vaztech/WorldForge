@@ -27,6 +27,7 @@ class UFarmingSubsystem;
 class UGridSelectionSubsystem;
 class ULayerViewSubsystem;
 class UTexture2D;
+class UStaticMesh;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnBuildModeChanged, EBuildMode, NewMode);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnCellCountChanged, int32, CellCount);
@@ -151,6 +152,12 @@ public:
     UFUNCTION(BlueprintCallable, Category = "WorldForge|Build")
     void ExitBuildMode();
 
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Build|Preview")
+    bool BeginDataTablePreviewMode(UStaticMesh* PreviewMesh, FName SourceID, bool bIsPrefab);
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Build|Preview")
+    bool SetBuildPreviewMesh(UStaticMesh* PreviewMesh);
+
     // ----- Legacy / Debug Dig Tool Mode -----
 
     UFUNCTION(BlueprintCallable, Category = "WorldForge|Build")
@@ -172,6 +179,18 @@ public:
 
     UFUNCTION(BlueprintCallable, Category = "WorldForge|Build")
     void EnterMineMode();
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Build|Farming")
+    void SetSelectedFarmCropSeed(FName CropRowName);
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Build|Farming")
+    void ClearSelectedFarmCropSeed();
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Build|Farming")
+    FName GetSelectedFarmCropSeed() const { return SelectedFarmCropRow; }
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Build|Farming")
+    bool HasSelectedFarmCropSeed() const { return !SelectedFarmCropRow.IsNone(); }
 
     UFUNCTION(BlueprintCallable, Category = "WorldForge|Build")
     void ExecuteMineDesignation();
@@ -364,11 +383,21 @@ private:
     // world cells specifically for CommitFarmZone().
     TSet<FIntPoint> FarmPaintedWorldCells;
 
+    // UI-selected crop row for the next farm zone. Does not consume seeds.
+    FName SelectedFarmCropRow = NAME_None;
+
     int32 ActiveSettlementID = -1;
     int32 BuildAgentID = -1;
 
     UPROPERTY()
     TObjectPtr<ABuildGhostActor> GhostActor = nullptr;
+
+    bool bDataTablePreviewActive = false;
+    FName DataTablePreviewSourceID = NAME_None;
+    bool bDataTablePreviewIsPrefab = false;
+
+    UPROPERTY()
+    TObjectPtr<UStaticMesh> DataTablePreviewMesh = nullptr;
 
     // ── Grid Overlay (replaces TileSelectionOverlayActor) ──
 
@@ -450,6 +479,9 @@ private:
     bool CommitPrefabBuild();
     bool CommitCustomBuild();
     bool CommitFarmZone();
+    bool SelectNextAvailableFarmSeed(int32 SettlementID);
+    bool CanPlaceDataTableBuildPiece(FString& OutFailureReason) const;
+    bool CommitDataTableBuildPiecePlacement();
 
     // ================================
     // Visual helpers
@@ -537,7 +569,9 @@ private:
     bool IsBuildableTerrainType(EWorldForgeTerrainType TerrainType) const;
     bool ValidateGroundTerrainPlacement(const FIntVector& Voxel, FString& OutReason) const;
 
-    // Patch 4D/4E/4F: tool-specific claimed-land gates.
+    // Shared claimed-land gate. Build/mine/dig/farm wrappers all route here.
+    bool IsVoxelCellInsidePlayerClaim(const FIntPoint& VoxelCell, const TCHAR* ToolLabel) const;
+
     bool IsBuildVoxelInsidePlayerClaim(const FIntVector& Voxel) const;
     bool IsDigVoxelInsidePlayerClaim(const FIntVector& Voxel) const;
     bool IsMineVoxelInsidePlayerClaim(const FIntVector& Voxel) const;

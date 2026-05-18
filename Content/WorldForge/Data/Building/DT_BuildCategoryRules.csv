@@ -1,0 +1,25 @@
+Name,CategoryID,DisplayName,Description,bRequiresClaimedLand,bBlocksMovementByDefault,bRequiresFoundationByDefault,bCanPlaceUndergroundByDefault,bCanPlaceOnSurfaceByDefault,bCanRotateByDefault,DefaultWidthTiles,DefaultDepthTiles,DefaultHeightLayers,DefaultResourceCostText,CategoryTagsText
+Wall,Wall,Wall,Modular wall segments,false,true,false,true,true,true,1,1,1,,Build.Category.Wall
+Fence,Fence,Fence,Fence and railing pieces,false,true,false,true,true,true,1,1,1,,Build.Category.Fence
+Floor,Floor,Floor,Floor tiles and ground covers,false,false,false,true,true,true,1,1,1,Wood:2,Build.Category.Floor
+Foundation,Foundation,Foundation,Structural foundation blocks,true,false,true,true,true,true,1,1,1,Stone:3,Build.Category.Foundation
+Roof,Roof,Roof,Roof and ceiling panels,false,false,false,false,true,true,1,1,1,Wood:3,Build.Category.Roof
+Door,Door,Door,Doors and entryways,false,true,false,true,true,true,1,1,1,Wood:2,Build.Category.Door
+Gate,Gate,Gate,"Gates, portcullises and large openings",false,true,false,true,true,true,1,1,1,Metal:3,Build.Category.Gate
+Window,Window,Window,Windows and small openings,false,true,false,true,true,true,1,1,1,Wood:1,Build.Category.Window
+Stairs,Stairs,Stairs,Staircases and ladders,false,false,false,true,true,true,1,2,1,Wood:2,Build.Category.Stairs
+Ramp,Ramp,Ramp,Ramps and sloped surfaces,false,false,false,true,true,true,1,2,1,Wood:2,Build.Category.Ramp
+Bridge,Bridge,Bridge,Bridge spans and walkways,false,false,false,true,true,true,1,2,1,Wood:3,Build.Category.Bridge
+Support,Support,Support,"Columns, beams and structural supports",false,true,false,true,true,true,1,1,1,Stone:2,Build.Category.Support
+Trim,Trim,Trim,Decorative trim and detail pieces,false,false,false,true,true,true,1,1,1,Wood:1,Build.Category.Trim
+ConstructionProp,ConstructionProp,Construction Prop,Construction site props and fill,false,false,false,false,true,true,1,1,1,Wood:1,Build.Category.Prop
+House,House,House,Complete house structures,true,true,true,false,true,true,5,5,3,Wood:20|Stone:5,Build.Category.House
+Shop,Shop,Shop,Complete shop or market structures,true,true,true,false,true,true,5,5,3,Wood:15|Stone:5,Build.Category.Shop
+Workshop,Workshop,Workshop,"Workshops, forges and mills",true,true,true,false,true,true,5,5,3,Wood:15|Metal:5,Build.Category.Workshop
+Barn,Barn,Barn,Barns and stables,true,true,true,false,true,true,5,5,3,Wood:20,Build.Category.Barn
+Tower,Tower,Tower,Towers and tall defensive structures,true,true,true,false,true,true,3,3,5,Stone:20|Metal:5,Build.Category.Tower
+Castle,Castle,Castle,Castles and keeps,true,true,true,false,true,true,8,8,5,Stone:40|Metal:10,Build.Category.Castle
+Keep,Keep,Keep,Large keep structures,true,true,true,false,true,true,8,8,5,Stone:35|Metal:8,Build.Category.Keep
+Dungeon,Dungeon,Dungeon,Dungeon and underground structures,true,true,true,true,true,true,8,8,5,Stone:30,Build.Category.Dungeon
+Ruin,Ruin,Ruin,Ruined and ancient structures,true,true,false,true,true,true,8,8,5,Stone:10,Build.Category.Ruin
+CompleteBuilding,CompleteBuilding,Complete Building,Generic complete building,true,true,true,false,true,true,5,5,3,Wood:10|Stone:5,Build.Category.CompleteBuilding

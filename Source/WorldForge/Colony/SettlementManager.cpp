@@ -114,6 +114,97 @@ bool USettlementManager::HasStockpile(int32 ID, const FGameplayTag& Tag, int32 M
     return GetStockpileAmount(ID, Tag) >= Min;
 }
 
+bool USettlementManager::AddStartingSeedInventory(int32 ID, FName CropRowName, int32 Amount)
+{
+    if (!SettlementExists(ID) || CropRowName.IsNone() || Amount <= 0)
+    {
+        return false;
+    }
+
+    FWorldForgeSettlementSeedInventory& Inventory = TemporarySeedInventories.FindOrAdd(ID);
+    Inventory.CropSeedQuantities.FindOrAdd(CropRowName) += Amount;
+    Inventory.CropSeedOrder.AddUnique(CropRowName);
+
+    // Strip LP_ prefix for human-readable display name in log
+    FString CropDisplay = CropRowName.ToString();
+    if (CropDisplay.StartsWith(TEXT("LP_")))
+    {
+        CropDisplay.RightChopInline(3);
+    }
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[SettlementManager] Seed inventory added. SettlementID=%d Crop=%s CropRow=%s Qty=%d"),
+        ID,
+        *CropDisplay,
+        *CropRowName.ToString(),
+        Amount);
+
+    return true;
+}
+
+int32 USettlementManager::GetStartingSeedInventoryAmount(int32 ID, FName CropRowName) const
+{
+    const FWorldForgeSettlementSeedInventory* Inventory = TemporarySeedInventories.Find(ID);
+    if (!Inventory || CropRowName.IsNone())
+    {
+        return 0;
+    }
+
+    const int32* Quantity = Inventory->CropSeedQuantities.Find(CropRowName);
+    return Quantity ? FMath::Max(0, *Quantity) : 0;
+}
+
+TMap<FName, int32> USettlementManager::GetStartingSeedInventory(int32 ID) const
+{
+    const FWorldForgeSettlementSeedInventory* Inventory = TemporarySeedInventories.Find(ID);
+    return Inventory ? Inventory->CropSeedQuantities : TMap<FName, int32>();
+}
+
+TArray<FName> USettlementManager::GetStartingSeedInventoryOrder(int32 ID) const
+{
+    const FWorldForgeSettlementSeedInventory* Inventory = TemporarySeedInventories.Find(ID);
+    return Inventory ? Inventory->CropSeedOrder : TArray<FName>();
+}
+
+bool USettlementManager::ConsumeStartingSeedInventory(int32 SettlementID, FName CropRowName, int32 Amount)
+{
+    if (!SettlementExists(SettlementID) || CropRowName.IsNone() || Amount <= 0)
+    {
+        return false;
+    }
+
+    FWorldForgeSettlementSeedInventory* Inventory = TemporarySeedInventories.Find(SettlementID);
+    if (!Inventory)
+    {
+        return false;
+    }
+
+    int32* QuantityPtr = Inventory->CropSeedQuantities.Find(CropRowName);
+    if (!QuantityPtr || *QuantityPtr < Amount)
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[SettlementManager] ConsumeStartingSeedInventory failed: SettlementID=%d CropRow=%s Requested=%d Available=%d"),
+            SettlementID,
+            *CropRowName.ToString(),
+            Amount,
+            QuantityPtr ? *QuantityPtr : 0);
+        return false;
+    }
+
+    const int32 QuantityBefore = *QuantityPtr;
+    *QuantityPtr = FMath::Max(0, *QuantityPtr - Amount);
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[SettlementManager] ConsumeStartingSeedInventory: SettlementID=%d CropRow=%s Before=%d Consumed=%d After=%d"),
+        SettlementID,
+        *CropRowName.ToString(),
+        QuantityBefore,
+        Amount,
+        *QuantityPtr);
+
+    return true;
+}
+
 void USettlementManager::AddBuilding(int32 ID, const FGameplayTag& Tag)
 {
     FSettlementState* S = GetMutableSettlement(ID);
@@ -207,6 +298,83 @@ const TArray<int32>* USettlementManager::GetClaimedWorldTilesForSettlement(int32
 {
     const FSettlementState* Settlement = GetSettlement(SettlementID);
     return Settlement ? &Settlement->ClaimedWorldTileIDs : nullptr;
+}
+
+bool USettlementManager::DoesSettlementClaimVoxelCell(int32 SettlementID, const FIntPoint& VoxelCell) const
+{
+    int32 WorldTileID = INDEX_NONE;
+    FIntPoint WorldTileXY(INDEX_NONE, INDEX_NONE);
+    int32 ClaimedWorldTileCount = 0;
+    return DoesSettlementClaimVoxelCellDetailed(
+        SettlementID,
+        VoxelCell,
+        WorldTileID,
+        WorldTileXY,
+        ClaimedWorldTileCount);
+}
+
+bool USettlementManager::DoesSettlementClaimVoxelCellDetailed(
+    int32 SettlementID,
+    const FIntPoint& VoxelCell,
+    int32& OutWorldTileID,
+    FIntPoint& OutWorldTileXY,
+    int32& OutClaimedWorldTileCount) const
+{
+    OutWorldTileID = INDEX_NONE;
+    OutWorldTileXY = FIntPoint(INDEX_NONE, INDEX_NONE);
+    OutClaimedWorldTileCount = 0;
+
+    const FSettlementState* Settlement = GetSettlement(SettlementID);
+    if (!Settlement)
+    {
+        if (bLogClaimQueries)
+        {
+            UE_LOG(LogTemp, Warning,
+                TEXT("[SettlementManager] ClaimQuery VoxelCell=(%d,%d) SettlementID=%d WorldTile=(%d,%d) WorldTileID=%d Claims=%d Claimed=false Reason=no settlement"),
+                VoxelCell.X,
+                VoxelCell.Y,
+                SettlementID,
+                OutWorldTileXY.X,
+                OutWorldTileXY.Y,
+                OutWorldTileID,
+                OutClaimedWorldTileCount);
+        }
+        return false;
+    }
+
+    OutClaimedWorldTileCount = Settlement->ClaimedWorldTileIDs.Num();
+
+    const UWorld* World = GetWorld();
+    const UWorldMapSubsystem* WorldMapSubsystem = World ? World->GetSubsystem<UWorldMapSubsystem>() : nullptr;
+    const bool bResolved = WorldMapSubsystem && WorldMapSubsystem->VoxelCellToWorldTileIndex(VoxelCell, OutWorldTileID);
+    if (bResolved)
+    {
+        int32 TileX = INDEX_NONE;
+        int32 TileY = INDEX_NONE;
+        if (WorldMapSubsystem->TileIndexToXY(OutWorldTileID, TileX, TileY))
+        {
+            OutWorldTileXY = FIntPoint(TileX, TileY);
+        }
+    }
+
+    const bool bClaimed = bResolved && Settlement->ClaimedWorldTileIDs.Contains(OutWorldTileID);
+
+    if (bLogClaimQueries)
+    {
+        UE_LOG(LogTemp, Log,
+            TEXT("[SettlementManager] ClaimQuery VoxelCell=(%d,%d) SettlementID=%d WorldTile=(%d,%d) WorldTileID=%d Claims=%d Claimed=%s Resolved=%s"),
+            VoxelCell.X,
+            VoxelCell.Y,
+            SettlementID,
+            OutWorldTileXY.X,
+            OutWorldTileXY.Y,
+            OutWorldTileID,
+            OutClaimedWorldTileCount,
+            bClaimed ? TEXT("true") : TEXT("false"),
+            bResolved ? TEXT("true") : TEXT("false"));
+    }
+
+    return bClaimed;
 }
 
 bool USettlementManager::CanPlayerClaimWorldTile(int32 WorldTileID, FString& OutReason) const
@@ -331,6 +499,150 @@ bool USettlementManager::ClaimWorldTileForPlayerSettlement(int32 WorldTileID, FS
         ClaimCount);
 
     return true;
+}
+
+bool USettlementManager::AddInitialPlayerClaimFootprint(int32 SettlementID, int32 CenterTileX, int32 CenterTileY, int32 Radius)
+{
+    const int32 EffectiveRadius = FMath::Max(0, Radius);
+    const int32 FootprintDiameter = (EffectiveRadius * 2) + 1;
+
+    UE_LOG(
+        LogTemp,
+        Log,
+        TEXT("[SettlementManager] Initial player claim footprint center=(%d,%d) radius=%d footprint=%dx%d"),
+        CenterTileX,
+        CenterTileY,
+        EffectiveRadius,
+        FootprintDiameter,
+        FootprintDiameter
+    );
+
+    FSettlementState* Settlement = GetMutableSettlement(SettlementID);
+    if (!Settlement)
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[SettlementManager] Initial player claim complete. SettlementID=%d Claims=0"),
+            SettlementID);
+        return false;
+    }
+
+    const UWorld* World = GetWorld();
+    const UWorldMapSubsystem* WorldMapSubsystem = World ? World->GetSubsystem<UWorldMapSubsystem>() : nullptr;
+    const bool bWorldMapAvailable = WorldMapSubsystem && WorldMapSubsystem->IsInitialized();
+
+    bool bAddedAny = false;
+    int32 AddedCount = 0;
+    int32 SkippedInvalidCount = 0;
+    int32 SkippedAlreadyClaimedCount = 0;
+    int32 SkippedControlledCount = 0;
+    int32 SkippedWaterCount = 0;
+
+    for (int32 OffsetY = -EffectiveRadius; OffsetY <= EffectiveRadius; ++OffsetY)
+    {
+        for (int32 OffsetX = -EffectiveRadius; OffsetX <= EffectiveRadius; ++OffsetX)
+        {
+            const int32 TileX = CenterTileX + OffsetX;
+            const int32 TileY = CenterTileY + OffsetY;
+
+            int32 CandidateTileID = INDEX_NONE;
+            if (!bWorldMapAvailable || !WorldMapSubsystem->TileXYToIndex(TileX, TileY, CandidateTileID))
+            {
+                ++SkippedInvalidCount;
+                UE_LOG(LogTemp, Log,
+                    TEXT("[SettlementManager] Initial claim skipped. Tile=(%d,%d) Reason=invalid"),
+                    TileX,
+                    TileY);
+                continue;
+            }
+
+            if (Settlement->ClaimedWorldTileIDs.Contains(CandidateTileID))
+            {
+                ++SkippedAlreadyClaimedCount;
+                UE_LOG(LogTemp, Log,
+                    TEXT("[SettlementManager] Initial claim skipped. Tile=(%d,%d) Reason=already claimed"),
+                    TileX,
+                    TileY);
+                continue;
+            }
+
+            bool bClaimedByOtherSettlement = false;
+            for (const FSettlementState& ExistingSettlement : Settlements)
+            {
+                if (ExistingSettlement.SettlementID == SettlementID)
+                {
+                    continue;
+                }
+
+                if (ExistingSettlement.ClaimedWorldTileIDs.Contains(CandidateTileID))
+                {
+                    bClaimedByOtherSettlement = true;
+                    break;
+                }
+            }
+
+            if (bClaimedByOtherSettlement || WorldMapSubsystem->IsTileClaimed(TileX, TileY))
+            {
+                ++SkippedControlledCount;
+                UE_LOG(LogTemp, Log,
+                    TEXT("[SettlementManager] Initial claim skipped. Tile=(%d,%d) Reason=controlled"),
+                    TileX,
+                    TileY);
+                continue;
+            }
+
+            if (!WorldMapSubsystem->IsTileLandLike(TileX, TileY))
+            {
+                ++SkippedWaterCount;
+                UE_LOG(LogTemp, Log,
+                    TEXT("[SettlementManager] Initial claim skipped. Tile=(%d,%d) Reason=water"),
+                    TileX,
+                    TileY);
+                continue;
+            }
+
+            if (AddClaimedWorldTileToSettlement(SettlementID, CandidateTileID))
+            {
+                bAddedAny = true;
+                ++AddedCount;
+
+                UE_LOG(LogTemp, Log,
+                    TEXT("[SettlementManager] Initial claim added. Tile=(%d,%d) TileID=%d"),
+                    TileX,
+                    TileY,
+                    CandidateTileID);
+            }
+            else
+            {
+                ++SkippedInvalidCount;
+                UE_LOG(LogTemp, Log,
+                    TEXT("[SettlementManager] Initial claim skipped. Tile=(%d,%d) Reason=invalid"),
+                    TileX,
+                    TileY);
+            }
+        }
+    }
+
+    const FSettlementState* UpdatedSettlement = GetSettlement(SettlementID);
+    const int32 ClaimCount = UpdatedSettlement ? UpdatedSettlement->ClaimedWorldTileIDs.Num() : 0;
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[SettlementManager] Initial player claim complete. SettlementID=%d Center=(%d,%d) Radius=%d Bounds=(%d,%d)->(%d,%d) Claims=%d Added=%d SkippedInvalid=%d SkippedAlreadyClaimed=%d SkippedControlled=%d SkippedWater=%d"),
+        SettlementID,
+        CenterTileX,
+        CenterTileY,
+        EffectiveRadius,
+        CenterTileX - EffectiveRadius,
+        CenterTileY - EffectiveRadius,
+        CenterTileX + EffectiveRadius,
+        CenterTileY + EffectiveRadius,
+        ClaimCount,
+        AddedCount,
+        SkippedInvalidCount,
+        SkippedAlreadyClaimedCount,
+        SkippedControlledCount,
+        SkippedWaterCount);
+
+    return bAddedAny;
 }
 
 bool USettlementManager::IsWorldTileAdjacentToPlayerClaim(int32 WorldTileID) const
@@ -461,27 +773,54 @@ bool USettlementManager::DoesPlayerSettlementClaimWorldCell(const FIntPoint& Wor
 bool USettlementManager::DoesPlayerSettlementClaimVoxelCell(const FIntPoint& VoxelCell) const
 {
     int32 WorldTileID = INDEX_NONE;
+    FIntPoint WorldTileXY(INDEX_NONE, INDEX_NONE);
+    int32 PlayerSettlement = INDEX_NONE;
+    int32 ClaimedWorldTileCount = 0;
+    return DoesPlayerSettlementClaimVoxelCellDetailed(
+        VoxelCell,
+        WorldTileID,
+        WorldTileXY,
+        PlayerSettlement,
+        ClaimedWorldTileCount);
+}
 
-    const UWorld* World = GetWorld();
-    const UWorldMapSubsystem* WorldMapSubsystem = World ? World->GetSubsystem<UWorldMapSubsystem>() : nullptr;
-    const bool bResolved = WorldMapSubsystem && WorldMapSubsystem->VoxelCellToWorldTileIndex(VoxelCell, WorldTileID);
-    const bool bClaimed = bResolved && PlayerSettlementID != INDEX_NONE && DoesSettlementClaimWorldTile(PlayerSettlementID, WorldTileID);
+bool USettlementManager::DoesPlayerSettlementClaimVoxelCellDetailed(
+    const FIntPoint& VoxelCell,
+    int32& OutWorldTileID,
+    FIntPoint& OutWorldTileXY,
+    int32& OutPlayerSettlementID,
+    int32& OutClaimedWorldTileCount) const
+{
+    OutPlayerSettlementID = PlayerSettlementID;
 
-    if (bLogClaimQueries)
+    if (PlayerSettlementID == INDEX_NONE)
     {
-        UE_LOG(
-            LogTemp,
-            Log,
-            TEXT("[SettlementManager] ClaimQuery VoxelCell=(%d,%d) WorldTileID=%d PlayerSettlement=%d Claimed=%s"),
-            VoxelCell.X,
-            VoxelCell.Y,
-            WorldTileID,
-            PlayerSettlementID,
-            bClaimed ? TEXT("true") : TEXT("false")
-        );
+        OutWorldTileID = INDEX_NONE;
+        OutWorldTileXY = FIntPoint(INDEX_NONE, INDEX_NONE);
+        OutClaimedWorldTileCount = 0;
+
+        if (bLogClaimQueries)
+        {
+            UE_LOG(LogTemp, Warning,
+                TEXT("[SettlementManager] ClaimQuery VoxelCell=(%d,%d) PlayerSettlement=%d WorldTile=(%d,%d) WorldTileID=%d Claims=%d Claimed=false Reason=no player settlement"),
+                VoxelCell.X,
+                VoxelCell.Y,
+                OutPlayerSettlementID,
+                OutWorldTileXY.X,
+                OutWorldTileXY.Y,
+                OutWorldTileID,
+                OutClaimedWorldTileCount);
+        }
+
+        return false;
     }
 
-    return bClaimed;
+    return DoesSettlementClaimVoxelCellDetailed(
+        PlayerSettlementID,
+        VoxelCell,
+        OutWorldTileID,
+        OutWorldTileXY,
+        OutClaimedWorldTileCount);
 }
 
 void USettlementManager::SetPlayerSettlementID(int32 SettlementID)

@@ -99,6 +99,10 @@ struct FEmbarkSelectedItem
 {
     GENERATED_BODY()
 
+    /** Stable loadout item id, e.g. FoodRations or Seed.Barley. */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Embark")
+    FName ItemId = NAME_None;
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Embark")
     FGameplayTag ItemTag;
 

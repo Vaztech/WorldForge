@@ -25,6 +25,50 @@
 #include "TimerManager.h"
 #include "Traits/WorldForgeTraitGenerator.h"
 
+namespace
+{
+FString WF_HumanizeSeedIdentifier(const FString& Identifier)
+{
+    FString Result;
+    Result.Reserve(Identifier.Len() + 4);
+
+    for (int32 Index = 0; Index < Identifier.Len(); ++Index)
+    {
+        const TCHAR Character = Identifier[Index];
+        const TCHAR PreviousCharacter = Index > 0 ? Identifier[Index - 1] : 0;
+        if (Index > 0 && FChar::IsUpper(Character) && (FChar::IsLower(PreviousCharacter) || FChar::IsDigit(PreviousCharacter)))
+        {
+            Result.AppendChar(TCHAR(' '));
+        }
+        Result.AppendChar(Character);
+    }
+
+    return Result;
+}
+
+bool WF_TryResolveSeedLoadoutItem(FName ItemId, FName& OutCropRowName, FString& OutSeedIdentifier, FString& OutDisplayName)
+{
+    const FString ItemIdString = ItemId.ToString();
+    FString Prefix;
+    FString SeedIdentifier;
+    if (!ItemIdString.Split(TEXT("."), &Prefix, &SeedIdentifier) || !Prefix.Equals(TEXT("Seed"), ESearchCase::CaseSensitive))
+    {
+        return false;
+    }
+
+    SeedIdentifier.TrimStartAndEndInline();
+    if (SeedIdentifier.IsEmpty())
+    {
+        return false;
+    }
+
+    OutSeedIdentifier = SeedIdentifier;
+    OutCropRowName = FName(*FString::Printf(TEXT("LP_%s"), *SeedIdentifier));
+    OutDisplayName = WF_HumanizeSeedIdentifier(SeedIdentifier);
+    return true;
+}
+}
+
 AColonyManager::AColonyManager()
 {
     PrimaryActorTick.bCanEverTick = false;
@@ -410,6 +454,36 @@ void AColonyManager::InitializeSettlement()
     SettlementMgr->SetPlayerCurrency(SettlementID, TAG_Currency_Barter);
     SettlementMgr->SetPlayerSettlementID(SettlementID);
 
+    if (SelectedStartTileX >= 0 && SelectedStartTileY >= 0 && SelectedStartTileIndex >= 0)
+    {
+        // Claim around the resolved spawn center, not only the clicked embark tile.
+        // ResolveValidSpawnCell may move the actual colony start to nearby land; the
+        // starting territory must follow that playable area while CreateSettlement()
+        // still keeps the selected embark tile itself claimed.
+        const FIntPoint InitialClaimCenter = SpawnGridCenter;
+        const int32 EffectiveInitialClaimRadius = FMath::Max(0, InitialPlayerClaimRadius);
+        const int32 InitialClaimDiameter = (EffectiveInitialClaimRadius * 2) + 1;
+
+        UE_LOG(LogTemp, Log,
+            TEXT("[ColonyManager] Initial player claim request. SelectedTile=(%d,%d) SelectedTileID=%d SpawnCenter=(%d,%d) ClaimCenter=(%d,%d) Radius=%d Footprint=%dx%d"),
+            SelectedStartTileX,
+            SelectedStartTileY,
+            SelectedStartTileIndex,
+            SpawnGridCenter.X,
+            SpawnGridCenter.Y,
+            InitialClaimCenter.X,
+            InitialClaimCenter.Y,
+            EffectiveInitialClaimRadius,
+            InitialClaimDiameter,
+            InitialClaimDiameter);
+
+        SettlementMgr->AddInitialPlayerClaimFootprint(
+            SettlementID,
+            InitialClaimCenter.X,
+            InitialClaimCenter.Y,
+            EffectiveInitialClaimRadius);
+    }
+
     if (FSettlementState* Settlement = SettlementMgr->GetMutableSettlement(SettlementID))
     {
         // Keep the persisted settlement state aligned with the strategic claim tile.
@@ -420,15 +494,31 @@ void AColonyManager::InitializeSettlement()
     const TArray<int32>* ClaimedWorldTileIDs = SettlementMgr->GetClaimedWorldTilesForSettlement(SettlementID);
     const int32 ClaimedWorldTileCount = ClaimedWorldTileIDs ? ClaimedWorldTileIDs->Num() : 0;
     const bool bStartingTileClaimed = SettlementMgr->DoesSettlementClaimWorldTile(SettlementID, SettlementWorldTileID);
+    int32 SpawnCenterWorldTileID = INDEX_NONE;
+    bool bSpawnCenterTileResolved = false;
+    bool bSpawnCenterTileClaimed = false;
+    if (const UWorld* World = GetWorld())
+    {
+        if (const UWorldMapSubsystem* WorldMapSubsystem = World->GetSubsystem<UWorldMapSubsystem>())
+        {
+            bSpawnCenterTileResolved = WorldMapSubsystem->TileXYToIndex(SpawnGridCenter.X, SpawnGridCenter.Y, SpawnCenterWorldTileID);
+            bSpawnCenterTileClaimed = bSpawnCenterTileResolved && SettlementMgr->DoesSettlementClaimWorldTile(SettlementID, SpawnCenterWorldTileID);
+        }
+    }
 
     UE_LOG(
         LogTemp,
         Log,
-        TEXT("[ColonyManager] Player settlement claim verified. SettlementID=%d WorldTileID=%d Claims=%d Claimed=%s"),
+        TEXT("[ColonyManager] Player settlement claim verified. SettlementID=%d SelectedWorldTileID=%d SelectedClaimed=%s SpawnCenter=(%d,%d) SpawnCenterTileID=%d SpawnCenterResolved=%s SpawnCenterClaimed=%s Claims=%d"),
         SettlementID,
         SettlementWorldTileID,
-        ClaimedWorldTileCount,
-        bStartingTileClaimed ? TEXT("true") : TEXT("false")
+        bStartingTileClaimed ? TEXT("true") : TEXT("false"),
+        SpawnGridCenter.X,
+        SpawnGridCenter.Y,
+        SpawnCenterWorldTileID,
+        bSpawnCenterTileResolved ? TEXT("true") : TEXT("false"),
+        bSpawnCenterTileClaimed ? TEXT("true") : TEXT("false"),
+        ClaimedWorldTileCount
     );
 
     UE_LOG(
@@ -658,6 +748,8 @@ void AColonyManager::SetupInitialResources()
     SettlementMgr->AddToStockpile(SettlementID, TAG_Item_Wood, 2);
     SettlementMgr->AddToStockpile(SettlementID, TAG_Item_Stone, 2);
 
+    ApplyEmbarkLoadoutSeeds();
+
     UWorld* World = GetWorld();
     if (!World)
     {
@@ -681,6 +773,81 @@ void AColonyManager::SetupInitialResources()
         bApplied ? TEXT("true") : TEXT("false"),
         SettlementID
     );
+}
+
+
+void AColonyManager::ApplyEmbarkLoadoutSeeds()
+{
+    if (!SettlementMgr || SettlementID == INDEX_NONE)
+    {
+        return;
+    }
+
+    const UGameInstance* GameInstance = GetGameInstance();
+    const UWorldForgeEmbarkationManager* EmbarkationManager = GameInstance
+        ? GameInstance->GetSubsystem<UWorldForgeEmbarkationManager>()
+        : nullptr;
+
+    if (!EmbarkationManager)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[ColonyManager] Starting seed inventory skipped: EmbarkationManager missing."));
+        return;
+    }
+
+    const FWorldForgeEmbarkConfig Config = EmbarkationManager->GetEmbarkConfig();
+    bool bAppliedAnySeed = false;
+
+    for (const FEmbarkSelectedItem& Item : Config.SelectedLoadoutItems)
+    {
+        if (Item.Quantity <= 0)
+        {
+            continue;
+        }
+
+        FName CropRowName = NAME_None;
+        FString SeedIdentifier;
+        FString CropDisplayName;
+        if (!WF_TryResolveSeedLoadoutItem(Item.ItemId, CropRowName, SeedIdentifier, CropDisplayName))
+        {
+            continue;
+        }
+
+        if (!SettlementMgr->AddStartingSeedInventory(SettlementID, CropRowName, Item.Quantity))
+        {
+            UE_LOG(LogTemp, Warning,
+                TEXT("[ColonyManager] Failed to add starting seed inventory: %s Qty=%d SettlementID=%d"),
+                *CropDisplayName,
+                Item.Quantity,
+                SettlementID);
+            continue;
+        }
+
+        const FGameplayTag SpecificSeedTag = FGameplayTag::RequestGameplayTag(
+            FName(*FString::Printf(TEXT("WorldForge.Item.Seed.%s"), *SeedIdentifier)),
+            false);
+        if (SpecificSeedTag.IsValid())
+        {
+            SettlementMgr->AddToStockpile(SettlementID, SpecificSeedTag, Item.Quantity);
+        }
+
+        bAppliedAnySeed = true;
+
+        UE_LOG(LogTemp, Log,
+            TEXT("[ColonyManager] Starting seed inventory: %s Qty=%d"),
+            *CropDisplayName,
+            Item.Quantity);
+
+        UE_LOG(LogTemp, Log,
+            TEXT("[EmbarkLoadout] Applying seed item %s Qty=%d CropRow=%s"),
+            *Item.ItemId.ToString(),
+            Item.Quantity,
+            *CropRowName.ToString());
+    }
+
+    if (!bAppliedAnySeed)
+    {
+        UE_LOG(LogTemp, Log, TEXT("[ColonyManager] Starting seed inventory: none selected; player farms will use fallback crop."));
+    }
 }
 
 void AColonyManager::StartSimulation()

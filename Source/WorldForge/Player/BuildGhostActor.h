@@ -11,6 +11,7 @@ class UStaticMeshComponent;
 class UDecalComponent;
 class UMaterialInstanceDynamic;
 class UVoxelWorldManager;
+class UStaticMesh;
 
 UCLASS()
 class WORLDFORGE_API ABuildGhostActor : public AActor
@@ -22,6 +23,16 @@ public:
 
     // Sets the visual state of the ghost (green = valid, red = invalid, hidden)
     void SetGhostState(EBuildGhostState State);
+
+    // Updates the mesh used by the build ghost and any existing highlight components.
+    bool SetPreviewMesh(UStaticMesh* PreviewMesh);
+
+    // Logs render/visibility state for DataTable preview diagnostics.
+    void LogPreviewDiagnostics(const TCHAR* Context) const;
+
+    // Forces the primary GhostMesh visible or hidden independently of state.
+    // Used by DataTable preview to re-show the mesh after ClearAllHighlights hides it.
+    void SetPreviewMeshVisible(bool bVisible);
 
     // Prefab mode: preview explicit block volume instead of a single cube
     void UpdatePrefabGhost(
@@ -76,7 +87,7 @@ private:
 
     int32 ActiveHighlightCount = 0;
 
-    static constexpr float GhostOpacity = 0.4f;
+    static constexpr float GhostOpacity = 0.68f;
 
     // Slight inset (~8%) applied to every ghost cube so adjacent cubes show
     // a visible seam between them instead of merging into one solid mass.

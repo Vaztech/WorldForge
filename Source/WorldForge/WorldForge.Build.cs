@@ -20,6 +20,7 @@ public class WorldForge : ModuleRules
             "InputCore",         // Input handling
             "EnhancedInput",     // UE5 enhanced input system
             "DeveloperSettings", // Access to project settings
+            "CommonUI",          // UCommonActivatableWidget embark setup bridge
 
             "GameplayTags",      // FGameplayTag system + NativeGameplayTags.h support
 

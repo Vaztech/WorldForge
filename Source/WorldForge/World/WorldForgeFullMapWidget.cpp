@@ -194,6 +194,17 @@ void UWorldForgeFullMapWidget::NativeConstruct()
         BTN_MapKey->OnClicked.AddDynamic(this, &UWorldForgeFullMapWidget::HandleMapKeyClicked);
     }
 
+    if (TXT_DebugClaimTileLabel)
+    {
+        TXT_DebugClaimTileLabel->SetText(FText::FromString(TEXT("Claim Tile")));
+    }
+
+    if (BTN_DebugClaimTile)
+    {
+        BTN_DebugClaimTile->OnClicked.RemoveDynamic(this, &UWorldForgeFullMapWidget::HandleDebugClaimTileClicked);
+        BTN_DebugClaimTile->OnClicked.AddDynamic(this, &UWorldForgeFullMapWidget::HandleDebugClaimTileClicked);
+    }
+
     // Runtime layout/style normalization keeps the C++ class resilient to
     // stale CanvasPanel offsets in the Widget Blueprint.
     ApplyRuntimeStyles();
@@ -486,6 +497,13 @@ FReply UWorldForgeFullMapWidget::NativeOnKeyDown(
     if (Key == EKeys::Left) { MoveSelectionBy(-1, 0, bFastMove); return FReply::Handled(); }
     if (Key == EKeys::Right) { MoveSelectionBy(1, 0, bFastMove); return FReply::Handled(); }
 
+    if (Key == EKeys::C)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[FullMapDebugClaim] C key pressed."));
+        TryDebugClaimHoveredOrSelectedTile();
+        return FReply::Handled();
+    }
+
     if (Key == EKeys::Enter) { HandleConfirmClicked(); return FReply::Handled(); }
     if (Key == EKeys::Escape) { HandleCloseClicked(); return FReply::Handled(); }
 
@@ -510,6 +528,87 @@ FReply UWorldForgeFullMapWidget::NativeOnKeyUp(
     }
 
     return Super::NativeOnKeyUp(InGeometry, InKeyEvent);
+}
+
+// ============================================================
+bool UWorldForgeFullMapWidget::TryDebugClaimHoveredOrSelectedTile()
+{
+    LastDebugClaimMessage.Empty();
+
+    int32 TargetTileX = INDEX_NONE;
+    int32 TargetTileY = INDEX_NONE;
+    int32 TargetTileIndex = INDEX_NONE;
+    const bool bUsingHoveredTile = bHasHoveredTile && HoveredTileIndex != INDEX_NONE;
+
+    if (bUsingHoveredTile)
+    {
+        TargetTileX = HoveredTileX;
+        TargetTileY = HoveredTileY;
+        TargetTileIndex = HoveredTileIndex;
+    }
+    else if (bHasValidSelection && SelectedTileIndex != INDEX_NONE)
+    {
+        TargetTileX = SelectedTileX;
+        TargetTileY = SelectedTileY;
+        TargetTileIndex = SelectedTileIndex;
+    }
+    else
+    {
+        LastDebugClaimMessage = TEXT("Claim failed: hover or select a tile first.");
+        UpdateSelectionText();
+        UE_LOG(LogTemp, Warning, TEXT("[FullMapDebugClaim] %s"), *LastDebugClaimMessage);
+        return false;
+    }
+
+    UWorld* World = GetWorld();
+    if (!World)
+    {
+        LastDebugClaimMessage = TEXT("Claim failed: world missing.");
+        UpdateSelectionText();
+        UE_LOG(LogTemp, Warning, TEXT("[FullMapDebugClaim] %s"), *LastDebugClaimMessage);
+        return false;
+    }
+
+    USettlementManager* SettlementMgr = World->GetSubsystem<USettlementManager>();
+    if (!SettlementMgr)
+    {
+        LastDebugClaimMessage = TEXT("Claim failed: settlement manager missing.");
+        UpdateSelectionText();
+        UE_LOG(LogTemp, Warning, TEXT("[FullMapDebugClaim] %s"), *LastDebugClaimMessage);
+        return false;
+    }
+
+    // Temporary developer-only test hook. Polished player-facing claim UI will come later.
+    FString OutReason;
+    if (!SettlementMgr->ClaimWorldTileForPlayerSettlement(TargetTileIndex, OutReason))
+    {
+        if (OutReason.IsEmpty())
+        {
+            OutReason = TEXT("unknown reason");
+        }
+
+        LastDebugClaimMessage = FString::Printf(TEXT("Claim failed: %s"), *OutReason);
+        UpdateSelectionText();
+        UE_LOG(LogTemp, Warning, TEXT("[FullMapDebugClaim] %s"), *LastDebugClaimMessage);
+        return false;
+    }
+
+    SetSelectedTileFromXY(TargetTileX, TargetTileY, TargetTileIndex);
+    LastDebugClaimMessage = FString::Printf(TEXT("Claimed tile %d."), TargetTileIndex);
+
+    UE_LOG(LogTemp, Warning, TEXT("[FullMapDebugClaim] %s"), *LastDebugClaimMessage);
+
+    RefreshMapTexture();
+    UpdateSelectionVisual();
+    UpdateSelectionText();
+    return true;
+}
+
+// ============================================================
+void UWorldForgeFullMapWidget::HandleDebugClaimTileClicked()
+{
+    UE_LOG(LogTemp, Warning, TEXT("[FullMapDebugClaim] Claim Tile button clicked."));
+    TryDebugClaimHoveredOrSelectedTile();
 }
 
 // ============================================================
@@ -1058,6 +1157,12 @@ void UWorldForgeFullMapWidget::UpdateSelectionText()
         }
     }
 
+    if (!LastDebugClaimMessage.IsEmpty())
+    {
+        Str += TEXT("\n");
+        Str += LastDebugClaimMessage;
+    }
+
     TXT_SelectedCell->SetText(FText::FromString(Str));
 
     UpdateResourceTooltip();
@@ -1445,6 +1550,7 @@ void UWorldForgeFullMapWidget::ApplyResponsiveTextScaling(const FGeometry& Widge
     ApplyBottomButtonLayout(BTN_MapLayers);
     ApplyBottomButtonLayout(BTN_SiteDetails);
     ApplyBottomButtonLayout(BTN_MapKey);
+    ApplyBottomButtonLayout(BTN_DebugClaimTile);
     ApplyBottomButtonLayout(BTN_Close);
     ApplyBottomButtonLayout(BTN_Confirm);
 
@@ -1456,6 +1562,7 @@ void UWorldForgeFullMapWidget::ApplyResponsiveTextScaling(const FGeometry& Widge
     ApplyResponsiveTextBlock(TXT_MapLayersLabel, 12, Scale, false, 0.0f);
     ApplyResponsiveTextBlock(TXT_SiteDetailsLabel, 12, Scale, false, 0.0f);
     ApplyResponsiveTextBlock(TXT_MapKeyLabel, 12, Scale, false, 0.0f);
+    ApplyResponsiveTextBlock(TXT_DebugClaimTileLabel, 12, Scale, false, 0.0f);
     ApplyResponsiveTextBlock(TXT_CloseLabel, 12, Scale, false, 0.0f);
     ApplyResponsiveTextBlock(TXT_SelectedCell2, 12, Scale, false, 0.0f);
 
@@ -2131,8 +2238,11 @@ void UWorldForgeFullMapWidget::DrawTileOutline(
 // ============================================================
 void UWorldForgeFullMapWidget::EnterMapSelectionInputMode()
 {
+    SetIsFocusable(true);
+
     if (!CachedPlayerController)
     {
+        SetKeyboardFocus();
         return;
     }
 
@@ -2146,6 +2256,8 @@ void UWorldForgeFullMapWidget::EnterMapSelectionInputMode()
     CachedPlayerController->SetIgnoreMoveInput(true);
 
     bInputLockedToUI = true;
+
+    SetKeyboardFocus();
 
     UE_LOG(LogTemp, Log, TEXT("[FullMapWidget] Entered UI-only input mode."));
 }

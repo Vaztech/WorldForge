@@ -17,7 +17,11 @@
       "mcp__nwiro__edit_blueprint",
       "mcp__nwiro__delete_node",
       "mcp__nwiro__find_blueprints",
-      "mcp__nwiro__read_file"
+      "mcp__nwiro__read_file",
+      "mcp__nwiro__reparent_blueprint",
+      "mcp__nwiro__read_data_table",
+      "mcp__nwiro__list_project_modules",
+      "mcp__nwiro__write_file"
     ]
   }
 }

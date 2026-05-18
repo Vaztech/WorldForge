@@ -400,6 +400,16 @@ AActor* UWildHarvestAdapter::SpawnCropPatch(FName CropRow, FVector WorldPos)
 {
     UWorld* World = GetWorld();
 
+    if (CropRow.IsNone() || !CropDataTable || !CropDataTable->FindRowUnchecked(CropRow))
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[WildHarvestAdapter] SpawnCropPatch blocked: invalid or missing crop row. Row=%s DataTable=%s"),
+            *CropRow.ToString(),
+            CropDataTable ? *CropDataTable->GetName() : TEXT("null"));
+
+        return nullptr;
+    }
+
     if (!World || !CropPatchClass)
     {
         UE_LOG(LogTemp, Warning,
@@ -461,6 +471,60 @@ AActor* UWildHarvestAdapter::SpawnCropPatch(FName CropRow, FVector WorldPos)
             TEXT("[WildHarvestAdapter] Could not set '%s' on %s."),
             *BPVar_CropRowName.ToString(),
             *Actor->GetName());
+    }
+
+    // IMPORTANT:
+    // The Wild Harvest crop BP builds its visible meshes/config from
+    // "Crop Data Table" + "Crop Row Name".  The BP construction path can
+    // initialize using its default row before C++ writes the selected row above.
+    //
+    // Call WH_RefreshConfig (on BP_CropPatch_Master) directly.
+    // Do NOT call WH_RefreshCropConfig — the LowPoly child BP overrides that
+    // event to re-derive "Crop Row Name" from its own "Crop Types" enum,
+    // which overwrites the row name C++ just set and causes every crop to
+    // display as the enum default (Wheat).
+    //
+    // WH_RefreshConfig reads the current "Crop Row Name" property (already set
+    // above) and reloads the correct visual config from the DataTable.
+    //
+    // Do not refresh later during water/growth/harvest, because those later
+    // calls can reset runtime crop state.
+    const bool bConfigRefreshed = WF_CallNoParamFunction(
+        Actor,
+        FName(TEXT("WH_RefreshConfig")),
+        true);
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[WildHarvestAdapter] Crop config refresh after row assignment. Actor=%s Row=%s Refreshed=%s"),
+        *Actor->GetName(),
+        *CropRow.ToString(),
+        bConfigRefreshed ? TEXT("true") : TEXT("false"));
+
+    // Diagnostic: read back "Crop Row Name" after refresh to confirm
+    // the BP did not overwrite it (the old WH_RefreshCropConfig bug).
+    if (RowProp)
+    {
+        const FName* VerifyPtr = RowProp->ContainerPtrToValuePtr<FName>(Actor);
+        const FName VerifiedRow = VerifyPtr ? *VerifyPtr : NAME_None;
+
+        if (VerifiedRow != CropRow)
+        {
+            UE_LOG(LogTemp, Error,
+                TEXT("[WildHarvestAdapter] BUG: Crop Row Name was overwritten after refresh! Expected=%s Actual=%s Actor=%s"),
+                *CropRow.ToString(),
+                *VerifiedRow.ToString(),
+                *Actor->GetName());
+
+            // Force-restore the correct row name.
+            *RowProp->ContainerPtrToValuePtr<FName>(Actor) = CropRow;
+        }
+        else
+        {
+            UE_LOG(LogTemp, Log,
+                TEXT("[WildHarvestAdapter] Crop Row Name verified after refresh. Row=%s Actor=%s"),
+                *CropRow.ToString(),
+                *Actor->GetName());
+        }
     }
 
     Actor->SetActorEnableCollision(false);

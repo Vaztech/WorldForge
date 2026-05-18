@@ -132,6 +132,18 @@ public:
     UFUNCTION(BlueprintCallable, Category = "WorldForge|GridSelection")
     void CommitSelectedCellsToConfirmedOverlay(EGridDesignationType DesignationType);
 
+    /**
+     * Commit an explicit set of world cells as confirmed Farm designation tiles.
+     *
+     * More robust than CommitSelectedCellsToConfirmedOverlay for farm mode because it
+     * uses FarmPaintedWorldCells directly instead of GridOverlay::SelectedCells, which
+     * may be empty if the selection went through the legacy paint path rather than
+     * the grid drag path (e.g. when bSelectionActive was false at click time).
+     *
+     * Terrain Z is sampled per-cell via VoxelWorldManager. Falls back to Z=0 if VM unavailable.
+     */
+    void CommitFarmCellsToConfirmedOverlay(const TSet<FIntPoint>& FarmWorldCells);
+
     /** Visual-only: draw/clear true 3D voxel cubes for the active mining selection. */
     UFUNCTION(BlueprintCallable, Category = "WorldForge|GridSelection|Mining")
     void SetMiningVolumePreviewCells(const TArray<FIntVector>& VoxelCoords);

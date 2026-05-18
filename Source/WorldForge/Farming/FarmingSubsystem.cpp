@@ -82,6 +82,31 @@ namespace
             Tile.bHarvestJobPending ||
             Tile.SimGrowthStageIndex >= WF_FarmReadyGrowthStageIndex;
     }
+
+    static FString WF_GetCropDisplayName(FName CropRow)
+    {
+        FString Result = CropRow.ToString();
+        if (Result.StartsWith(TEXT("LP_")))
+        {
+            Result.RightChopInline(3);
+        }
+        return Result;
+    }
+    static bool WF_IsCropRowConfigured(const UWildHarvestAdapter* Adapter, FName CropRow)
+    {
+        if (CropRow.IsNone())
+        {
+            return false;
+        }
+
+        if (!IsValid(Adapter) || !Adapter->GetCropDataTable())
+        {
+            return true;
+        }
+
+        return Adapter->GetAllCropRowNames().Contains(CropRow);
+    }
+
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -141,6 +166,107 @@ void UFarmingSubsystem::Deinitialize()
 // Zone Management
 // ═══════════════════════════════════════════════════════════════════
 
+
+FName UFarmingSubsystem::ResolveDefaultPlayerFarmCropRow(int32 SettlementID, ECropCategory& OutCategory)
+{
+    const FName DefaultCropRow(TEXT("LP_Wheat"));
+    OutCategory = ECropCategory::Grains;
+
+    UWorld* World = GetWorld();
+    const USettlementManager* SettlementManager = World ? World->GetSubsystem<USettlementManager>() : nullptr;
+    if (!SettlementManager)
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[FarmingSubsystem] ResolveDefaultPlayerFarmCropRow blocked: SettlementManager unavailable. Settlement=%d"),
+            SettlementID);
+        return NAME_None;
+    }
+
+    UWildHarvestAdapter* SafeAdapter = GetWildHarvestAdapterSafe();
+    const TMap<FName, int32> SeedInventory = SettlementManager->GetStartingSeedInventory(SettlementID);
+    const TArray<FName> SeedOrder = SettlementManager->GetStartingSeedInventoryOrder(SettlementID);
+
+    FName SelectedCropRow = NAME_None;
+    bool bSawPositiveSeed = false;
+
+    for (const FName& CropRow : SeedOrder)
+    {
+        const int32* Quantity = SeedInventory.Find(CropRow);
+        if (!Quantity || *Quantity <= 0)
+        {
+            continue;
+        }
+
+        bSawPositiveSeed = true;
+
+        if (!WF_IsCropRowConfigured(SafeAdapter, CropRow))
+        {
+            UE_LOG(LogTemp, Warning,
+                TEXT("[FarmingSubsystem] Skipping invalid player seed crop row: CropRow=%s Qty=%d Settlement=%d"),
+                *CropRow.ToString(),
+                *Quantity,
+                SettlementID);
+            continue;
+        }
+
+        UE_LOG(LogTemp, Log,
+            TEXT("[FarmingSubsystem] Available crop seed: %s CropRow=%s Qty=%d"),
+            *WF_GetCropDisplayName(CropRow),
+            *CropRow.ToString(),
+            *Quantity);
+
+        if (SelectedCropRow.IsNone())
+        {
+            SelectedCropRow = CropRow;
+        }
+    }
+
+    if (SelectedCropRow.IsNone())
+    {
+        if (bSawPositiveSeed)
+        {
+            UE_LOG(LogTemp, Warning,
+                TEXT("[FarmingSubsystem] ResolveDefaultPlayerFarmCropRow blocked: seed inventory has no valid crop rows. Settlement=%d"),
+                SettlementID);
+            return NAME_None;
+        }
+
+        if (!WF_IsCropRowConfigured(SafeAdapter, DefaultCropRow))
+        {
+            UE_LOG(LogTemp, Warning,
+                TEXT("[FarmingSubsystem] ResolveDefaultPlayerFarmCropRow blocked: intentional default crop row missing. CropRow=%s Settlement=%d"),
+                *DefaultCropRow.ToString(),
+                SettlementID);
+            return NAME_None;
+        }
+
+        UE_LOG(LogTemp, Log,
+            TEXT("[FarmingSubsystem] Selected player farm crop row: Wheat (intentional default; no player seed loadout)"));
+        return DefaultCropRow;
+    }
+
+    if (SafeAdapter)
+    {
+        OutCategory = SafeAdapter->GetCategoryForCropRow(SelectedCropRow);
+    }
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[FarmingSubsystem] Selected player farm crop row: %s"),
+        *SelectedCropRow.ToString());
+
+    return SelectedCropRow;
+}
+
+ECropCategory UFarmingSubsystem::ResolveCategoryForCropRow(FName CropRow)
+{
+    if (UWildHarvestAdapter* SafeAdapter = GetWildHarvestAdapterSafe())
+    {
+        return SafeAdapter->GetCategoryForCropRow(CropRow);
+    }
+
+    return ECropCategory::Grains;
+}
+
 int32 UFarmingSubsystem::CreateFarmZone(
     int32 SettlementID,
     FIntPoint Origin,
@@ -155,6 +281,21 @@ int32 UFarmingSubsystem::CreateFarmZone(
         UE_LOG(LogTemp, Warning,
             TEXT("[FarmingSubsystem] CreateFarmZone failed: Invalid size %dx%d"),
             SizeX, SizeY);
+
+        return INDEX_NONE;
+    }
+
+    UWildHarvestAdapter* SafeAdapter = GetWildHarvestAdapterSafe();
+    if (!WF_IsCropRowConfigured(SafeAdapter, CropRow))
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[FarmingSubsystem] CreateFarmZone blocked: invalid or missing crop row. CropRow=%s Settlement=%d Origin=(%d,%d) Size=%dx%d"),
+            *CropRow.ToString(),
+            SettlementID,
+            Origin.X,
+            Origin.Y,
+            SizeX,
+            SizeY);
 
         return INDEX_NONE;
     }
@@ -222,7 +363,7 @@ int32 UFarmingSubsystem::CreateFarmZone(
     FarmZones.Add(MoveTemp(Zone));
 
     UE_LOG(LogTemp, Log,
-        TEXT("[FarmingSubsystem] Created farm zone %d: Settlement=%d Origin=(%d,%d) Size=%dx%d Category=%d CropRow=%s AutoReplant=%s"),
+        TEXT("[FarmingSubsystem] Created farm zone %d: Settlement=%d Origin=(%d,%d) Size=%dx%d Category=%d CropRow=%s DataRow=%s AutoReplant=%s"),
         NewID,
         SettlementID,
         Origin.X,
@@ -230,6 +371,7 @@ int32 UFarmingSubsystem::CreateFarmZone(
         SizeX,
         SizeY,
         static_cast<int32>(Category),
+        *WF_GetCropDisplayName(CropRow),
         *CropRow.ToString(),
         bAutoReplant ? TEXT("true") : TEXT("false"));
 
@@ -248,6 +390,20 @@ int32 UFarmingSubsystem::CreateFarmZoneFromCells(
     {
         UE_LOG(LogTemp, Warning,
             TEXT("[FarmingSubsystem] CreateFarmZoneFromCells failed: no local cells."));
+
+        return INDEX_NONE;
+    }
+
+    UWildHarvestAdapter* SafeAdapter = GetWildHarvestAdapterSafe();
+    if (!WF_IsCropRowConfigured(SafeAdapter, CropRow))
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[FarmingSubsystem] CreateFarmZoneFromCells blocked: invalid or missing crop row. CropRow=%s Settlement=%d FarmGridOrigin=(%d,%d) Cells=%d"),
+            *CropRow.ToString(),
+            SettlementID,
+            FarmGridOrigin.X,
+            FarmGridOrigin.Y,
+            LocalCells.Num());
 
         return INDEX_NONE;
     }
@@ -298,7 +454,7 @@ int32 UFarmingSubsystem::CreateFarmZoneFromCells(
     FarmZones.Add(MoveTemp(Zone));
 
     UE_LOG(LogTemp, Log,
-        TEXT("[FarmingSubsystem] Created exact-cell farm zone %d: Settlement=%d Cells=%d FarmGridOrigin=(%d,%d) BoundsOrigin=(%d,%d) BoundsSize=%dx%d Category=%d CropRow=%s AutoReplant=%s"),
+        TEXT("[FarmingSubsystem] Created exact-cell farm zone %d: Settlement=%d Cells=%d FarmGridOrigin=(%d,%d) BoundsOrigin=(%d,%d) BoundsSize=%dx%d Category=%d CropRow=%s DataRow=%s AutoReplant=%s"),
         NewID,
         SettlementID,
         ExactTileCount,
@@ -309,6 +465,7 @@ int32 UFarmingSubsystem::CreateFarmZoneFromCells(
         BoundsSizeX,
         BoundsSizeY,
         static_cast<int32>(Category),
+        *WF_GetCropDisplayName(CropRow),
         *CropRow.ToString(),
         bAutoReplant ? TEXT("true") : TEXT("false"));
 
@@ -1648,6 +1805,11 @@ bool UFarmingSubsystem::HasSeedsForZone(const FWorldForgeFarmZone& Zone) const
     if (!SM)
     {
         return false;
+    }
+
+    if (SM->GetStartingSeedInventoryAmount(Zone.SettlementID, Zone.CropRowName) > 0)
+    {
+        return true;
     }
 
     return SM->HasStockpile(Zone.SettlementID, Zone.SeedItemTag, 1);

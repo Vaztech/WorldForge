@@ -189,10 +189,12 @@ FColor UWorldMapSubsystem::GetCivColor(int32 CivID) const
 
 void UWorldMapSubsystem::HandleVoxelTerrainReady()
 {
-    UE_LOG(LogTemp, Log, TEXT("[WorldMapSubsystem] Terrain-ready: rebuilding detailed map texture only."));
+    UE_LOG(LogTemp, Log, TEXT("[WorldMapSubsystem] Terrain-ready: detailed map texture marked dirty; rebuild deferred."));
 
+    // The full-map widget may already be displaying DetailedMapTexture. Rebuilding
+    // here overwrites that transient texture in place and causes a visible map-style
+    // swap, so leave the texture dirty for the next explicit refresh/request.
     MarkDetailedMapTextureDirty();
-    RebuildDetailedMapTexture();
 }
 
 // ═══════════════════════════════════════════════════════════════════

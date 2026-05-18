@@ -94,6 +94,12 @@ public:
         FName CropRow,
         bool bAutoReplant = true);
 
+    /** Resolve the MVP default crop for a player-created farm from available embark seeds. */
+    FName ResolveDefaultPlayerFarmCropRow(int32 SettlementID, ECropCategory& OutCategory);
+
+    /** Resolve the Wild Harvest category for a specific crop row without changing growth rules. */
+    ECropCategory ResolveCategoryForCropRow(FName CropRow);
+
     /**
      * Disband (soft-delete) a farm zone.
      * Sets state to Disbanded and despawns crop actors through the adapter.

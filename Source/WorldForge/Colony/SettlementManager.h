@@ -6,6 +6,18 @@
 #include "WorldForgeDataTypes.h"
 #include "SettlementManager.generated.h"
 
+USTRUCT(BlueprintType)
+struct FWorldForgeSettlementSeedInventory
+{
+    GENERATED_BODY()
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "WorldForge|Settlement|Seeds")
+    TMap<FName, int32> CropSeedQuantities;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "WorldForge|Settlement|Seeds")
+    TArray<FName> CropSeedOrder;
+};
+
 UCLASS(BlueprintType)
 class WORLDFORGE_API USettlementManager : public UWorldSubsystem
 {
@@ -32,6 +44,20 @@ public:
 
     UFUNCTION(BlueprintCallable, Category = "WorldForge|Settlement")
     bool HasStockpile(int32 ID, const FGameplayTag& Tag, int32 Min) const;
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Settlement|Seeds")
+    bool AddStartingSeedInventory(int32 ID, FName CropRowName, int32 Amount);
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Settlement|Seeds")
+    int32 GetStartingSeedInventoryAmount(int32 ID, FName CropRowName) const;
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Settlement|Seeds")
+    TMap<FName, int32> GetStartingSeedInventory(int32 ID) const;
+
+    TArray<FName> GetStartingSeedInventoryOrder(int32 ID) const;
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Settlement|Seeds")
+    bool ConsumeStartingSeedInventory(int32 SettlementID, FName CropRowName, int32 Amount);
 
     UFUNCTION(BlueprintCallable, Category = "WorldForge|Settlement")
     void AddBuilding(int32 ID, const FGameplayTag& Tag);
@@ -65,16 +91,25 @@ public:
     UFUNCTION(BlueprintCallable, Category = "WorldForge|Settlement|Claims")
     bool ClaimWorldTileForPlayerSettlement(int32 WorldTileID, FString& OutReason);
 
+    bool AddInitialPlayerClaimFootprint(int32 SettlementID, int32 CenterTileX, int32 CenterTileY, int32 Radius = 4);
+
     UFUNCTION(BlueprintPure, Category = "WorldForge|Settlement|Claims")
     bool IsWorldTileAdjacentToPlayerClaim(int32 WorldTileID) const;
 
     UFUNCTION(BlueprintPure, Category = "WorldForge|Settlement|Claims")
     int32 GetPlayerLandClaimCost(int32 WorldTileID) const;
 
-    // Patch 4C: Strategic claims are stored as world-map tile IDs on FSettlementState.
-    // Local actions operate in world position, terrain cell, or voxel cell space.
-    // These helpers convert action locations back to world-map tile IDs for later enforcement.
-    // Build/mine/dig/farm restriction checks will call these in later patches.
+    bool DoesSettlementClaimVoxelCell(int32 SettlementID, const FIntPoint& VoxelCell) const;
+    bool DoesSettlementClaimVoxelCellDetailed(
+        int32 SettlementID,
+        const FIntPoint& VoxelCell,
+        int32& OutWorldTileID,
+        FIntPoint& OutWorldTileXY,
+        int32& OutClaimedWorldTileCount) const;
+
+    // Strategic claims are stored as world-map tile IDs on FSettlementState.
+    // Local tool actions operate in world position, terrain cell, or voxel cell space.
+    // These helpers convert action locations back to world-map tile IDs for enforcement.
     UFUNCTION(BlueprintPure, Category = "WorldForge|Settlement|Claims")
     bool DoesPlayerSettlementClaimWorldTile(int32 WorldTileID) const;
 
@@ -86,6 +121,13 @@ public:
 
     UFUNCTION(BlueprintPure, Category = "WorldForge|Settlement|Claims")
     bool DoesPlayerSettlementClaimVoxelCell(const FIntPoint& VoxelCell) const;
+
+    bool DoesPlayerSettlementClaimVoxelCellDetailed(
+        const FIntPoint& VoxelCell,
+        int32& OutWorldTileID,
+        FIntPoint& OutWorldTileXY,
+        int32& OutPlayerSettlementID,
+        int32& OutClaimedWorldTileCount) const;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Settlement|Claims")
     bool bLogClaimQueries = false;
@@ -149,6 +191,9 @@ public:
 private:
     TArray<FSettlementState> Settlements;
     int32 NextSettlementID = 0;
+
+    UPROPERTY(Transient)
+    TMap<int32, FWorldForgeSettlementSeedInventory> TemporarySeedInventories;
 
     // -1 until the player colony is created. NPC civ settlements must never set this.
     int32 PlayerSettlementID = INDEX_NONE;
