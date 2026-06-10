@@ -1,4 +1,4 @@
-﻿#include "JobProcessor.h"
+#include "JobProcessor.h"
 #include "ReservationSystem.h"
 #include "SettlementManager.h"
 #include "NavigationContext.h"
@@ -28,6 +28,22 @@ namespace
     // Turn this on only when debugging score math.
     // Leaving it false prevents log spam every simulation step.
     constexpr bool bLogJobModifierScoring = false;
+    constexpr int32 NavPathWarningLogIntervalSteps = 25;
+
+    bool ShouldLogNavPathWarning(int32 AgentID, int32 StepNumber)
+    {
+        static TMap<int32, int32> LastWarningStepByAgent;
+
+        const int32* LastWarningStep = LastWarningStepByAgent.Find(AgentID);
+        if (LastWarningStep && StepNumber >= *LastWarningStep &&
+            StepNumber - *LastWarningStep < NavPathWarningLogIntervalSteps)
+        {
+            return false;
+        }
+
+        LastWarningStepByAgent.Add(AgentID, StepNumber);
+        return true;
+    }
 
     FAgentData BuildModifierScoredAgentForJobSelection(const FAgentData& Agent)
     {
@@ -154,43 +170,127 @@ void UJobProcessor::ProcessStep(
 
 // ====================================================================
 // MOVEMENT SYSTEM
-// Moves agent one grid cell per simulation step toward target.
+// Moves agent one grid cell per simulation step along the navigation path.
 // ====================================================================
 void UJobProcessor::TickMovement(
     FAgentData& Agent,
     int32 StepNumber,
     UWorld* World)
 {
-    const FIntPoint Target = Agent.CurrentNavTarget;
+    const FIntPoint Start = Agent.CurrentGridPos;
+    const FIntPoint Goal = Agent.CurrentNavTarget;
 
-    if (Agent.CurrentGridPos == Target)
+    if (Start == Goal)
     {
         OnAgentArrived(Agent, StepNumber, World);
         return;
     }
 
-    FIntPoint Pos = Agent.CurrentGridPos;
+    UNavigationContext* NavContext = World
+        ? World->GetSubsystem<UNavigationContext>()
+        : nullptr;
 
-    for (int32 i = 0; i < MovementCellsPerStep; ++i)
+    if (!NavContext)
     {
-        if (Pos == Target)
+        if (ShouldLogNavPathWarning(Agent.AgentID, StepNumber))
         {
-            break;
+            UE_LOG(
+                LogTemp,
+                Warning,
+                TEXT("[CubeTerrainNavPath] AgentID=%d SettlementID=%d Start=(%d,%d) Goal=(%d,%d) Found=false Length=0"),
+                Agent.AgentID,
+                Agent.SettlementID,
+                Start.X,
+                Start.Y,
+                Goal.X,
+                Goal.Y);
         }
-
-        if (Pos.X != Target.X)
-        {
-            Pos.X += (Target.X > Pos.X) ? 1 : -1;
-        }
-        else if (Pos.Y != Target.Y)
-        {
-            Pos.Y += (Target.Y > Pos.Y) ? 1 : -1;
-        }
+        return;
     }
 
-    Agent.CurrentGridPos = Pos;
+    // CUBE-TERRAIN-04U-STEP3: skip movement for agents whose settlement has no nav grid.
+    // Agents from stale/bootstrap settlements without a registered grid return early here.
+    if (NavContext->GetGrid(Agent.SettlementID).Num() == 0)
+    {
+        if (ShouldLogNavPathWarning(Agent.AgentID, StepNumber))
+        {
+            UE_LOG(
+                LogTemp,
+                Log,
+                TEXT("[CubeTerrainNavAgentSkip] AgentID=%d SettlementID=%d Reason=NoNavGrid"),
+                Agent.AgentID,
+                Agent.SettlementID);
+        }
+        return;
+    }
 
-    if (Agent.CurrentGridPos == Target)
+    const TArray<FIntPoint> Path = NavContext->FindPath(Agent.SettlementID, Start, Goal);
+
+    if (Path.Num() == 0)
+    {
+        if (ShouldLogNavPathWarning(Agent.AgentID, StepNumber))
+        {
+            UE_LOG(
+                LogTemp,
+                Warning,
+                TEXT("[CubeTerrainNavPath] AgentID=%d SettlementID=%d Start=(%d,%d) Goal=(%d,%d) Found=false Length=0"),
+                Agent.AgentID,
+                Agent.SettlementID,
+                Start.X,
+                Start.Y,
+                Goal.X,
+                Goal.Y);
+        }
+        return;
+    }
+
+    if (Path.Num() <= 1)
+    {
+        UE_LOG(
+            LogTemp,
+            Verbose,
+            TEXT("[CubeTerrainNavPath] AgentID=%d SettlementID=%d Start=(%d,%d) Goal=(%d,%d) Found=true Length=%d Next=(%d,%d)"),
+            Agent.AgentID,
+            Agent.SettlementID,
+            Start.X,
+            Start.Y,
+            Goal.X,
+            Goal.Y,
+            Path.Num(),
+            Start.X,
+            Start.Y);
+        return;
+    }
+
+    const FIntPoint Next = Path[1];
+
+    UE_LOG(
+        LogTemp,
+        Verbose,
+        TEXT("[CubeTerrainNavPath] AgentID=%d SettlementID=%d Start=(%d,%d) Goal=(%d,%d) Found=true Length=%d Next=(%d,%d)"),
+        Agent.AgentID,
+        Agent.SettlementID,
+        Start.X,
+        Start.Y,
+        Goal.X,
+        Goal.Y,
+        Path.Num(),
+        Next.X,
+        Next.Y);
+
+    UE_LOG(
+        LogTemp,
+        Verbose,
+        TEXT("[CubeTerrainNavStep] AgentID=%d FromLocal=(%d,%d) ToLocal=(%d,%d)"),
+        Agent.AgentID,
+        Start.X,
+        Start.Y,
+        Next.X,
+        Next.Y);
+
+    Agent.CurrentGridPos = Next;
+
+    if (Agent.CurrentGridPos == Goal)
     {
         OnAgentArrived(Agent, StepNumber, World);
     }

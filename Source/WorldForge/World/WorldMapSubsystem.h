@@ -288,6 +288,13 @@ public:
     UFUNCTION(BlueprintPure, Category = "WorldForge|WorldMap")
     bool TileIndexToXY(int32 TileIndex, int32& OutTileX, int32& OutTileY) const;
 
+    // MiniMapFix: Authoritative world-position → tile XY conversion.
+    // Uses GridWidth/GridHeight from this subsystem (always correct) and only queries
+    // VoxelWorldManager for terrain origin and cell size (not CachedTerrainGridWidth/Height).
+    // All minimap and HUD terrain-info code must use this instead of VoxelWorldManager::WorldToTerrainCell.
+    UFUNCTION(BlueprintPure, Category = "WorldForge|WorldMap")
+    bool WorldPositionToTileXY(const FVector& WorldPosition, int32& OutTileX, int32& OutTileY) const;
+
     // Patch 4C: Convert action-space locations back to strategic world-map tile IDs.
     // Settlement claims stay authoritative in USettlementManager; these are only coordinate helpers.
     UFUNCTION(BlueprintPure, Category = "WorldForge|WorldMap")

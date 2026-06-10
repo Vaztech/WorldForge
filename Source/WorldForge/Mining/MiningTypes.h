@@ -37,6 +37,15 @@ struct FMiningDesignation
 	UPROPERTY(BlueprintReadOnly)
 	FIntVector GridPosition = FIntVector::ZeroValue;
 
+	/**
+	 * The original input voxel coordinate from the player's mine designation commit,
+	 * before ResolveMineTarget adjusts Z to the nearest solid block.
+	 * The confirmed mine overlay is keyed to this coord (it was committed before resolution).
+	 * Used only for confirmed overlay removal via UGridSelectionSubsystem::RemoveConfirmedDesignationCell.
+	 */
+	UPROPERTY(BlueprintReadOnly)
+	FIntVector OriginalGridPosition = FIntVector::ZeroValue;
+
 	UPROPERTY(BlueprintReadOnly)
 	FGameplayTag ExpectedBlockType;
 

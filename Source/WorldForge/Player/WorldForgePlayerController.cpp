@@ -40,8 +40,10 @@
 #include "Colony/ProcessorManager.h"
 #include "Colony/WorldForgeColonist.h"
 #include "Engine/EngineTypes.h"
+#include "EngineUtils.h"
 #include "Grid/LayerViewSubsystem.h"
 #include "Grid/MineLayerCoordinator.h"
+#include "World/WorldGenBootstrapActor.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogWorldForgePC, Log, All);
 
@@ -241,7 +243,6 @@ void AWorldForgePlayerController::BeginPlay()
         UE_LOG(LogWorldForgePC, Warning, TEXT("[WorldForgePC] BuildWidgetClass not set."));
     }
 
-    AcquireAndApplyCameraViewTarget(true);
     RefreshBuildInputSuppression();
 }
 
@@ -386,9 +387,28 @@ void AWorldForgePlayerController::PlayerTick(float DeltaTime)
 {
     Super::PlayerTick(DeltaTime);
 
-    if (!bCameraViewTargetApplied)
+    if (!bHasCheckedPrePlayBlocking)
     {
-        AcquireAndApplyCameraViewTarget(false);
+        bHasCheckedPrePlayBlocking = true;
+        if (UWorld* World = GetWorld())
+        {
+            for (TActorIterator<AWorldGenBootstrapActor> It(World); It; ++It)
+            {
+                if (IsValid(*It) && (*It)->IsPrePlayBlocking())
+                {
+                    bPrePlayBlockedByBootstrap = true;
+                    CachedBootstrapActor = *It;
+                    UE_LOG(LogWorldForgePC, Log,
+                        TEXT("[WorldForgePC] Pre-play blocking detected; camera view target deferred until bootstrap releases."));
+                    break;
+                }
+            }
+        }
+    }
+
+    if (!bCameraViewTargetApplied && !bPrePlayBlockedByBootstrap)
+    {
+        AcquireAndApplyCameraViewTarget(true);
     }
 
     RefreshBuildInputSuppression();
@@ -888,6 +908,9 @@ void AWorldForgePlayerController::ToggleDigMode()
 
 void AWorldForgePlayerController::ToggleMineMode()
 {
+    UE_LOG(LogWorldForgePC, Warning, TEXT("[CUBE-MINING-01-AUDIT] ToggleMineMode entered. BuildModeManager=%s"),
+        BuildModeManager ? TEXT("valid") : TEXT("NULL"));
+
     if (!BuildModeManager) return;
 
     const bool bWasInMineMode = BuildModeManager->IsInMineMode();
@@ -904,9 +927,11 @@ void AWorldForgePlayerController::ToggleMineMode()
 
     if (BuildModeManager->IsInMineMode())
     {
-        EnterMiningSubsystems();
+        // CUBE-MINING-01 MVP: surface mine path only.
+        // Do not enter old cutaway/mining camera subsystem here.
+        // Underground mining will call EnterMiningSubsystems() explicitly later.
         RefreshBuildInputSuppression();
-        UE_LOG(LogWorldForgePC, Log, TEXT("[WorldForgePC] Mine Mode entered."));
+        UE_LOG(LogWorldForgePC, Log, TEXT("[WorldForgePC] Mine Mode entered (CUBE-MINING-01 MVP surface path)."));
     }
 }
 
@@ -1027,6 +1052,13 @@ void AWorldForgePlayerController::RefreshBuildInputSuppression()
         TEXT("[WorldForgePC] Camera input refreshed. InBuildMode=%s Suppressed=%s"),
         (BuildModeManager && BuildModeManager->IsInBuildMode()) ? TEXT("true") : TEXT("false"),
         bBuildInputSuppressed ? TEXT("true") : TEXT("false"));
+}
+
+void AWorldForgePlayerController::NotifyCameraHandoffComplete()
+{
+    bPrePlayBlockedByBootstrap = false;
+    bCameraViewTargetApplied = true;
+    UE_LOG(LogWorldForgePC, Log, TEXT("[WorldForgePC] Camera handoff complete from bootstrap."));
 }
 
 bool AWorldForgePlayerController::AcquireAndApplyCameraViewTarget(bool bLogResult)

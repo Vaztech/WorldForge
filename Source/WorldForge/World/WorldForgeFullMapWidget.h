@@ -280,6 +280,10 @@ protected:
     // ------------------------------------------------------------------
     float ViewCenterX = 0.5f;
     float ViewCenterY = 0.5f;
+
+    UPROPERTY(EditAnywhere, Category = "WorldForge|Map", meta = (ClampMin = "1.0", UIMin = "1.0"))
+    float DefaultMapZoom = 1.25f;
+
     float Zoom = 1.0f;
 
     bool bPanUp = false;
@@ -326,7 +330,7 @@ protected:
     float LastResponsiveTextHeight = -1.0f;
 
     UPROPERTY(EditAnywhere, Category = "WorldForge|Map|Accuracy")
-    bool bUseStableFullMapCoordinates = true;
+    bool bUseStableFullMapCoordinates = false;
 
     // Tile-grid based map selection. This avoids texture/UV drift by making
     // the full map a true GridWidth x GridHeight tile picker.
@@ -336,14 +340,23 @@ protected:
     UPROPERTY(EditAnywhere, Category = "WorldForge|Map|TileGrid")
     bool bShowTileGridOverlay = true;
 
+    UPROPERTY(EditAnywhere, Category = "WorldForge|Map|TileGrid")
+    bool bDrawMajorGrid = false;
+
+    UPROPERTY(EditAnywhere, Category = "WorldForge|Map|TileGrid")
+    bool bDrawMinorCellGrid = false;
+
     UPROPERTY(EditAnywhere, Category = "WorldForge|Map|TileGrid", meta = (ClampMin = "4", UIMin = "4"))
     int32 MajorGridLineInterval = 16;
 
-    UPROPERTY(EditAnywhere, Category = "WorldForge|Map|TileGrid")
-    FLinearColor MinorGridLineColor = FLinearColor(0.0f, 0.0f, 0.0f, 0.20f);
+    UPROPERTY(EditAnywhere, Category = "WorldForge|Map|TileGrid", meta = (ClampMin = "1.0", UIMin = "1.0"))
+    float MinorGridMinScreenPixels = 6.0f;
 
     UPROPERTY(EditAnywhere, Category = "WorldForge|Map|TileGrid")
-    FLinearColor MajorGridLineColor = FLinearColor(1.0f, 1.0f, 1.0f, 0.28f);
+    FLinearColor MinorGridLineColor = FLinearColor(0.0f, 0.0f, 0.0f, 0.08f);
+
+    UPROPERTY(EditAnywhere, Category = "WorldForge|Map|TileGrid")
+    FLinearColor MajorGridLineColor = FLinearColor(1.0f, 1.0f, 1.0f, 0.18f);
 
     UPROPERTY(EditAnywhere, Category = "WorldForge|Map|TileGrid")
     FLinearColor HoveredTileColor = FLinearColor(1.0f, 1.0f, 0.15f, 1.0f);
@@ -491,18 +504,24 @@ protected:
         FVector2D MapRectSize = FVector2D::ZeroVector;
         bool bIsValid = false;
         bool bUsedAspectCorrectedRect = false;
+        bool bUsingStableRootRect = false;
     };
 
-    // Returns the current IMG_Map geometry. After a resize, the live widget
-    // geometry is preferred; the paint-pass cache is only a fallback before
-    // IMG_Map has a valid non-zero cached size.
+    // Returns the current IMG_Map geometry for legacy fallback use only.
+    // Shared coordinate math now prefers a stable root-derived map rect so
+    // IMG_Map render transforms do not affect hit testing or marker placement.
     bool GetCurrentIMGMapGeometry(FGeometry& OutMapGeometry) const;
 
     // Single source of truth for the visible map rectangle used by mouse,
-    // hover, selection, grid, marker, and transform paths.
+    // hover, selection, grid, marker, and transform paths. This prefers a
+    // stable untransformed root rect and falls back to IMG_Map geometry only
+    // when the root/widget geometry is temporarily invalid.
     bool GetCurrentMapDisplayGeometry(FMapDisplayGeometry& OutMapDisplayGeometry) const;
 
     FVector2D WidgetUVToWorldUV(const FVector2D& WidgetUV) const;
+    FVector2D WorldUVToWidgetUV(const FVector2D& WorldUV) const;
+    bool WorldUVToMapDisplayLocal(const FVector2D& WorldUV, const FMapDisplayGeometry& MapDisplayGeometry, FVector2D& OutIMGMapLocal) const;
+    bool TileXYToMapDisplayRect(int32 TileX, int32 TileY, const FMapDisplayGeometry& MapDisplayGeometry, FVector2D& OutMinIMGMapLocal, FVector2D& OutMaxIMGMapLocal) const;
     bool TileXYToMapDisplayLocal(int32 TileX, int32 TileY, const FMapDisplayGeometry& MapDisplayGeometry, FVector2D& OutIMGMapLocal) const;
     bool TileXYToWidgetLocal(int32 TileX, int32 TileY, const FGeometry& AllottedGeometry, FVector2D& OutWidgetLocal) const;
     bool MapLocalToTileXY(const FVector2D& IMGMapLocal, const FMapDisplayGeometry& MapDisplayGeometry, int32& OutTileX, int32& OutTileY, int32& OutTileIndex, FVector2D* OutNormalizedMapUV = nullptr) const;
@@ -549,8 +568,21 @@ protected:
     // Paint-pass cached geometry for IMG_Map.
     //
     // This cache can become stale after a resize. It remains only as an
-    // early-frame fallback when IMG_Map->GetCachedGeometry() is unavailable
-    // or zero-sized; it is no longer the preferred source for map math.
+    // early-frame fallback when the stable root-derived map rect is invalid.
     // ------------------------------------------------------------------
+    mutable bool bHasLoggedStableRectFallbackWarning = false;
     mutable FGeometry CachedIMGMapPaintGeometry;
+
+    bool bHasLoggedZoomFixState = false;
+    bool bLastLoggedZoomFixUsedStableRootRect = false;
+    float LastLoggedZoomFixZoom = -1.0f;
+    FVector2D LastLoggedZoomFixPan = FVector2D::ZeroVector;
+    FVector2D LastLoggedZoomFixRectPos = FVector2D::ZeroVector;
+    FVector2D LastLoggedZoomFixRectSize = FVector2D::ZeroVector;
+
+    // MAP-ZOOM-02A: Dedup state for debug logs — avoids per-frame spam.
+    mutable int32 LastLoggedHoverTileX = INDEX_NONE;
+    mutable int32 LastLoggedHoverTileY = INDEX_NONE;
+    mutable int32 LastLoggedSelectedDrawTileX = INDEX_NONE;
+    mutable int32 LastLoggedSelectedDrawTileY = INDEX_NONE;
 };

@@ -24,6 +24,7 @@
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "TimerManager.h"
+#include "UObject/SoftObjectPath.h" // CUBE-TERRAIN-04N-STEP11B: FSoftClassPath for BP auto-load
 #include "Engine/StaticMeshActor.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/StaticMesh.h"
@@ -36,6 +37,8 @@
 #include "VoxelData/VoxelDataIncludes.h"
 #include "VoxelValue.h"
 #include "VoxelRender/IVoxelLODManager.h"
+#include "VoxelRender/IVoxelRenderer.h"
+#include "IVoxelPool.h"
 #endif
 
 #include "Kismet/GameplayStatics.h"
@@ -43,10 +46,14 @@
 #include "GameFramework/Pawn.h"
 #include "Utility/WorldForgeTerrainSettings.h"
 #include "WorldForgeTerrainGenerator.h"
+#include "World/WorldMapSubsystem.h"
 #include "Data/WorldForgeTags.h"
 #include "Utility/WorldForgeTerrainMath.h"
 #include "Mining/ResourceSpawnSubsystem.h"
 #include "Farming/WildHarvestAdapter.h"  // ════ Wild Harvest Integration ════
+#include "VoxelRender/MaterialCollections/VoxelBasicMaterialCollection.h"
+#include "CubeTerrainRuntime.h"          // CUBE-TERRAIN-01B
+#include "WorldForgeCubeTerrainActor.h" // CUBE-TERRAIN-01D
 
 // ─── [BIOME TAG HELPERS] ─────────────────────────────────────
 // Cached-by-call tag accessors. Kept in an anonymous namespace
@@ -88,6 +95,583 @@ namespace
     {
         return FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.DeepOcean")), false);
     }
+
+    static FGameplayTag GetBiomeRiverTag()
+    {
+        return FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.River")), false);
+    }
+
+    static float BuildRiverWorldSurfaceZ(
+        float Elevation01,
+        const FWorldForgeTerrainSnapshot& Snapshot,
+        const FVector& Origin,
+        float RenderVoxelSize)
+    {
+        const float SurfaceHeightVoxels = FWorldForgeTerrainMath::ElevationToVoxelHeight(Elevation01, Snapshot);
+        return Origin.Z + (SurfaceHeightVoxels * RenderVoxelSize);
+    }
+
+    static FVector BuildRiverTileCenterWorld(
+        const FIntPoint& Tile,
+        int32 GridWidth,
+        int32 GridHeight,
+        const FVector& Origin,
+        float CellSize,
+        float WorldZ)
+    {
+        const float HalfGridWidth = static_cast<float>(GridWidth) * 0.5f;
+        const float HalfGridHeight = static_cast<float>(GridHeight) * 0.5f;
+
+        const float X = (static_cast<float>(Tile.X) - HalfGridWidth + 0.5f) * CellSize;
+        const float Y = (static_cast<float>(Tile.Y) - HalfGridHeight + 0.5f) * CellSize;
+
+        return FVector(Origin.X + X, Origin.Y + Y, WorldZ);
+    }
+
+    static TArray<FIntPoint> BuildOrderedRiverTilePath(
+        const TArray<FIntPoint>& ComponentTiles,
+        const TArray<FWorldTileData>& WorldTiles,
+        int32 GridWidth)
+    {
+        TArray<FIntPoint> OrderedPath;
+        if (ComponentTiles.Num() == 0 || GridWidth <= 0)
+        {
+            return OrderedPath;
+        }
+
+        auto ToIndex = [GridWidth](const FIntPoint& Cell) -> int32
+            {
+                return (Cell.Y * GridWidth) + Cell.X;
+            };
+
+        TSet<int32> ComponentSet;
+        for (const FIntPoint& Tile : ComponentTiles)
+        {
+            ComponentSet.Add(ToIndex(Tile));
+        }
+
+        static const FIntPoint Neighbors[] =
+        {
+            FIntPoint(-1,  0), FIntPoint(1,  0), FIntPoint(0, -1), FIntPoint(0,  1),
+            FIntPoint(-1, -1), FIntPoint(1, -1), FIntPoint(-1,  1), FIntPoint(1,  1)
+        };
+
+        auto CountRiverNeighbors = [&](int32 TileIndex) -> int32
+            {
+                const int32 X = TileIndex % GridWidth;
+                const int32 Y = TileIndex / GridWidth;
+                int32 Count = 0;
+
+                for (const FIntPoint& Offset : Neighbors)
+                {
+                    const int32 NX = X + Offset.X;
+                    const int32 NY = Y + Offset.Y;
+                    const int32 NeighborIndex = (NY * GridWidth) + NX;
+                    if (ComponentSet.Contains(NeighborIndex))
+                    {
+                        ++Count;
+                    }
+                }
+
+                return Count;
+            };
+
+        int32 StartIndex = ToIndex(ComponentTiles[0]);
+        float BestStartElevation = -BIG_NUMBER;
+        bool bFoundEndpoint = false;
+
+        for (const FIntPoint& Tile : ComponentTiles)
+        {
+            const int32 TileIndex = ToIndex(Tile);
+            const int32 NeighborCount = CountRiverNeighbors(TileIndex);
+            const bool bEndpoint = NeighborCount <= 1;
+
+            if (!bFoundEndpoint && !bEndpoint)
+            {
+                continue;
+            }
+
+            const float Elevation = WorldTiles.IsValidIndex(TileIndex) ? WorldTiles[TileIndex].Elevation : 0.0f;
+            if (!bFoundEndpoint || Elevation > BestStartElevation)
+            {
+                bFoundEndpoint = bEndpoint;
+                BestStartElevation = Elevation;
+                StartIndex = TileIndex;
+            }
+        }
+
+        TSet<int32> Remaining = ComponentSet;
+        int32 CurrentIndex = StartIndex;
+
+        while (Remaining.Num() > 0)
+        {
+            Remaining.Remove(CurrentIndex);
+            OrderedPath.Add(FIntPoint(CurrentIndex % GridWidth, CurrentIndex / GridWidth));
+
+            if (Remaining.Num() == 0)
+            {
+                break;
+            }
+
+            int32 BestNextIndex = INDEX_NONE;
+            float BestNextScore = BIG_NUMBER;
+            const int32 CurrentX = CurrentIndex % GridWidth;
+            const int32 CurrentY = CurrentIndex / GridWidth;
+
+            for (const FIntPoint& Offset : Neighbors)
+            {
+                const int32 NX = CurrentX + Offset.X;
+                const int32 NY = CurrentY + Offset.Y;
+                const int32 NeighborIndex = (NY * GridWidth) + NX;
+                if (!Remaining.Contains(NeighborIndex))
+                {
+                    continue;
+                }
+
+                const FWorldTileData& CandidateTile = WorldTiles[NeighborIndex];
+                const float Score = CandidateTile.Elevation - (CandidateTile.WaterDepth * 0.25f);
+                if (Score < BestNextScore)
+                {
+                    BestNextScore = Score;
+                    BestNextIndex = NeighborIndex;
+                }
+            }
+
+            if (BestNextIndex == INDEX_NONE)
+            {
+                float BestDistanceSq = BIG_NUMBER;
+                for (const FIntPoint& Candidate : ComponentTiles)
+                {
+                    const int32 CandidateIndex = ToIndex(Candidate);
+                    if (!Remaining.Contains(CandidateIndex))
+                    {
+                        continue;
+                    }
+
+                    const float DX = static_cast<float>(Candidate.X - CurrentX);
+                    const float DY = static_cast<float>(Candidate.Y - CurrentY);
+                    const float DistanceSq = (DX * DX) + (DY * DY);
+                    const float CandidateScore = DistanceSq + (WorldTiles[CandidateIndex].Elevation * 0.25f);
+                    if (CandidateScore < BestDistanceSq)
+                    {
+                        BestDistanceSq = CandidateScore;
+                        BestNextIndex = CandidateIndex;
+                    }
+                }
+            }
+
+            if (BestNextIndex == INDEX_NONE)
+            {
+                break;
+            }
+
+            CurrentIndex = BestNextIndex;
+        }
+
+        return OrderedPath;
+    }
+
+    static void AppendRiverSegmentDescriptors(
+        const TArray<FIntPoint>& OrderedPath,
+        const TArray<FWorldTileData>& WorldTiles,
+        int32 GridWidth,
+        int32 GridHeight,
+        const FWorldForgeTerrainSnapshot& Snapshot,
+        const FVector& Origin,
+        float RenderVoxelSize,
+        float CellSize,
+        int32& NextRiverID,
+        TArray<FWorldForgeRiverSurfaceDesc>& OutDescs)
+    {
+        if (OrderedPath.Num() < 2 || GridWidth <= 0 || GridHeight <= 0)
+        {
+            return;
+        }
+
+        auto ToIndex = [GridWidth](const FIntPoint& Cell) -> int32
+            {
+                return (Cell.Y * GridWidth) + Cell.X;
+            };
+
+        constexpr int32 MaxSegmentTiles = 8;
+        constexpr int32 SegmentAdvance = 6;
+
+        for (int32 Start = 0; Start < OrderedPath.Num() - 1; Start += SegmentAdvance)
+        {
+            const int32 EndExclusive = FMath::Min(Start + MaxSegmentTiles, OrderedPath.Num());
+            if (EndExclusive - Start < 2)
+            {
+                break;
+            }
+
+            FWorldForgeRiverSurfaceDesc Desc;
+            Desc.RiverID = NextRiverID++;
+            Desc.StartTile = OrderedPath[Start];
+            Desc.EndTile = OrderedPath[EndExclusive - 1];
+            Desc.MinTile = Desc.StartTile;
+            Desc.MaxTile = Desc.StartTile;
+
+            float WaterDepthSum = 0.0f;
+            float ElevationSum = 0.0f;
+            float WaterZSum = 0.0f;
+
+            for (int32 PathIndex = Start; PathIndex < EndExclusive; ++PathIndex)
+            {
+                const FIntPoint Tile = OrderedPath[PathIndex];
+                const int32 TileIndex = ToIndex(Tile);
+                if (!WorldTiles.IsValidIndex(TileIndex))
+                {
+                    continue;
+                }
+
+                const FWorldTileData& TileData = WorldTiles[TileIndex];
+                Desc.TilePath.Add(Tile);
+                Desc.MinTile.X = FMath::Min(Desc.MinTile.X, Tile.X);
+                Desc.MinTile.Y = FMath::Min(Desc.MinTile.Y, Tile.Y);
+                Desc.MaxTile.X = FMath::Max(Desc.MaxTile.X, Tile.X);
+                Desc.MaxTile.Y = FMath::Max(Desc.MaxTile.Y, Tile.Y);
+
+                WaterDepthSum += TileData.WaterDepth;
+                ElevationSum += TileData.Elevation;
+                WaterZSum += BuildRiverWorldSurfaceZ(TileData.Elevation, Snapshot, Origin, RenderVoxelSize);
+            }
+
+            Desc.TileCount = Desc.TilePath.Num();
+            if (Desc.TileCount < 2)
+            {
+                continue;
+            }
+
+            const float InvCount = 1.0f / static_cast<float>(Desc.TileCount);
+            Desc.AverageWaterDepth = WaterDepthSum * InvCount;
+            Desc.AverageSurfaceElevation01 = ElevationSum * InvCount;
+            Desc.AverageWaterZ = WaterZSum * InvCount;
+            Desc.AverageWidth = FMath::Clamp(0.9f + (Desc.AverageWaterDepth * 8.0f), 0.9f, 2.5f);
+            Desc.ChannelDepthVoxels = FMath::Clamp(0.6f + (Desc.AverageWaterDepth * 12.0f), 0.6f, 2.2f);
+            Desc.BankFalloffTiles = FMath::Clamp((Desc.AverageWidth * 0.65f) + 0.65f, 0.9f, 2.1f);
+
+            const int32 StartIndex = ToIndex(Desc.StartTile);
+            const int32 EndIndex = ToIndex(Desc.EndTile);
+            const float StartZ = WorldTiles.IsValidIndex(StartIndex)
+                ? BuildRiverWorldSurfaceZ(WorldTiles[StartIndex].Elevation, Snapshot, Origin, RenderVoxelSize)
+                : Desc.AverageWaterZ;
+            Desc.WorldStart = BuildRiverTileCenterWorld(Desc.StartTile, GridWidth, GridHeight, Origin, CellSize, StartZ);
+
+            const float StartElevation = WorldTiles.IsValidIndex(StartIndex) ? WorldTiles[StartIndex].Elevation : Desc.AverageSurfaceElevation01;
+            const float EndElevation = WorldTiles.IsValidIndex(EndIndex) ? WorldTiles[EndIndex].Elevation : Desc.AverageSurfaceElevation01;
+            const float ElevationDrop = FMath::Max(0.0f, StartElevation - EndElevation);
+            Desc.FlowSpeed = FMath::Clamp(0.15f + (ElevationDrop * 4.0f) + (Desc.AverageWaterDepth * 0.5f), 0.15f, 1.25f);
+
+            OutDescs.Add(MoveTemp(Desc));
+
+            if (EndExclusive >= OrderedPath.Num())
+            {
+                break;
+            }
+        }
+    }
+
+    static TArray<FWorldForgeRiverSurfaceDesc> BuildRiverSurfaceDescriptors(
+        const TArray<FWorldTileData>& WorldTiles,
+        int32 GridWidth,
+        int32 GridHeight,
+        const FWorldForgeTerrainSnapshot& Snapshot,
+        const FVector& Origin,
+        float RenderVoxelSize,
+        float CellSize)
+    {
+        TArray<FWorldForgeRiverSurfaceDesc> Descs;
+
+        if (GridWidth <= 0 || GridHeight <= 0 || WorldTiles.Num() != (GridWidth * GridHeight))
+        {
+            return Descs;
+        }
+
+        const FGameplayTag RiverTag = GetBiomeRiverTag();
+
+        auto IsRiverTile = [&](int32 TileIndex) -> bool
+            {
+                if (!WorldTiles.IsValidIndex(TileIndex))
+                {
+                    return false;
+                }
+
+                const FWorldTileData& Tile = WorldTiles[TileIndex];
+                const bool bRiverBiome = RiverTag.IsValid() && Tile.BiomeType.MatchesTag(RiverTag);
+                if (bRiverBiome)
+                {
+                    return true;
+                }
+
+                return !RiverTag.IsValid() && Tile.WaterDepth >= 0.04f;
+            };
+
+        TArray<uint8> Visited;
+        Visited.Init(0, WorldTiles.Num());
+        static const FIntPoint Neighbors[] =
+        {
+            FIntPoint(-1,  0), FIntPoint(1,  0), FIntPoint(0, -1), FIntPoint(0,  1),
+            FIntPoint(-1, -1), FIntPoint(1, -1), FIntPoint(-1,  1), FIntPoint(1,  1)
+        };
+
+        int32 NextRiverID = 0;
+
+        for (int32 Y = 0; Y < GridHeight; ++Y)
+        {
+            for (int32 X = 0; X < GridWidth; ++X)
+            {
+                const int32 SeedIndex = (Y * GridWidth) + X;
+                if (Visited[SeedIndex] || !IsRiverTile(SeedIndex))
+                {
+                    continue;
+                }
+
+                TArray<int32> FloodQueue;
+                TArray<FIntPoint> ComponentTiles;
+                FloodQueue.Add(SeedIndex);
+                Visited[SeedIndex] = 1;
+
+                for (int32 QueueIndex = 0; QueueIndex < FloodQueue.Num(); ++QueueIndex)
+                {
+                    const int32 TileIndex = FloodQueue[QueueIndex];
+                    const int32 TileX = TileIndex % GridWidth;
+                    const int32 TileY = TileIndex / GridWidth;
+                    ComponentTiles.Add(FIntPoint(TileX, TileY));
+
+                    for (const FIntPoint& Offset : Neighbors)
+                    {
+                        const int32 NX = TileX + Offset.X;
+                        const int32 NY = TileY + Offset.Y;
+                        if (NX < 0 || NY < 0 || NX >= GridWidth || NY >= GridHeight)
+                        {
+                            continue;
+                        }
+
+                        const int32 NeighborIndex = (NY * GridWidth) + NX;
+                        if (Visited[NeighborIndex] || !IsRiverTile(NeighborIndex))
+                        {
+                            continue;
+                        }
+
+                        Visited[NeighborIndex] = 1;
+                        FloodQueue.Add(NeighborIndex);
+                    }
+                }
+
+                if (ComponentTiles.Num() < 2)
+                {
+                    continue;
+                }
+
+                const TArray<FIntPoint> OrderedPath = BuildOrderedRiverTilePath(ComponentTiles, WorldTiles, GridWidth);
+                AppendRiverSegmentDescriptors(
+                    OrderedPath,
+                    WorldTiles,
+                    GridWidth,
+                    GridHeight,
+                    Snapshot,
+                    Origin,
+                    RenderVoxelSize,
+                    CellSize,
+                    NextRiverID,
+                    Descs);
+            }
+        }
+
+        return Descs;
+    }
+
+    // ── RIVER-WATER-02B: Build full river network descriptors. ──
+    // One descriptor per connected river component, with full ordered TilePath,
+    // source/outlet endpoints, bounds, depth stats, and lake/sea adjacency flags.
+    // Called in BuildTerrainSnapshot() after BuildRiverSurfaceDescriptors().
+    // Does NOT replace the legacy short-segment RiverSurfaceDesc path.
+    static TArray<FWorldForgeRiverNetworkDesc> BuildRiverNetworkDescriptors(
+        const TArray<FWorldTileData>& WorldTiles,
+        int32 GridWidth,
+        int32 GridHeight,
+        const FWorldForgeTerrainSnapshot& Snapshot,
+        const FVector& Origin,
+        float RenderVoxelSize,
+        float CellSize)
+    {
+        TArray<FWorldForgeRiverNetworkDesc> Networks;
+
+        if (GridWidth <= 0 || GridHeight <= 0 || WorldTiles.Num() != (GridWidth * GridHeight))
+        {
+            return Networks;
+        }
+
+        const FGameplayTag RiverTag = GetBiomeRiverTag();
+        const FGameplayTag LakeTag = GetBiomeLakeTag();
+        const FGameplayTag OceanTag = GetBiomeOceanTag();
+        const FGameplayTag SeaTag = GetBiomeSeaTag();
+        const FGameplayTag DeepOcean = GetBiomeDeepOceanTag();
+
+        auto IsRiverTile = [&](int32 TileIndex) -> bool
+            {
+                if (!WorldTiles.IsValidIndex(TileIndex)) { return false; }
+                const FWorldTileData& Tile = WorldTiles[TileIndex];
+                const bool bRiverBiome = RiverTag.IsValid() && Tile.BiomeType.MatchesTag(RiverTag);
+                if (bRiverBiome) { return true; }
+                return !RiverTag.IsValid() && Tile.WaterDepth >= 0.04f;
+            };
+
+        static const FIntPoint Dirs8[] =
+        {
+            FIntPoint(-1,  0), FIntPoint(1,  0), FIntPoint(0, -1), FIntPoint(0,  1),
+            FIntPoint(-1, -1), FIntPoint(1, -1), FIntPoint(-1,  1), FIntPoint(1,  1)
+        };
+
+        int32 RiverTileCount = 0;
+        for (int32 i = 0; i < WorldTiles.Num(); ++i) { if (IsRiverTile(i)) ++RiverTileCount; }
+        UE_LOG(LogTemp, Log, TEXT("[RiverNetwork] Build start RiverTiles=%d"), RiverTileCount);
+
+        TArray<uint8> Visited;
+        Visited.Init(0, WorldTiles.Num());
+
+        int32 NetworkID = 0;
+
+        for (int32 Y = 0; Y < GridHeight; ++Y)
+        {
+            for (int32 X = 0; X < GridWidth; ++X)
+            {
+                const int32 SeedIndex = (Y * GridWidth) + X;
+                if (Visited[SeedIndex] || !IsRiverTile(SeedIndex))
+                {
+                    continue;
+                }
+
+                TArray<int32> FloodQueue;
+                TArray<FIntPoint> ComponentTiles;
+                FloodQueue.Add(SeedIndex);
+                Visited[SeedIndex] = 1;
+
+                for (int32 QIdx = 0; QIdx < FloodQueue.Num(); ++QIdx)
+                {
+                    const int32 TIdx = FloodQueue[QIdx];
+                    const int32 TX = TIdx % GridWidth;
+                    const int32 TY = TIdx / GridWidth;
+                    ComponentTiles.Add(FIntPoint(TX, TY));
+
+                    for (const FIntPoint& D : Dirs8)
+                    {
+                        const int32 NX = TX + D.X;
+                        const int32 NY = TY + D.Y;
+                        if (NX < 0 || NY < 0 || NX >= GridWidth || NY >= GridHeight) { continue; }
+                        const int32 NIdx = (NY * GridWidth) + NX;
+                        if (Visited[NIdx] || !IsRiverTile(NIdx)) { continue; }
+                        Visited[NIdx] = 1;
+                        FloodQueue.Add(NIdx);
+                    }
+                }
+
+                if (ComponentTiles.Num() < 2)
+                {
+                    continue;
+                }
+
+                const TArray<FIntPoint> OrderedPath = BuildOrderedRiverTilePath(ComponentTiles, WorldTiles, GridWidth);
+                if (OrderedPath.Num() < 2)
+                {
+                    continue;
+                }
+
+                FWorldForgeRiverNetworkDesc Net;
+                Net.NetworkID = NetworkID++;
+                Net.TileCount = OrderedPath.Num();
+                Net.BoundsMin = OrderedPath[0];
+                Net.BoundsMax = OrderedPath[0];
+
+                float WaterDepthSum = 0.0f;
+                float MaxDepth = 0.0f;
+                float WaterZSum = 0.0f;
+
+                for (const FIntPoint& PT : OrderedPath)
+                {
+                    const int32 TIdx = (PT.Y * GridWidth) + PT.X;
+                    if (WorldTiles.IsValidIndex(TIdx))
+                    {
+                        const FWorldTileData& TD = WorldTiles[TIdx];
+                        WaterDepthSum += TD.WaterDepth;
+                        MaxDepth = FMath::Max(MaxDepth, TD.WaterDepth);
+                        WaterZSum += BuildRiverWorldSurfaceZ(TD.Elevation, Snapshot, Origin, RenderVoxelSize);
+                    }
+                    Net.BoundsMin.X = FMath::Min(Net.BoundsMin.X, PT.X);
+                    Net.BoundsMin.Y = FMath::Min(Net.BoundsMin.Y, PT.Y);
+                    Net.BoundsMax.X = FMath::Max(Net.BoundsMax.X, PT.X);
+                    Net.BoundsMax.Y = FMath::Max(Net.BoundsMax.Y, PT.Y);
+                    Net.TilePath.Add(TIdx);
+                }
+
+                const float InvN = 1.0f / FMath::Max(1, Net.TileCount);
+                Net.AverageWaterDepth = WaterDepthSum * InvN;
+                Net.MaxWaterDepth = MaxDepth;
+                Net.AverageWaterZ = WaterZSum * InvN;
+                Net.AverageWidth = FMath::Clamp(0.9f + (Net.AverageWaterDepth * 8.0f), 0.9f, 2.5f);
+
+                // Source = highest-elevation end, outlet = lowest
+                {
+                    const int32 FirstIdx = Net.TilePath[0];
+                    const int32 LastIdx = Net.TilePath.Last();
+                    const float ElevFirst = WorldTiles.IsValidIndex(FirstIdx) ? WorldTiles[FirstIdx].Elevation : 0.0f;
+                    const float ElevLast = WorldTiles.IsValidIndex(LastIdx) ? WorldTiles[LastIdx].Elevation : 0.0f;
+                    if (ElevFirst >= ElevLast)
+                    {
+                        Net.SourceTileIndex = FirstIdx;
+                        Net.OutletTileIndex = LastIdx;
+                    }
+                    else
+                    {
+                        Net.SourceTileIndex = LastIdx;
+                        Net.OutletTileIndex = FirstIdx;
+                    }
+                    const float ElevDrop = FMath::Abs(ElevFirst - ElevLast);
+                    Net.FlowStrength = FMath::Clamp(0.15f + (ElevDrop * 4.0f) + (Net.AverageWaterDepth * 0.5f), 0.15f, 1.25f);
+                }
+
+                // Detect lake / sea / ocean neighbors
+                for (const FIntPoint& PT : OrderedPath)
+                {
+                    if (Net.bTouchesLake && Net.bTouchesSeaOrOcean) { break; }
+                    const int32 TX = PT.X;
+                    const int32 TY = PT.Y;
+                    for (const FIntPoint& D : Dirs8)
+                    {
+                        const int32 NX = TX + D.X;
+                        const int32 NY = TY + D.Y;
+                        if (NX < 0 || NY < 0 || NX >= GridWidth || NY >= GridHeight) { continue; }
+                        const int32 NIdx = (NY * GridWidth) + NX;
+                        if (!WorldTiles.IsValidIndex(NIdx) || IsRiverTile(NIdx)) { continue; }
+                        const FGameplayTag& NB = WorldTiles[NIdx].BiomeType;
+                        if (LakeTag.IsValid() && NB.MatchesTag(LakeTag)) { Net.bTouchesLake = true; }
+                        if ((OceanTag.IsValid() && NB.MatchesTag(OceanTag)) ||
+                            (SeaTag.IsValid() && NB.MatchesTag(SeaTag)) ||
+                            (DeepOcean.IsValid() && NB.MatchesTag(DeepOcean))) {
+                            Net.bTouchesSeaOrOcean = true;
+                        }
+                    }
+                }
+                Net.bHasOutlet = Net.bTouchesLake || Net.bTouchesSeaOrOcean;
+
+                if (Networks.Num() < 20)
+                {
+                    UE_LOG(LogTemp, Log,
+                        TEXT("[RiverNetwork] Network=%d Tiles=%d Source=%d Outlet=%d Bounds=(%d,%d)-(%d,%d) OutletLake=%s OutletSea=%s"),
+                        Net.NetworkID, Net.TileCount,
+                        Net.SourceTileIndex, Net.OutletTileIndex,
+                        Net.BoundsMin.X, Net.BoundsMin.Y,
+                        Net.BoundsMax.X, Net.BoundsMax.Y,
+                        Net.bTouchesLake ? TEXT("Y") : TEXT("N"),
+                        Net.bTouchesSeaOrOcean ? TEXT("Y") : TEXT("N"));
+                }
+
+                Networks.Add(MoveTemp(Net));
+            }
+        }
+
+        return Networks;
+    }
 }
 
 // ─── [CORE LIFECYCLE] ────────────────────────────────────────
@@ -96,11 +680,43 @@ void UVoxelWorldManager::Initialize(FSubsystemCollectionBase& Collection)
 {
     Super::Initialize(Collection);
 
+    // CUBE-TERRAIN-04N-STEP11B: Auto-load the BP subclass so BlockTypeMaterials
+    // configured on BP_WorldForgeCubeTerrain are used at runtime. Subsystems have
+    // no editor surface where this UPROPERTY can be assigned, so we resolve the
+    // class path here. SpawnCubeTerrainActor's native fallback still applies if
+    // the BP is missing.
+    if (!CubeTerrainActorClass)
+    {
+        static const FSoftClassPath CubeTerrainBPPath(
+            TEXT("/Game/WorldForge/BluePrints/BP_WorldForgeCubeTerrain.BP_WorldForgeCubeTerrain_C"));
+
+        if (UClass* ResolvedCubeTerrainClass = CubeTerrainBPPath.TryLoadClass<AWFCubeTerrainActor>())
+        {
+            CubeTerrainActorClass = ResolvedCubeTerrainClass;
+
+            UE_LOG(LogTemp, Log,
+                TEXT("[CubeTerrainMaterial] Auto-loaded CubeTerrainActorClass=%s"),
+                *CubeTerrainActorClass->GetName());
+        }
+        else
+        {
+            UE_LOG(LogTemp, Warning,
+                TEXT("[CubeTerrainMaterial] Failed to auto-load BP_WorldForgeCubeTerrain. Falling back to native WFCubeTerrainActor."));
+        }
+    }
+
+    // CUBE-TERRAIN-01B: Allocate cube runtime. Idle until CubePrototype mode is selected.
+    CubeTerrainRuntime = NewObject<UCubeTerrainRuntime>(this);
+    CubeTerrainRuntime->InitializeRuntime();
+
     const UWorldForgeTerrainSettings* Settings = GetDefault<UWorldForgeTerrainSettings>();
     if (Settings)
     {
         ChunkWorldSize = Settings->ChunkWorldSize;
         VoxelSize = Settings->VoxelSize;
+        // CUBE-VOXEL-SCALE: cache the subdivision count so BuildFromTiles can size the
+        // render block grid to match the mining voxel grid (both = SubdivisionsPerTile).
+        SubdivisionsPerTile = FMath::Max(1, Settings->SubdivisionsPerTile);
         TerrainSurfaceZOffset = Settings->TerrainSurfaceZOffset;
         bAddGlobalFoundation = Settings->bAddGlobalFoundation;
         GlobalFoundationDepthWorld = Settings->GlobalFoundationDepthWorld;
@@ -219,11 +835,210 @@ void UVoxelWorldManager::Deinitialize()
     // Clear pipeline source data (not cleared by ClearTerrainCache)
     CachedMountainRanges.Reset();
     CachedVolcanoes.Reset();
+    CachedLakeBasins.Reset(); // LAKE-FIX-01A
 
     ClearPlacedBlockVisuals();
 
+    // CUBE-TERRAIN-01B: Reset cube runtime on teardown.
+    if (CubeTerrainRuntime)
+    {
+        CubeTerrainRuntime->Reset();
+    }
+
+    // CUBE-TERRAIN-01D: Destroy patch actor if it still exists.
+    // CUBE-TERRAIN-01F: Restore Smooth terrain visibility before destruction so the actor
+    // is not left hidden if the level reloads without a full GC cycle.
+    if (IsValid(CubeTerrainActor))
+    {
+        if (IsValid(VoxelWorldActor))
+        {
+            VoxelWorldActor->SetActorHiddenInGame(false);
+        }
+        CubeTerrainActor->Destroy();
+        CubeTerrainActor = nullptr;
+    }
+
     Super::Deinitialize();
 }
+
+// ─────────────────────────────────────────────────────────────────
+// CUBE-TERRAIN-01D: SpawnCubeTerrainActor
+//
+// Spawns (or replaces) the AWFCubeTerrainActor prototype patch in the world.
+// Called after CubeTerrainRuntime::BuildFromTiles succeeds.
+// Smooth terrain and VoxelWorld_1 are not touched.
+// ─────────────────────────────────────────────────────────────────
+
+void UVoxelWorldManager::SpawnCubeTerrainActor()
+{
+    UWorld* World = GetWorld();
+    if (!IsValid(World))
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[CubeTerrainRender] SpawnCubeTerrainActor: no world — aborting."));
+        return;
+    }
+
+    // Destroy previous actor if already spawned (e.g. terrain regenerated).
+    if (IsValid(CubeTerrainActor))
+    {
+        CubeTerrainActor->Destroy();
+        CubeTerrainActor = nullptr;
+    }
+
+    FActorSpawnParameters SpawnParams;
+    SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+    // CUBE-TERRAIN-04N-STEP9: Prefer the editor-assigned Blueprint subclass when set
+    // (so BlockTypeMaterials configured on the BP are available), otherwise fall back
+    // to the native default. Spawn API still strongly-typed against AWFCubeTerrainActor.
+    UClass* SpawnClass = CubeTerrainActorClass ? CubeTerrainActorClass.Get() : AWFCubeTerrainActor::StaticClass();
+
+    CubeTerrainActor = World->SpawnActor<AWFCubeTerrainActor>(
+        SpawnClass,
+        FVector::ZeroVector,
+        FRotator::ZeroRotator,
+        SpawnParams);
+
+    if (!IsValid(CubeTerrainActor))
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[CubeTerrainRender] SpawnCubeTerrainActor: SpawnActor failed."));
+        return;
+    }
+
+    // CUBE-TERRAIN-04N-STEP9: Proof log so it is obvious from the runtime log whether
+    // the native default or a Blueprint subclass was actually instanced.
+    UE_LOG(LogTemp, Log,
+        TEXT("[CubeTerrainMaterial] Spawned CubeTerrainActor Class=%s Path=%s"),
+        CubeTerrainActor ? *CubeTerrainActor->GetClass()->GetName() : TEXT("<null>"),
+        CubeTerrainActor ? *CubeTerrainActor->GetPathName() : TEXT("<null>"));
+
+    // CUBE-TERRAIN-03A-TILEORDER: defer BuildPatch until a tile is confirmed.
+    // SpawnCubeTerrainActor runs during Step05 before the full map is shown.
+    // SetConfirmedEmbarkTile() will call BuildPatch once the player confirms.
+    if (ConfirmedEmbarkTileX < 0 || ConfirmedEmbarkTileY < 0)
+    {
+        UE_LOG(LogTemp, Log,
+            TEXT("[CubeTerrainRender] SpawnCubeTerrainActor: no tile confirmed — deferring BuildPatch."));
+    }
+    else
+    {
+        CubeTerrainActor->BuildPatch(CubeTerrainRuntime, this);
+    }
+
+    // CUBE-TERRAIN-04C: Force Smooth/SDF workload off when CubePrototype is active.
+    // Replaces the flag-gated 01F HideSDF block. Hide, collision, and tick are all
+    // suppressed so the SDF renderer does not overlap or compute under the cube patch.
+    // Restore happens in Deinitialize() or when mode switches away from CubePrototype.
+    UE_LOG(LogTemp, Log, TEXT("[CubeTerrainRender] HideSDF check. Mode=%d CubeActor=%s VoxelWorld=%s HideFlag=%s"),
+        static_cast<int32>(CurrentTerrainMode),
+        IsValid(CubeTerrainActor) ? TEXT("valid") : TEXT("null"),
+        IsValid(VoxelWorldActor) ? TEXT("valid") : TEXT("null"),
+        (IsValid(CubeTerrainActor) && CubeTerrainActor->bCubePrototypeHideSmoothTerrainForTest) ? TEXT("true") : TEXT("false"));
+
+    UE_LOG(LogTemp, Log, TEXT("[CubeTerrainPerf] CubePrototype active; disabling Smooth/SDF workload."));
+
+    if (IsValid(VoxelWorldActor))
+    {
+        VoxelWorldActor->SetActorHiddenInGame(true);
+        VoxelWorldActor->SetActorEnableCollision(false);
+        VoxelWorldActor->SetActorTickEnabled(false);
+        UE_LOG(LogTemp, Log, TEXT("[CubeTerrainPerf] Smooth/SDF actor hidden. Actor=%s CollisionDisabled=true TickDisabled=true"),
+            *VoxelWorldActor->GetName());
+    }
+    else
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[CubeTerrainPerf] CubePrototype active, but Smooth/SDF actor was not found."));
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// CUBE-TERRAIN-01F: Confirmed embark tile API
+
+void UVoxelWorldManager::SetConfirmedEmbarkTile(int32 InTileX, int32 InTileY)
+{
+    ConfirmedEmbarkTileX = InTileX;
+    ConfirmedEmbarkTileY = InTileY;
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[CubeTerrainRender] ConfirmedEmbarkTile set: (%d,%d)"),
+        InTileX, InTileY);
+
+    // CUBE-TERRAIN-04B: Skip duplicate cube patch rebuilds when the confirm
+    // event fires repeatedly with the same tile. Only applies when
+    // CubePrototype mode is active and the runtime is ready; otherwise the
+    // standard skip-with-reason path below still runs.
+    if (CurrentTerrainMode == ETerrainMode::CubePrototype &&
+        IsValid(CubeTerrainRuntime) &&
+        CubeTerrainRuntime->IsValid() &&
+        LastCubePatchCenterX == InTileX &&
+        LastCubePatchCenterY == InTileY)
+    {
+        UE_LOG(LogTemp, Log,
+            TEXT("[CubeTerrainRender] ConfirmedEmbarkTile unchanged; skipping cube patch rebuild: (%d,%d)"),
+            InTileX,
+            InTileY);
+        return;
+    }
+
+    // CUBE-TERRAIN-03A: Rebuild the cube patch on the confirmed tile when
+    // CubePrototype mode is active and the runtime is ready. If an actor
+    // already exists, call BuildPatch directly on it (BuildPatch clears its
+    // own state via ClearPatch), avoiding destroy/respawn churn. Only fall
+    // back to SpawnCubeTerrainActor() when no actor exists yet.
+    if (CurrentTerrainMode == ETerrainMode::CubePrototype &&
+        IsValid(CubeTerrainRuntime) && CubeTerrainRuntime->IsValid())
+    {
+        // CUBE-TERRAIN-04B: Log first-time vs changed-tile rebuilds so the
+        // dedupe path is observable from the log.
+        if (LastCubePatchCenterX == INDEX_NONE || LastCubePatchCenterY == INDEX_NONE)
+        {
+            UE_LOG(LogTemp, Log,
+                TEXT("[CubeTerrainRender] ConfirmedEmbarkTile first-time rebuild: New=(%d,%d)"),
+                InTileX, InTileY);
+        }
+        else
+        {
+            UE_LOG(LogTemp, Log,
+                TEXT("[CubeTerrainRender] ConfirmedEmbarkTile changed; rebuilding cube patch: Old=(%d,%d) New=(%d,%d)"),
+                LastCubePatchCenterX, LastCubePatchCenterY,
+                InTileX, InTileY);
+        }
+
+        UE_LOG(LogTemp, Log,
+            TEXT("[CubeTerrainRender] Rebuilding cube patch at confirmed embark tile (%d,%d)."),
+            InTileX, InTileY);
+
+        if (IsValid(CubeTerrainActor))
+        {
+            CubeTerrainActor->BuildPatch(CubeTerrainRuntime, this);
+        }
+        else
+        {
+            SpawnCubeTerrainActor();
+        }
+
+        // CUBE-TERRAIN-04B: Record the tile used for this rebuild so the next
+        // call with the same tile can short-circuit above.
+        LastCubePatchCenterX = InTileX;
+        LastCubePatchCenterY = InTileY;
+    }
+    else
+    {
+        UE_LOG(LogTemp, Log,
+            TEXT("[CubeTerrainRender] SetConfirmedEmbarkTile: rebuild skipped (Mode=%d RuntimeValid=%d)."),
+            static_cast<int32>(CurrentTerrainMode),
+            (IsValid(CubeTerrainRuntime) && CubeTerrainRuntime->IsValid()) ? 1 : 0);
+    }
+}
+
+bool UVoxelWorldManager::GetConfirmedEmbarkTile(int32& OutX, int32& OutY) const
+{
+    OutX = ConfirmedEmbarkTileX;
+    OutY = ConfirmedEmbarkTileY;
+    return ConfirmedEmbarkTileX >= 0 && ConfirmedEmbarkTileY >= 0;
+}
+
+// ─────────────────────────────────────────────────────────────────
 
 bool UVoxelWorldManager::IsReady()
 {
@@ -258,7 +1073,70 @@ bool UVoxelWorldManager::IsTerrainReadyForGameplay() const
 
 bool UVoxelWorldManager::IsTerrainRuntimeStable() const
 {
+    // CUBE-TERRAIN-04F: CubePrototype skips the Smooth/SDF generation path
+    // entirely (see GenerateTerrainFromTiles CubePrototype branch), so the
+    // Smooth/SDF-shaped checks below (HasCachedTerrainData, HasTerrainSnapshot,
+    // VoxelWorldActor->IsCreated) never become true. Short-circuit here using
+    // the cube runtime + patch actor state so BroadcastTerrainReadyIfNeeded()
+    // can fire OnTerrainReady for cube builds.
+    if (CurrentTerrainMode == ETerrainMode::CubePrototype)
+    {
+        const bool bRuntimeValid = IsValid(CubeTerrainRuntime) && CubeTerrainRuntime->IsValid();
+        const bool bActorValid = IsValid(CubeTerrainActor);
+
+        if (bRuntimeValid && bActorValid)
+        {
+            UE_LOG(LogTemp, Log,
+                TEXT("[CubeTerrainPerf] CubePrototype stability check passed. Runtime=valid Actor=valid"));
+            return true;
+        }
+
+        UE_LOG(LogTemp, Warning,
+            TEXT("[CubeTerrainPerf] CubePrototype stability check failed. Runtime=%s Actor=%s"),
+            bRuntimeValid ? TEXT("valid") : TEXT("invalid"),
+            bActorValid ? TEXT("valid") : TEXT("invalid"));
+        return false;
+    }
+
     return IsTerrainReadyForGameplay() && !HasPendingTerrainRequest();
+}
+
+bool UVoxelWorldManager::TryGetVoxelMeshBacklog(FWorldForgeVoxelMeshBacklog& OutBacklog) const
+{
+    OutBacklog = FWorldForgeVoxelMeshBacklog();
+
+#if WITH_VOXEL_PLUGIN
+    if (!IsValid(VoxelWorldActor))
+    {
+        return false;
+    }
+
+    AVoxelWorld* VoxelWorld = VoxelWorldActor.Get();
+    if (!VoxelWorld || !VoxelWorld->IsCreated())
+    {
+        return false;
+    }
+
+    OutBacklog.bAvailable = true;
+    OutBacklog.MeshTasksRemaining = FMath::Max(VoxelWorld->GetRenderer().GetTaskCount(), 0);
+
+    // Total tasks from the world's own thread pool (drives the on-screen "Total tasks remaining" counter).
+    const TVoxelSharedPtr<IVoxelPool>& Pool = VoxelWorld->GetPoolSharedPtr();
+    if (Pool.IsValid())
+    {
+        OutBacklog.TotalTasksRemaining = FMath::Max(Pool->GetNumTasks(), 0);
+    }
+    else
+    {
+        UE_LOG(LogTemp, Log, TEXT("[VoxelWorldManager] TryGetVoxelMeshBacklog: IVoxelPool not available; TotalTasksRemaining unavailable (-1)."));
+    }
+
+    // MeshActionsQueued is not exposed via public Voxel Plugin API; remains -1.
+
+    return true;
+#else
+    return false;
+#endif
 }
 
 bool UVoxelWorldManager::FindAndCacheVoxelWorld()
@@ -333,12 +1211,29 @@ float UVoxelWorldManager::GetTerrainCellWorldSize() const
     return ChunkWorldSize;
 }
 
+float UVoxelWorldManager::GetGeneratedSeaLevelWorldZ() const
+{
+    return static_cast<float>(SeaLevelVoxels) * VoxelSize + GetVoxelWorldOrigin().Z;
+}
+
 // ─── FIX 2: Read actual VoxelWorld.VoxelSize when available; fall back to the
 // configured VoxelSize setting (not the hard-coded 1.0 that was here before).
 // A 1.0 fallback caused every world-space height to be wildly mis-scaled when
 // the actor hadn't been found yet.
 float UVoxelWorldManager::GetRenderVoxelSize() const
 {
+    // CUBE-VOXEL-SCALE FIX: in CubePrototype mode the mining/overlay/selection grid is
+    // defined by the configured VoxelSize (derived from SubdivisionsPerTile = 200uu), NOT
+    // by the smooth-terrain AVoxelWorld plugin actor, whose VoxelSize is still 100 and is
+    // irrelevant to the cube grid. Preferring the AVoxelWorld actor here returned 100 and
+    // poisoned everything downstream of GetRenderVoxelSize (overlay CellSize, GridSelection
+    // GetCellSizeUU, conversions) so the selection visual drew at 100 while render blocks
+    // were 200. In CubePrototype, the manager's configured VoxelSize is authoritative.
+    if (CurrentTerrainMode == ETerrainMode::CubePrototype)
+    {
+        return FMath::Max(KINDA_SMALL_NUMBER, VoxelSize);
+    }
+
     if (const AVoxelWorld* VW = Cast<AVoxelWorld>(VoxelWorldActor))
     {
         return FMath::Max(KINDA_SMALL_NUMBER, VW->VoxelSize);
@@ -453,10 +1348,56 @@ void UVoxelWorldManager::BuildTerrainSnapshot(
 
     TerrainSnapshot.bUseFastTerrainSampling = bUseFastTerrainSampling;
 
+    // ── v5.1: Bake the real world seed into the snapshot so the terrain
+    // generator receives it at SetSeed() time rather than using 1337.
+    TerrainSnapshot.WorldSeed = static_cast<int32>(CachedWorldSeed & 0x7FFFFFFF);
+
     // ── FIX (Issue 1): Pipe Step03 mountain ranges into the snapshot
     // so the voxel generator uses real tectonic data.
     TerrainSnapshot.PipelineMountainRanges = CachedMountainRanges;
     TerrainSnapshot.PipelineVolcanoes = CachedVolcanoes;
+
+    // LAKE-FIX-01A: Propagate lake basin descriptors into the snapshot
+    TerrainSnapshot.PipelineLakeBasins = CachedLakeBasins;
+    int32 LakeTileSum = 0;
+    for (const FLakeBasinData& B : CachedLakeBasins) { LakeTileSum += B.TileCount; }
+    TerrainSnapshot.PipelineLakeTileCount = LakeTileSum;
+    UE_LOG(LogTemp, Log,
+        TEXT("[LakeFix] Snapshot LakeBasins=%d LakeTiles=%d"),
+        TerrainSnapshot.PipelineLakeBasins.Num(),
+        TerrainSnapshot.PipelineLakeTileCount);
+
+    const FVector RiverOrigin = GetVoxelWorldOrigin();
+    const float RiverRenderVoxelSize = GetRenderVoxelSize();
+    const float RiverCellSize = GetTerrainCellWorldSize();
+    TerrainSnapshot.RiverSurfaceDescs = BuildRiverSurfaceDescriptors(
+        WorldTiles,
+        GridWidth,
+        GridHeight,
+        TerrainSnapshot,
+        RiverOrigin,
+        RiverRenderVoxelSize,
+        RiverCellSize);
+    TerrainSnapshot.RiverSurfaceDescCount = TerrainSnapshot.RiverSurfaceDescs.Num();
+    UE_LOG(LogTemp, Log,
+        TEXT("[RiverFix] RiverSurfaceDescs=%d"),
+        TerrainSnapshot.RiverSurfaceDescCount);
+    if (TerrainSnapshot.RiverSurfaceDescCount > 0)
+    {
+        UE_LOG(LogTemp, Log,
+            TEXT("[RiverFix] river terrain shaping active. Descs=%d"),
+            TerrainSnapshot.RiverSurfaceDescCount);
+    }
+
+    // RIVER-WATER-02B: Build full network descriptors from the same river tiles.
+    // These are metadata-only; they do not affect terrain carving or rendering.
+    TerrainSnapshot.RiverNetworkDescs = BuildRiverNetworkDescriptors(
+        WorldTiles, GridWidth, GridHeight,
+        TerrainSnapshot, RiverOrigin, RiverRenderVoxelSize, RiverCellSize);
+    UE_LOG(LogTemp, Log,
+        TEXT("[RiverNetwork] Build complete Networks=%d LegacySurfaceDescs=%d"),
+        TerrainSnapshot.RiverNetworkDescs.Num(),
+        TerrainSnapshot.RiverSurfaceDescCount);
 
     TerrainSnapshot.WorldTiles = WorldTiles;
     TerrainSnapshot.CachedTileElevations = CachedTileElevations;
@@ -471,6 +1412,69 @@ void UVoxelWorldManager::BuildTerrainSnapshot(
 
     if (bLogTerrainGeneration)
     {
+        bool bHasElevationStats = false;
+        float ElevationMin = 0.0f;
+        float ElevationMax = 0.0f;
+        int32 WaterTileCount = 0;
+        int32 LandTileCount = 0;
+        const float SnapshotWaterThreshold = FMath::Clamp(TerrainSnapshot.WaterThreshold, 0.0f, 1.0f);
+
+        for (int32 TileIndex = 0; TileIndex < TerrainSnapshot.WorldTiles.Num(); ++TileIndex)
+        {
+            const FIntPoint Cell(
+                TerrainSnapshot.GridWidth > 0 ? TileIndex % TerrainSnapshot.GridWidth : 0,
+                TerrainSnapshot.GridWidth > 0 ? TileIndex / TerrainSnapshot.GridWidth : 0);
+            const float Elevation = TerrainSnapshot.GetTileElevation(Cell, 0.0f);
+
+            if (!bHasElevationStats)
+            {
+                ElevationMin = Elevation;
+                ElevationMax = Elevation;
+                bHasElevationStats = true;
+            }
+            else
+            {
+                ElevationMin = FMath::Min(ElevationMin, Elevation);
+                ElevationMax = FMath::Max(ElevationMax, Elevation);
+            }
+
+            if (Elevation <= SnapshotWaterThreshold)
+            {
+                ++WaterTileCount;
+            }
+            else
+            {
+                ++LandTileCount;
+            }
+        }
+
+        UE_LOG(LogTemp, Log,
+            TEXT("[TerrainGen] Snapshot Seed=%d Grid=%dx%d Tiles=%d MountainRanges=%d Volcanoes=%d ElevMin=%.3f ElevMax=%.3f WaterTiles=%d LandTiles=%d"),
+            TerrainSnapshot.WorldSeed,
+            TerrainSnapshot.GridWidth,
+            TerrainSnapshot.GridHeight,
+            TerrainSnapshot.WorldTiles.Num(),
+            TerrainSnapshot.PipelineMountainRanges.Num(),
+            TerrainSnapshot.PipelineVolcanoes.Num(),
+            bHasElevationStats ? ElevationMin : 0.0f,
+            bHasElevationStats ? ElevationMax : 0.0f,
+            WaterTileCount,
+            LandTileCount);
+
+        if (TerrainSnapshot.PipelineMountainRanges.Num() == 0)
+        {
+            UE_LOG(LogTemp, Warning,
+                TEXT("[TerrainGen] Snapshot built with MountainRanges=0; Step03 mountain ridges will not affect voxel terrain."));
+        }
+
+        if (bHasElevationStats && FMath::Abs(ElevationMax - ElevationMin) <= 0.001f)
+        {
+            UE_LOG(LogTemp, Warning,
+                TEXT("[TerrainGen] Snapshot elevations are nearly identical. ElevMin=%.3f ElevMax=%.3f"),
+                ElevationMin,
+                ElevationMax);
+        }
+
         UE_LOG(
             LogTemp,
             Log,
@@ -604,6 +1608,20 @@ FWorldForgeTerrainSnapshot UVoxelWorldManager::MakeLocalTerrainSnapshot() const
     S.PipelineMountainRanges = CachedMountainRanges;
     S.PipelineVolcanoes = CachedVolcanoes;
 
+    // LAKE-FIX-01A: Include lake basins so height cache and classifier agree with the generator
+    S.PipelineLakeBasins = CachedLakeBasins;
+    int32 LakeTileSumLocal = 0;
+    for (const FLakeBasinData& B : CachedLakeBasins) { LakeTileSumLocal += B.TileCount; }
+    S.PipelineLakeTileCount = LakeTileSumLocal;
+
+    // RIVER-SYSTEM-01: Reuse the already-built river segment descriptors so
+    // local snapshot consumers stay aligned with generator/bootstrap behavior.
+    S.RiverSurfaceDescs = TerrainSnapshot.RiverSurfaceDescs;
+    S.RiverSurfaceDescCount = TerrainSnapshot.RiverSurfaceDescCount;
+
+    // RIVER-WATER-02B: Propagate full network descriptors to local snapshots.
+    S.RiverNetworkDescs = TerrainSnapshot.RiverNetworkDescs;
+
     // ── v5.0: Copy the modification map from the main snapshot.
     // Single source of truth for all terrain edits.
     S.Modifications = TerrainSnapshot.Modifications;
@@ -698,6 +1716,13 @@ void UVoxelWorldManager::SetPipelineMountainRanges(const TArray<FMountainRange>&
     if (bLogTerrainGeneration)
     {
         UE_LOG(LogTemp, Log,
+            TEXT("[TerrainGen] PipelineMountainRanges handoff Count=%d"),
+            CachedMountainRanges.Num());
+    }
+
+    if (bLogTerrainGeneration)
+    {
+        UE_LOG(LogTemp, Log,
             TEXT("[VoxelWorldManager] Cached %d pipeline mountain ranges for terrain generation."),
             CachedMountainRanges.Num());
     }
@@ -712,6 +1737,109 @@ void UVoxelWorldManager::SetPipelineVolcanoes(const TArray<FVolcanoData>& InVolc
         UE_LOG(LogTemp, Log,
             TEXT("[VoxelWorldManager] Cached %d pipeline volcanoes for terrain generation."),
             CachedVolcanoes.Num());
+    }
+}
+
+void UVoxelWorldManager::SetPipelineLakeBasins(const TArray<FLakeBasinData>& InLakeBasins)
+{
+    CachedLakeBasins = InLakeBasins;
+
+    int32 TotalTiles = 0;
+    for (const FLakeBasinData& B : CachedLakeBasins)
+    {
+        TotalTiles += B.TileCount;
+    }
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[LakeFix] Handoff LakeBasins=%d LakeTiles=%d"),
+        CachedLakeBasins.Num(),
+        TotalTiles);
+}
+
+// WATERLINE-LAKE-01B: Build world-space lake surface descriptors from cached basin data.
+TArray<FWaterlineLakeSurfaceDesc> UVoxelWorldManager::GetWaterlineLakeSurfaceDescs() const
+{
+    TArray<FWaterlineLakeSurfaceDesc> Descs;
+
+    if (!TerrainSnapshot.IsValid() || TerrainSnapshot.PipelineLakeBasins.Num() == 0)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[WaterlineLake] WARNING: No lake descriptors available."));
+        return Descs;
+    }
+
+    const FVector Origin = GetVoxelWorldOrigin();
+    const float   RVS = GetRenderVoxelSize();
+    const float   CellSize = GetTerrainCellWorldSize(); // ChunkWorldSize per terrain tile
+
+    for (const FLakeBasinData& Basin : TerrainSnapshot.PipelineLakeBasins)
+    {
+        if (Basin.TileCount <= 0)
+        {
+            continue;
+        }
+
+        FWaterlineLakeSurfaceDesc Desc;
+        Desc.BasinID = Basin.BasinID;
+        Desc.TileCount = Basin.TileCount;
+
+        // World XY: center tile converted with bCenterInCell=true
+        const FVector CenterXY = TerrainCellToWorld(
+            FIntPoint(Basin.CenterTileX, Basin.CenterTileY), 0.0f, /*bCenterInCell=*/true);
+
+        // Water surface Z: ElevationToVoxelHeight returns voxels; multiply by RVS for world UU
+        const float WaterVoxelH = FWorldForgeTerrainMath::ElevationToVoxelHeight(
+            Basin.WaterSurfaceElevation01, TerrainSnapshot);
+        const float WaterSurfaceZ = Origin.Z + (WaterVoxelH * RVS);
+
+        Desc.WorldCenter = FVector(CenterXY.X, CenterXY.Y, WaterSurfaceZ);
+        Desc.WaterSurfaceZ = WaterSurfaceZ;
+
+        // Half extents from tile span * ChunkWorldSize * 0.5
+        Desc.HalfExtentX = static_cast<float>(Basin.MaxTileX - Basin.MinTileX + 1) * CellSize * 0.5f;
+        Desc.HalfExtentY = static_cast<float>(Basin.MaxTileY - Basin.MinTileY + 1) * CellSize * 0.5f;
+
+        // Biome tag at center tile (may be invalid if snapshot has no biome data)
+        Desc.BiomeTag = TerrainSnapshot.GetBiomeTag(FIntPoint(Basin.CenterTileX, Basin.CenterTileY));
+
+        UE_LOG(LogTemp, Log,
+            TEXT("[WaterlineLake] Descriptor Basin=%d Center=(%.0f,%.0f,%.0f) Extent=(%.0f,%.0f) Tiles=%d Biome=%s"),
+            Desc.BasinID,
+            Desc.WorldCenter.X, Desc.WorldCenter.Y, Desc.WorldCenter.Z,
+            Desc.HalfExtentX, Desc.HalfExtentY,
+            Desc.TileCount,
+            *Desc.BiomeTag.ToString());
+
+        Descs.Add(Desc);
+    }
+
+    return Descs;
+}
+
+TArray<FWorldForgeRiverSurfaceDesc> UVoxelWorldManager::GetRiverSurfaceDescs() const
+{
+    if (!TerrainSnapshot.IsValid() || TerrainSnapshot.RiverSurfaceDescCount == 0)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[RiverFix] WARNING: No river descriptors available."));
+        return TArray<FWorldForgeRiverSurfaceDesc>();
+    }
+
+    return TerrainSnapshot.RiverSurfaceDescs;
+}
+
+const TArray<FWorldForgeRiverNetworkDesc>& UVoxelWorldManager::GetRiverNetworkDescs() const
+{
+    return TerrainSnapshot.RiverNetworkDescs;
+}
+
+void UVoxelWorldManager::SetWorldSeed(int64 InSeed)
+{
+    CachedWorldSeed = InSeed;
+
+    if (bLogTerrainGeneration)
+    {
+        UE_LOG(LogTemp, Log,
+            TEXT("[TerrainGen] WorldSeed received from pipeline: %lld"),
+            CachedWorldSeed);
     }
 }
 
@@ -1294,6 +2422,78 @@ bool UVoxelWorldManager::IsSpawnableTerrainCell(FIntPoint GridCell) const
     return true;
 }
 
+// CUBE-TERRAIN-04U-STEP1: CubePrototype-aware terrain passability used by
+// UNavigationContext walkability builds. Does NOT change IsSpawnableTerrainCell,
+// the spawn-snap path, ColonyManager spawn validation, or mining behavior.
+bool UVoxelWorldManager::IsTerrainCellWalkableForNavigation(
+    const FIntPoint& TerrainCell,
+    FString* OutReason,
+    int32* OutSurfaceZ) const
+{
+    auto WriteOut = [OutReason, OutSurfaceZ](const TCHAR* Reason, int32 SurfaceZ)
+        {
+            if (OutReason) { *OutReason = Reason; }
+            if (OutSurfaceZ) { *OutSurfaceZ = SurfaceZ; }
+        };
+
+    // CubePrototype path: read the top block of the column directly from the runtime.
+    if (CurrentTerrainMode == ETerrainMode::CubePrototype &&
+        IsValid(CubeTerrainRuntime) &&
+        CubeTerrainRuntime->IsValid())
+    {
+        const int32 CubeGridW = CubeTerrainRuntime->GetGridWidth();
+        const int32 CubeGridH = CubeTerrainRuntime->GetGridHeight();
+
+        if (TerrainCell.X < 0 || TerrainCell.Y < 0 ||
+            TerrainCell.X >= CubeGridW || TerrainCell.Y >= CubeGridH)
+        {
+            WriteOut(TEXT("OutOfBounds"), 0);
+            return false;
+        }
+
+        const int32 SurfaceZ = CubeTerrainRuntime->GetSurfaceZAt(TerrainCell);
+        const EWorldForgeCubeBlockType TopType =
+            CubeTerrainRuntime->GetRawBlockTypeAt(FIntVector(TerrainCell.X, TerrainCell.Y, SurfaceZ));
+
+        switch (TopType)
+        {
+        case EWorldForgeCubeBlockType::Water:
+            WriteOut(TEXT("Water"), SurfaceZ);
+            return false;
+        case EWorldForgeCubeBlockType::Lava:
+            WriteOut(TEXT("Lava"), SurfaceZ);
+            return false;
+        case EWorldForgeCubeBlockType::Air:
+            WriteOut(TEXT("Air"), SurfaceZ);
+            return false;
+            // Match current CubePrototype spawn convention (see TryGetNearestSpawnLocationForTerrainCell):
+            // only Water/Lava/Air are hard rejects, so Rock/DeepRock/Basalt remain walkable here.
+        case EWorldForgeCubeBlockType::Grass:
+        case EWorldForgeCubeBlockType::Dirt:
+        case EWorldForgeCubeBlockType::Sand:
+        case EWorldForgeCubeBlockType::Snow:
+        case EWorldForgeCubeBlockType::Rock:
+        case EWorldForgeCubeBlockType::DeepRock:
+        case EWorldForgeCubeBlockType::Basalt:
+            WriteOut(TEXT("Walkable"), SurfaceZ);
+            return true;
+        default:
+            WriteOut(TEXT("NoSurface"), SurfaceZ);
+            return false;
+        }
+    }
+
+    // Smooth / SDF fallback: preserve existing spawnable semantics; do not classify further.
+    if (IsSpawnableTerrainCell(TerrainCell))
+    {
+        WriteOut(TEXT("Walkable"), 0);
+        return true;
+    }
+
+    WriteOut(TEXT("NotSpawnable"), 0);
+    return false;
+}
+
 bool UVoxelWorldManager::FindNearestSpawnableTerrainCell(
     FIntPoint StartCell,
     FIntPoint& OutCell,
@@ -1417,6 +2617,55 @@ int32 UVoxelWorldManager::ComputeChunkSurfaceHeightVoxels(
 bool UVoxelWorldManager::TryGetTerrainSurfaceVoxelZ(FIntPoint VoxelXY, int32& OutVoxelZ) const
 {
     OutVoxelZ = 0;
+
+    if (CurrentTerrainMode == ETerrainMode::CubePrototype &&
+        CubeTerrainRuntime && CubeTerrainRuntime->IsValid())
+    {
+        const int32 GridWidth = CubeTerrainRuntime->GetGridWidth();
+        const int32 GridHeight = CubeTerrainRuntime->GetGridHeight();
+
+        auto TryResolveCubeRuntimeXY = [&](const FIntPoint& RuntimeXY) -> bool
+            {
+                if (RuntimeXY.X < 0 || RuntimeXY.Y < 0 ||
+                    RuntimeXY.X >= GridWidth || RuntimeXY.Y >= GridHeight)
+                {
+                    return false;
+                }
+
+                const int32 SurfaceZ = CubeTerrainRuntime->GetSurfaceZAt(RuntimeXY);
+                const FGameplayTag SurfaceBlockType = GetBlockTypeAt(
+                    FIntVector(RuntimeXY.X, RuntimeXY.Y, SurfaceZ));
+                if (!SurfaceBlockType.IsValid())
+                {
+                    return false;
+                }
+
+                OutVoxelZ = SurfaceZ;
+                return true;
+            };
+
+        // Preferred CubePrototype path: callers such as WorldMap/claim-aware mine
+        // selection pass absolute map tile X/Y, which matches CubeTerrainRuntime.
+        if (TryResolveCubeRuntimeXY(VoxelXY))
+        {
+            return true;
+        }
+
+        // Normal-distance selection can arrive as 100uu grid coordinates from the
+        // shared overlay ray path. Convert that grid XY back to the cube runtime's
+        // absolute tile column before giving up.
+        const int32 BlocksPerTile = FMath::Max(1, CubeTerrainRuntime->GetBlocksPerWorldTile());
+        const FIntPoint RuntimeTileXY(
+            FMath::FloorToInt((static_cast<float>(VoxelXY.X) / static_cast<float>(BlocksPerTile)) + (static_cast<float>(GridWidth) * 0.5f)),
+            FMath::FloorToInt((static_cast<float>(VoxelXY.Y) / static_cast<float>(BlocksPerTile)) + (static_cast<float>(GridHeight) * 0.5f)));
+
+        if (RuntimeTileXY != VoxelXY && TryResolveCubeRuntimeXY(RuntimeTileXY))
+        {
+            return true;
+        }
+
+        return false;
+    }
 
     if (!HasCachedTerrainData())
     {
@@ -1884,6 +3133,138 @@ bool UVoxelWorldManager::TryGetNearestSpawnLocationForTerrainCell(
     OutWorldLocation = FVector::ZeroVector;
     OutResolvedCell = DesiredCell;
 
+    // ─── CUBE-TERRAIN-04G: CubePrototype spawn path ────────────────
+    // The Smooth path below depends on caches populated by CacheTerrainMetadata(),
+    // which the CubePrototype generator never fills (it returns early once the
+    // cube runtime + patch are built). Route CubePrototype requests through the
+    // cube runtime so FullMap Confirm can resolve a spawn location without
+    // touching the SDF/voxel pipeline. Smooth/SDF behavior is unchanged when
+    // CurrentTerrainMode is not CubePrototype.
+    if (CurrentTerrainMode == ETerrainMode::CubePrototype &&
+        IsValid(CubeTerrainRuntime) &&
+        CubeTerrainRuntime->IsValid())
+    {
+        UE_LOG(LogTemp, Log,
+            TEXT("[CubeTerrainSpawn] CubePrototype spawn lookup requested. Tile=(%d,%d)"),
+            DesiredCell.X, DesiredCell.Y);
+
+        const int32 CubeGridW = CubeTerrainRuntime->GetGridWidth();
+        const int32 CubeGridH = CubeTerrainRuntime->GetGridHeight();
+
+        auto ClassifyCubeTile = [this, CubeGridW, CubeGridH](FIntPoint Cell, int32& OutSurfaceZ, FString& OutReason) -> bool
+            {
+                OutSurfaceZ = 0;
+                if (Cell.X < 0 || Cell.Y < 0 || Cell.X >= CubeGridW || Cell.Y >= CubeGridH)
+                {
+                    OutReason = TEXT("OutOfBounds");
+                    return false;
+                }
+
+                const int32 SurfaceZ = CubeTerrainRuntime->GetSurfaceZAt(Cell);
+                const EWorldForgeCubeBlockType TopType =
+                    CubeTerrainRuntime->GetRawBlockTypeAt(FIntVector(Cell.X, Cell.Y, SurfaceZ));
+
+                if (TopType == EWorldForgeCubeBlockType::Water)
+                {
+                    OutReason = TEXT("WaterTile");
+                    return false;
+                }
+                if (TopType == EWorldForgeCubeBlockType::Lava)
+                {
+                    OutReason = TEXT("LavaTile");
+                    return false;
+                }
+                if (TopType == EWorldForgeCubeBlockType::Air)
+                {
+                    OutReason = TEXT("AirTile");
+                    return false;
+                }
+
+                OutSurfaceZ = SurfaceZ;
+                return true;
+            };
+
+        auto BuildCubeSpawnWorld = [this, CubeGridW, CubeGridH, ZOffset](FIntPoint Cell, int32 SurfaceZ) -> FVector
+            {
+                const float TileWorldSizeUU = ChunkWorldSize;
+                const float BlockHeightUU = VoxelSize;
+                const FVector Origin = GetVoxelWorldOrigin();
+                const float HalfGW = static_cast<float>(CubeGridW) * 0.5f;
+                const float HalfGH = static_cast<float>(CubeGridH) * 0.5f;
+
+                const float WorldX = Origin.X + ((static_cast<float>(Cell.X) - HalfGW + 0.5f) * TileWorldSizeUU);
+                const float WorldY = Origin.Y + ((static_cast<float>(Cell.Y) - HalfGH + 0.5f) * TileWorldSizeUU);
+                // Surface block centroid is at SurfaceZ * BlockHeightUU; top of cube is
+                // +0.5 * BlockHeightUU above that. Add ZOffset on top so the pawn spawns
+                // clear of the block.
+                const float WorldZ = Origin.Z + ((static_cast<float>(SurfaceZ) + 0.5f) * BlockHeightUU) + ZOffset;
+
+                return FVector(WorldX, WorldY, WorldZ);
+            };
+
+        int32 SurfaceZ = 0;
+        FString Reason;
+        if (ClassifyCubeTile(DesiredCell, SurfaceZ, Reason))
+        {
+            const FVector Spawn = BuildCubeSpawnWorld(DesiredCell, SurfaceZ);
+            OutResolvedCell = DesiredCell;
+            OutWorldLocation = Spawn;
+            UE_LOG(LogTemp, Log,
+                TEXT("[CubeTerrainSpawn] CubePrototype spawn accepted. Tile=(%d,%d) SurfaceZ=%d World=(X=%.1f,Y=%.1f,Z=%.1f)"),
+                DesiredCell.X, DesiredCell.Y, SurfaceZ,
+                Spawn.X, Spawn.Y, Spawn.Z);
+            return true;
+        }
+
+        UE_LOG(LogTemp, Log,
+            TEXT("[CubeTerrainSpawn] CubePrototype spawn rejected. Tile=(%d,%d) Reason=%s"),
+            DesiredCell.X, DesiredCell.Y, *Reason);
+
+        // Ring search around the desired cell. Honor the caller-requested radius
+        // (capped at 64 tiles max). The old hard cap of 8 caused fallback to fail
+        // when the embark tile is in a lava/water pocket larger than 8 tiles.
+        const int32 CubeMaxRadius = FMath::Clamp(MaxSearchRadius, 1, 64);
+        for (int32 Radius = 1; Radius <= CubeMaxRadius; ++Radius)
+        {
+            const int32 MinX = FMath::Max(0, DesiredCell.X - Radius);
+            const int32 MaxX = FMath::Min(CubeGridW - 1, DesiredCell.X + Radius);
+            const int32 MinY = FMath::Max(0, DesiredCell.Y - Radius);
+            const int32 MaxY = FMath::Min(CubeGridH - 1, DesiredCell.Y + Radius);
+
+            for (int32 Y = MinY; Y <= MaxY; ++Y)
+            {
+                for (int32 X = MinX; X <= MaxX; ++X)
+                {
+                    const bool bOnRing = (X == MinX) || (X == MaxX) || (Y == MinY) || (Y == MaxY);
+                    if (!bOnRing)
+                    {
+                        continue;
+                    }
+
+                    const FIntPoint Candidate(X, Y);
+                    int32 CandidateSurfaceZ = 0;
+                    FString CandidateReason;
+                    if (ClassifyCubeTile(Candidate, CandidateSurfaceZ, CandidateReason))
+                    {
+                        const FVector Spawn = BuildCubeSpawnWorld(Candidate, CandidateSurfaceZ);
+                        OutResolvedCell = Candidate;
+                        OutWorldLocation = Spawn;
+                        UE_LOG(LogTemp, Log,
+                            TEXT("[CubeTerrainSpawn] CubePrototype fallback search accepted. From=(%d,%d) To=(%d,%d) SurfaceZ=%d"),
+                            DesiredCell.X, DesiredCell.Y, Candidate.X, Candidate.Y, CandidateSurfaceZ);
+                        return true;
+                    }
+                }
+            }
+        }
+
+        UE_LOG(LogTemp, Warning,
+            TEXT("[CubeTerrainSpawn] CubePrototype fallback search failed. Tile=(%d,%d)"),
+            DesiredCell.X, DesiredCell.Y);
+        return false;
+    }
+
+    // ─── Smooth/SDF path (unchanged) ───────────────────────────────
     if (!HasCachedTerrainData())
     {
         return false;
@@ -1905,6 +3286,82 @@ bool UVoxelWorldManager::TryGetNearestSpawnLocationForTerrainCell(
     OutWorldLocation = SurfaceLocation;
     return true;
 }
+
+bool UVoxelWorldManager::TryGetCubeSnapForWorldPos(
+    const FVector& DesiredWorldLocation,
+    FVector& OutWorldLocation,
+    FIntPoint& OutResolvedCell,
+    int32 MaxSearchRadius,
+    float ZOffset) const
+{
+    if (CurrentTerrainMode != ETerrainMode::CubePrototype)
+    {
+        return false;
+    }
+
+    if (!CubeTerrainRuntime || !CubeTerrainRuntime->IsValid())
+    {
+        return false;
+    }
+
+    const int32 GridWidth = CubeTerrainRuntime->GetGridWidth();
+    const int32 GridHeight = CubeTerrainRuntime->GetGridHeight();
+    const float RuntimeChunkWorldSize = CubeTerrainRuntime->GetChunkWorldSize();
+
+    if (GridWidth <= 0 || GridHeight <= 0 || RuntimeChunkWorldSize <= KINDA_SMALL_NUMBER)
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[CubeTerrainSnap] Invalid CubePrototype runtime dimensions. Grid=(%d,%d) ChunkWorldSize=%.3f"),
+            GridWidth,
+            GridHeight,
+            RuntimeChunkWorldSize);
+        return false;
+    }
+
+    const FVector Origin = GetVoxelWorldOrigin();
+    const float LocalX = DesiredWorldLocation.X - Origin.X;
+    const float LocalY = DesiredWorldLocation.Y - Origin.Y;
+    const int32 GridX = FMath::FloorToInt((LocalX / RuntimeChunkWorldSize) + (static_cast<float>(GridWidth) * 0.5f));
+    const int32 GridY = FMath::FloorToInt((LocalY / RuntimeChunkWorldSize) + (static_cast<float>(GridHeight) * 0.5f));
+
+    if (GridX < 0 || GridY < 0 || GridX >= GridWidth || GridY >= GridHeight)
+    {
+        UE_LOG(LogTemp, Verbose,
+            TEXT("[CubeTerrainSnap] Desired CubePrototype cell outside runtime bounds. DesiredCell=(%d,%d) Grid=(%d,%d)"),
+            GridX,
+            GridY,
+            GridWidth,
+            GridHeight);
+        return false;
+    }
+
+    const FIntPoint DesiredCell(GridX, GridY);
+    const bool bSnapped = TryGetNearestSpawnLocationForTerrainCell(
+        DesiredCell,
+        OutWorldLocation,
+        OutResolvedCell,
+        MaxSearchRadius,
+        ZOffset);
+
+    if (bSnapped)
+    {
+        UE_LOG(LogTemp, Log,
+            TEXT("[CubeTerrainSnap] WorldPos snapped via CubePrototype. DesiredCell=(%d,%d) ResolvedCell=(%d,%d) Out=%s"),
+            DesiredCell.X,
+            DesiredCell.Y,
+            OutResolvedCell.X,
+            OutResolvedCell.Y,
+            *OutWorldLocation.ToString());
+        return true;
+    }
+
+    UE_LOG(LogTemp, Warning,
+        TEXT("[CubeTerrainSnap] CubePrototype snap failed. DesiredCell=(%d,%d)"),
+        DesiredCell.X,
+        DesiredCell.Y);
+    return false;
+}
+
 
 // ─── FIX 4: Add the voxel world origin's Z so the returned world-space height
 // is correct when the AVoxelWorld actor is not placed at Z=0 in the level.
@@ -1974,8 +3431,11 @@ bool UVoxelWorldManager::GenerateTerrainFromTiles(
         return false;
     }
 
-    CurrentTerrainMode = ETerrainMode::Smooth;
-    CurrentBlockHeightStep = 1;
+    CurrentTerrainMode = TerrainMode;
+    CurrentBlockHeightStep = FMath::Max(1, BlockHeightStep);
+    UE_LOG(LogTemp, Log,
+        TEXT("[CubeTerrainSnap] CurrentTerrainMode persisted from GenerateTerrainFromTiles. Mode=%d"),
+        static_cast<int32>(CurrentTerrainMode));
 
     if (TerrainMode == ETerrainMode::Blocky)
     {
@@ -1984,6 +3444,62 @@ bool UVoxelWorldManager::GenerateTerrainFromTiles(
             Warning,
             TEXT("[VoxelWorldManager] Blocky terrain mode requested, but WorldForge is forcing Smooth mode to match GDD terrain direction.")
         );
+    }
+
+    // CUBE-TERRAIN-01B: Route CubePrototype requests to the cube runtime.
+    // CUBE-TERRAIN-04D: When the cube runtime + patch build succeeds, return
+    // early so the Smooth/SDF terrain pipeline below does NOT also run. If the
+    // cube build fails we fall through to Smooth as a safety fallback (matches
+    // the pre-04D behavior so we never end up with a blank world).
+    if (TerrainMode == ETerrainMode::CubePrototype)
+    {
+        CurrentTerrainMode = ETerrainMode::CubePrototype;
+        CurrentBlockHeightStep = FMath::Max(1, BlockHeightStep);
+
+        // CUBE-TERRAIN-04K: Fix height resolution — halves the quantization step.
+        CurrentBlockHeightStep = 2;
+        UE_LOG(LogTemp, Log, TEXT("[CubeTerrainShape] CubePrototype BlockHeightStep=2 HeightResolution=Improved"));
+
+        if (CubeTerrainRuntime)
+        {
+            // CUBE-VOXEL-SCALE: size the render block grid to the configured subdivisions
+            // (default 16) so visible blocks and mining voxels share one 200uu cell size.
+            // Previously this omitted the arg and defaulted to 8, giving 400uu render blocks
+            // that did not align with the 100uu mining grid.
+            CubeTerrainRuntime->BuildFromTiles(WorldTiles, GridWidth, GridHeight, CurrentBlockHeightStep, SubdivisionsPerTile, ChunkWorldSize);
+
+            // CUBE-TERRAIN-01D: Spawn the HISM prototype patch actor if build succeeded.
+            if (CubeTerrainRuntime->IsValid())
+            {
+                SpawnCubeTerrainActor();
+
+                // CUBE-TERRAIN-04E: Fire terrain-ready on the CubePrototype success path.
+                // The Smooth/SDF pipeline below is the normal broadcaster; since 04D returns
+                // early here, listeners (decoration dispatch, embark hand-off) never fired
+                // when cube mode succeeded. Reuse the idempotent helper so the regular
+                // bTerrainReadyBroadcasted/IsTerrainRuntimeStable guards still apply.
+                BroadcastTerrainReadyIfNeeded();
+                UE_LOG(LogTemp, Log, TEXT("[CubeTerrainPerf] CubePrototype terrain-ready broadcast fired."));
+
+                // CUBE-TERRAIN-04D: Cube runtime + patch are live. Skip the
+                // Smooth/SDF generation path entirely so we do not burn voxel
+                // mesh/render tasks underneath the cube patch.
+                UE_LOG(LogTemp, Log,
+                    TEXT("[CubeTerrainPerf] CubePrototype built; skipping Smooth/SDF terrain generation."));
+                return true;
+            }
+
+            UE_LOG(LogTemp, Warning,
+                TEXT("[CubeTerrainPerf] CubePrototype runtime invalid; Smooth/SDF fallback will continue."));
+        }
+        else
+        {
+            UE_LOG(LogTemp, Warning,
+                TEXT("[CubeTerrain] CubeTerrainRuntime is null during CubePrototype request. Runtime not initialized."));
+            UE_LOG(LogTemp, Warning,
+                TEXT("[CubeTerrainPerf] CubePrototype runtime invalid; Smooth/SDF fallback will continue."));
+        }
+        // Fall through so Smooth terrain still generates as a safety fallback.
     }
 
     ClearTerrainCache();
@@ -2086,9 +3602,50 @@ bool UVoxelWorldManager::ApplyTerrainFromTilesInternal(
         GridWidth,
         GridHeight,
         GetChunkSizeInVoxels(),
-        CurrentTerrainMode == ETerrainMode::Blocky ? TEXT("Blocky") : TEXT("Smooth"),
+        CurrentTerrainMode == ETerrainMode::Blocky ? TEXT("Blocky") :
+        CurrentTerrainMode == ETerrainMode::CubePrototype ? TEXT("CubePrototype(Smooth fallthrough)") :
+        TEXT("Smooth"),
         GetEffectiveBlockHeightStep()
     );
+
+    // ── [TerrainMaterial] Req 1 & 2: Log material collection assignment ──────
+    {
+        UVoxelMaterialCollectionBase* MatColl = VoxelWorld ? VoxelWorld->MaterialCollection.Get() : nullptr;
+        if (MatColl)
+        {
+            UE_LOG(LogTemp, Log,
+                TEXT("[TerrainMaterial] VoxelWorld=%s MaterialCollection=%s"),
+                *VoxelWorld->GetName(), *MatColl->GetName());
+            if (UVoxelBasicMaterialCollection* BasicColl = Cast<UVoxelBasicMaterialCollection>(MatColl))
+            {
+                const int32 LayerCount = BasicColl->Layers.Num();
+                if (LayerCount < 9)
+                {
+                    UE_LOG(LogTemp, Warning,
+                        TEXT("[TerrainMaterial] MaterialCollection=%s Layers=%d Expected>=9"),
+                        *MatColl->GetName(), LayerCount);
+                }
+                else
+                {
+                    UE_LOG(LogTemp, Log,
+                        TEXT("[TerrainMaterial] MaterialCollection=%s Layers=%d Expected>=9"),
+                        *MatColl->GetName(), LayerCount);
+                }
+            }
+            else
+            {
+                UE_LOG(LogTemp, Log,
+                    TEXT("[TerrainMaterial] MaterialCollection=%s Layers=N/A (API unavailable for this collection type) Expected>=9"),
+                    *MatColl->GetName());
+            }
+        }
+        else
+        {
+            UE_LOG(LogTemp, Warning,
+                TEXT("[TerrainMaterial] WARNING: VoxelWorld=%s MaterialCollection=null"),
+                VoxelWorld ? *VoxelWorld->GetName() : TEXT("null"));
+        }
+    }
 
     CacheTerrainMetadata(WorldTiles, GridWidth, GridHeight);
     BuildTerrainSnapshot(WorldTiles, GridWidth, GridHeight);
@@ -2109,6 +3666,79 @@ bool UVoxelWorldManager::ApplyTerrainFromTilesInternal(
             UE_LOG(LogTemp, Log,
                 TEXT("[VoxelWorldManager] VoxelSize confirmed: Settings=%.1f Actor=%.1f ChunkSizeVoxels=%d"),
                 SettingsVS, ActorVS, TerrainSnapshot.ChunkSizeVoxels);
+        }
+    }
+
+    // ── [TerrainMaterial] Req 3/4/5: Per-tile layer usage approximation ──────
+    {
+        static const FGameplayTag LavaTag = FGameplayTag::RequestGameplayTag(FName("WorldForge.Biome.Lava"), false);
+        static const FGameplayTag VolcanicTag = FGameplayTag::RequestGameplayTag(FName("WorldForge.Biome.Volcanic"), false);
+        static const FGameplayTag OceanTag = FGameplayTag::RequestGameplayTag(FName("WorldForge.Biome.Ocean"), false);
+        static const FGameplayTag SeaTag = FGameplayTag::RequestGameplayTag(FName("WorldForge.Biome.Sea"), false);
+        static const FGameplayTag DeepOceanTag = FGameplayTag::RequestGameplayTag(FName("WorldForge.Biome.DeepOcean"), false);
+        static const FGameplayTag LakeTag = FGameplayTag::RequestGameplayTag(FName("WorldForge.Biome.Lake"), false);
+        static const FGameplayTag RiverTag = FGameplayTag::RequestGameplayTag(FName("WorldForge.Biome.River"), false);
+        static const FGameplayTag CoastalTag = FGameplayTag::RequestGameplayTag(FName("WorldForge.Biome.Coastal"), false);
+        static const FGameplayTag SnowPeakTag = FGameplayTag::RequestGameplayTag(FName("WorldForge.Biome.SnowPeak"), false);
+        static const FGameplayTag MountainTag = FGameplayTag::RequestGameplayTag(FName("WorldForge.Biome.Mountain"), false);
+
+        int32 LayerCounts[10] = { 0,0,0,0,0,0,0,0,0,0 }; // [0..8] = sand..deeprock, [9] = other
+        const int32 TotalTiles = WorldTiles.Num();
+
+        for (const FWorldTileData& Tile : WorldTiles)
+        {
+            const FGameplayTag& B = Tile.BiomeType;
+            int32 Layer;
+            if (B == LavaTag)
+                Layer = 6;
+            else if (B == VolcanicTag)
+                Layer = 7;
+            else if (Tile.WaterDepth > 0.0f || B == OceanTag || B == SeaTag || B == DeepOceanTag || B == LakeTag || B == RiverTag)
+                Layer = 5;
+            else if (B == CoastalTag && Tile.Elevation < 0.15f)
+                Layer = 0;
+            else if (B == SnowPeakTag || Tile.Elevation > 0.80f)
+                Layer = 4;
+            else if (B == MountainTag || Tile.Elevation > 0.65f)
+                Layer = 3;
+            else if (Tile.Elevation > 0.40f)
+                Layer = 2;
+            else
+                Layer = 1;
+
+            if (Layer >= 0 && Layer <= 8)
+                LayerCounts[Layer]++;
+            else
+                LayerCounts[9]++;
+        }
+
+        UE_LOG(LogTemp, Log,
+            TEXT("[TerrainMaterial] LayerUsage Sand=%d Grass=%d Dirt=%d Rock=%d Snow=%d Water=%d Lava=%d Basalt=%d DeepRock=%d Other=%d"),
+            LayerCounts[0], LayerCounts[1], LayerCounts[2], LayerCounts[3], LayerCounts[4],
+            LayerCounts[5], LayerCounts[6], LayerCounts[7], LayerCounts[8], LayerCounts[9]);
+
+        if (TotalTiles > 0)
+        {
+            int32 DominantLayer = 0;
+            for (int32 i = 1; i <= 8; ++i)
+            {
+                if (LayerCounts[i] > LayerCounts[DominantLayer])
+                    DominantLayer = i;
+            }
+            const float DominantPct = (100.f * LayerCounts[DominantLayer]) / static_cast<float>(TotalTiles);
+            if (DominantPct > 90.f)
+            {
+                UE_LOG(LogTemp, Warning,
+                    TEXT("[TerrainMaterial] WARNING: Terrain material output dominated by one layer. DominantLayer=%d Percent=%.1f"),
+                    DominantLayer, DominantPct);
+            }
+        }
+
+        if (LayerCounts[9] > 0)
+        {
+            UE_LOG(LogTemp, Warning,
+                TEXT("[TerrainMaterial] WARNING: Unexpected material layer indices detected. Other=%d"),
+                LayerCounts[9]);
         }
     }
 
@@ -2135,7 +3765,7 @@ bool UVoxelWorldManager::ApplyTerrainFromTilesInternal(
     }
 
     Generator->SetTerrainSnapshot(TerrainSnapshot);
-    Generator->SetSeed(1337);
+    Generator->SetSeed(TerrainSnapshot.WorldSeed);
 
     VoxelWorld->SetGeneratorObject(Generator);
 
@@ -2813,7 +4443,7 @@ bool UVoxelWorldManager::RebuildVoxelWorldFromCurrentSnapshot()
     }
 
     Generator->SetTerrainSnapshot(TerrainSnapshot);
-    Generator->SetSeed(1337);
+    Generator->SetSeed(TerrainSnapshot.WorldSeed);
 
     VoxelWorld->SetGeneratorObject(Generator);
 
@@ -3025,6 +4655,19 @@ bool UVoxelWorldManager::TryFindSurfaceBlockNearZ(
 
 FGameplayTag UVoxelWorldManager::GetBlockTypeAt(const FIntVector& GridPos) const
 {
+    // CUBE-TERRAIN-04X-STEP1: CubePrototype lookups must use cube bounds, not smooth cache bounds.
+    if (CurrentTerrainMode == ETerrainMode::CubePrototype &&
+        CubeTerrainRuntime && CubeTerrainRuntime->IsValid())
+    {
+        const FGameplayTag CubeBlockType = CubeTerrainRuntime->GetBlockTypeAt(GridPos);
+        UE_LOG(LogTemp, Verbose,
+            TEXT("[CubeMiningLookupAudit] GetBlockTypeAt Mode=CubePrototype Grid=(%d,%d,%d) Tag=%s RuntimeValid=%s"),
+            GridPos.X, GridPos.Y, GridPos.Z,
+            *CubeBlockType.ToString(),
+            TEXT("true"));
+        return CubeBlockType;
+    }
+
     if (!IsValidGridPosition(GridPos))
     {
         return FGameplayTag();
@@ -3114,29 +4757,84 @@ bool UVoxelWorldManager::GetTerrainMaterialLayerAtVoxel(
     OutMaterialLayer = TerrainLayer_Dirt;
     OutBlockType = FGameplayTag();
 
-    if (!IsValidGridPosition(GridPos))
+    if (!HasCachedTerrainData())
     {
         return false;
     }
 
-    OutBlockType = GetBlockTypeAt(GridPos);
-    if (!OutBlockType.IsValid())
-    {
-        return false;
-    }
-
-    if (OutBlockType == TAG_Terrain_Bedrock)
-    {
-        OutMaterialLayer = TerrainLayer_DeepRock;
-        return true;
-    }
-
+    // Mining cap samples are true 200uu voxel coords, including origin-centered
+    // negative X/Y. For CubePrototype, resolve those voxel coords through the same
+    // world-map tile path used by selection/claim/mining before falling back to the
+    // raw voxel-to-runtime conversion. This avoids treating a valid underground cap
+    // window as empty when the cube runtime expects 0-based tile columns.
     const FIntPoint VoxelXY(GridPos.X, GridPos.Y);
 
+    if (CurrentTerrainMode != ETerrainMode::CubePrototype)
+    {
+        const FIntPoint TerrainCell = VoxelCellToChunkCell(VoxelXY);
+        if (!IsValidTerrainCell(TerrainCell))
+        {
+            return false;
+        }
+    }
+
     int32 SurfaceZ = 0;
-    if (!TryGetTerrainSurfaceVoxelZ(VoxelXY, SurfaceZ))
+    bool bResolvedSurface = false;
+
+    if (CurrentTerrainMode == ETerrainMode::CubePrototype)
+    {
+        if (UWorld* World = GetWorld())
+        {
+            if (UWorldMapSubsystem* WorldMap = World->GetSubsystem<UWorldMapSubsystem>())
+            {
+                const FVector CellWorld = GridToWorld(FIntPoint(GridPos.X, GridPos.Y), GridPos.Z);
+                int32 TileX = INDEX_NONE;
+                int32 TileY = INDEX_NONE;
+                if (WorldMap->WorldPositionToTileXY(CellWorld, TileX, TileY))
+                {
+                    bResolvedSurface = TryGetTerrainSurfaceVoxelZ(FIntPoint(TileX, TileY), SurfaceZ);
+                }
+            }
+        }
+    }
+
+    if (!bResolvedSurface)
+    {
+        bResolvedSurface = TryGetTerrainSurfaceVoxelZ(VoxelXY, SurfaceZ);
+    }
+
+    if (!bResolvedSurface)
     {
         return false;
+    }
+
+    const int32 MinValidZ = FMath::FloorToInt(
+        -FMath::Max(0.0f, GlobalFoundationDepthWorld) / GetRenderVoxelSize());
+    if (GridPos.Z < MinValidZ)
+    {
+        return false;
+    }
+
+    // Above the column surface = open air = not part of the solid cap.
+    if (GridPos.Z > SurfaceZ)
+    {
+        return false;
+    }
+
+    // At/below surface = solid. Provide a representative block tag for callers that read it.
+    // (Direct GetBlockTypeAt may still be invalid on negative coords; the column-surface test
+    // above is the authoritative solidity signal, matching the backend.)
+    OutBlockType = GetBlockTypeAt(GridPos);
+
+    // Bedrock floor classification (mirrors the old early-out).
+    {
+        const int32 MinZ = FMath::FloorToInt(
+            -FMath::Max(0.0f, GlobalFoundationDepthWorld) / GetRenderVoxelSize());
+        if (GridPos.Z <= MinZ)
+        {
+            OutMaterialLayer = TerrainLayer_DeepRock;
+            return true;
+        }
     }
 
     const int32 DepthBelowSurface = FMath::Max(0, SurfaceZ - GridPos.Z);
@@ -3298,6 +4996,13 @@ bool UVoxelWorldManager::RemoveSingleVoxelAt(const FIntVector& GridPos)
 
 bool UVoxelWorldManager::RemoveVoxelByMode(const FIntVector& GridPos, EMiningRemovalMode RemovalMode)
 {
+    // CUBE-TERRAIN-01B: Route removal to cube runtime stub when CubePrototype is active.
+    if (CurrentTerrainMode == ETerrainMode::CubePrototype &&
+        CubeTerrainRuntime && CubeTerrainRuntime->IsValid())
+    {
+        return CubeTerrainRuntime->RemoveBlockAt(GridPos);
+    }
+
     switch (RemovalMode)
     {
     case EMiningRemovalMode::VoxelCube:
@@ -3481,6 +5186,13 @@ bool UVoxelWorldManager::ApplyRuntimeBrush(const FSDFBrush& Brush)
 
 int32 UVoxelWorldManager::GetSurfaceZAt(const FIntPoint& GridXY) const
 {
+    // CUBE-TERRAIN-01B: Route to cube runtime stub when CubePrototype is active.
+    if (CurrentTerrainMode == ETerrainMode::CubePrototype &&
+        CubeTerrainRuntime && CubeTerrainRuntime->IsValid())
+    {
+        return CubeTerrainRuntime->GetSurfaceZAt(GridXY);
+    }
+
     int32 SurfaceZ = 0;
 
     if (!TryGetTerrainSurfaceVoxelZ(GridXY, SurfaceZ))
@@ -3493,6 +5205,13 @@ int32 UVoxelWorldManager::GetSurfaceZAt(const FIntPoint& GridXY) const
 
 int32 UVoxelWorldManager::GetTerrainDepthAt(const FIntPoint& GridXY) const
 {
+    // CUBE-TERRAIN-01B: Route to cube runtime stub when CubePrototype is active.
+    if (CurrentTerrainMode == ETerrainMode::CubePrototype &&
+        CubeTerrainRuntime && CubeTerrainRuntime->IsValid())
+    {
+        return CubeTerrainRuntime->GetTerrainDepthAt(GridXY);
+    }
+
     const int32 SurfaceZ = GetSurfaceZAt(GridXY);
 
     const int32 MinZ = FMath::FloorToInt(

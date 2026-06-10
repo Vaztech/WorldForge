@@ -18,10 +18,12 @@
 #include "InputCoreTypes.h"
 #include "WorldMapSubsystem.h"
 #include "ColonyManager.h"
+#include "WorldGenBootstrapActor.h"
 #include "SettlementManager.h"
 #include "Rendering/DrawElements.h"
 #include "Styling/SlateBrush.h"
 #include "../Voxel/VoxelWorldManager.h"
+#include "UI/WorldForgeEmbarkationManager.h"
 
 namespace
 {
@@ -253,7 +255,13 @@ void UWorldForgeFullMapWidget::NativeConstruct()
 
     ViewCenterX = 0.5f;
     ViewCenterY = 0.5f;
-    Zoom = 1.0f;
+
+    if (DefaultMapZoom > 1.0f)
+    {
+        bUseStableFullMapCoordinates = false;
+    }
+
+    Zoom = FMath::Clamp(DefaultMapZoom, MinZoom, MaxZoom);
 
     ApplyRuntimeLayout(GetCachedGeometry());
 
@@ -414,6 +422,38 @@ FReply UWorldForgeFullMapWidget::NativeOnMouseButtonDown(
         bSelectedTileEmbarkValid ? TEXT("true") : TEXT("false"),
         *SelectedTileBlockReason);
 
+    // MAP-ZOOM-02A: Debug — zoom state + hover-vs-selected on click.
+    {
+        FMapDisplayGeometry LogMDG;
+        if (GetCurrentMapDisplayGeometry(LogMDG))
+        {
+            const FVector2D LocalPos = LogMDG.IMGMapGeometry.AbsoluteToLocal(InMouseEvent.GetScreenSpacePosition());
+            const FVector2D WidgetUV(
+                (LocalPos.X - LogMDG.MapRectMin.X) / FMath::Max(LogMDG.MapRectSize.X, 1.0f),
+                (LocalPos.Y - LogMDG.MapRectMin.Y) / FMath::Max(LogMDG.MapRectSize.Y, 1.0f));
+            const FVector2D WorldUV = WidgetUVToWorldUV(WidgetUV);
+
+            UE_LOG(LogTemp, Log,
+                TEXT("[FullMap] ZoomState: Zoom=%.3f Pan=(%.3f,%.3f) StableCoords=%s MapRect=(%.1f,%.1f,%.1f,%.1f)"),
+                Zoom, ViewCenterX, ViewCenterY,
+                bUseStableFullMapCoordinates ? TEXT("true") : TEXT("false"),
+                LogMDG.MapRectMin.X, LogMDG.MapRectMin.Y,
+                LogMDG.MapRectSize.X, LogMDG.MapRectSize.Y);
+
+            FVector2D SelectedLocal(0.0f, 0.0f);
+            const bool bHasSelLocal = bHasValidSelection &&
+                TileXYToWidgetLocal(SelectedTileX, SelectedTileY, InGeometry, SelectedLocal);
+
+            UE_LOG(LogTemp, Log,
+                TEXT("[FullMap] HoverVsSelected: Hover=(%d,%d) Selected=(%d,%d) MouseLocal=(%.1f,%.1f) SelectedLocal=(%.1f,%.1f)"),
+                HoveredTileX, HoveredTileY,
+                SelectedTileX, SelectedTileY,
+                LocalPos.X, LocalPos.Y,
+                bHasSelLocal ? SelectedLocal.X : -1.0f,
+                bHasSelLocal ? SelectedLocal.Y : -1.0f);
+        }
+    }
+
     UpdateSelectionVisual();
     UpdateSelectionText();
     return FReply::Handled();
@@ -445,19 +485,72 @@ FReply UWorldForgeFullMapWidget::NativeOnMouseMove(
         HoveredTileIndex = NewTileIndex;
         bHasHoveredTile = true;
 
-        if (bChanged && TXT_ResourceInfo)
+        if (bChanged)
         {
-            TXT_ResourceInfo->SetText(FText::FromString(
-                MapSubsystem->BuildTileSurveyText(HoveredTileX, HoveredTileY, bDebugRevealTileSurveyInfo)));
+            UpdateSelectionText();
+
+            // MAP-ZOOM-02A: Debug — log coordinate chain on tile change (deduped by tile).
+            if (LastLoggedHoverTileX != NewTileX || LastLoggedHoverTileY != NewTileY)
+            {
+                LastLoggedHoverTileX = NewTileX;
+                LastLoggedHoverTileY = NewTileY;
+
+                FMapDisplayGeometry LogMDG;
+                if (GetCurrentMapDisplayGeometry(LogMDG))
+                {
+                    const FVector2D LocalPos = LogMDG.IMGMapGeometry.AbsoluteToLocal(InMouseEvent.GetScreenSpacePosition());
+                    const FVector2D WidgetUV(
+                        (LocalPos.X - LogMDG.MapRectMin.X) / FMath::Max(LogMDG.MapRectSize.X, 1.0f),
+                        (LocalPos.Y - LogMDG.MapRectMin.Y) / FMath::Max(LogMDG.MapRectSize.Y, 1.0f));
+                    const FVector2D WorldUV = WidgetUVToWorldUV(WidgetUV);
+
+                    UE_LOG(LogTemp, Log,
+                        TEXT("[FullMap] ZoomState: Zoom=%.3f Pan=(%.3f,%.3f) StableCoords=%s MapRect=(%.1f,%.1f,%.1f,%.1f)"),
+                        Zoom, ViewCenterX, ViewCenterY,
+                        bUseStableFullMapCoordinates ? TEXT("true") : TEXT("false"),
+                        LogMDG.MapRectMin.X, LogMDG.MapRectMin.Y,
+                        LogMDG.MapRectSize.X, LogMDG.MapRectSize.Y);
+
+                    UE_LOG(LogTemp, Log,
+                        TEXT("[FullMap] MouseToTile: Local=(%.1f,%.1f) UV=(%.4f,%.4f) WorldUV=(%.4f,%.4f) Tile=(%d,%d)"),
+                        LocalPos.X, LocalPos.Y,
+                        WidgetUV.X, WidgetUV.Y,
+                        WorldUV.X, WorldUV.Y,
+                        NewTileX, NewTileY);
+
+                    FVector2D SelectedLocal(0.0f, 0.0f);
+                    const bool bHasSelLocal = bHasValidSelection &&
+                        TileXYToWidgetLocal(SelectedTileX, SelectedTileY, InGeometry, SelectedLocal);
+
+                    UE_LOG(LogTemp, Log,
+                        TEXT("[FullMap] HoverVsSelected: Hover=(%d,%d) Selected=(%d,%d) MouseLocal=(%.1f,%.1f) SelectedLocal=(%.1f,%.1f)"),
+                        NewTileX, NewTileY,
+                        SelectedTileX, SelectedTileY,
+                        LocalPos.X, LocalPos.Y,
+                        bHasSelLocal ? SelectedLocal.X : -1.0f,
+                        bHasSelLocal ? SelectedLocal.Y : -1.0f);
+                }
+            }
         }
     }
     else
     {
+        const bool bHadHoveredTile = bHasHoveredTile;
+
+        HoveredTileX = INDEX_NONE;
+        HoveredTileY = INDEX_NONE;
+        HoveredTileIndex = INDEX_NONE;
         bHasHoveredTile = false;
+
+        if (bHadHoveredTile)
+        {
+            UpdateSelectionText();
+        }
     }
 
     return Super::NativeOnMouseMove(InGeometry, InMouseEvent);
 }
+
 
 // ============================================================
 FReply UWorldForgeFullMapWidget::NativeOnMouseWheel(
@@ -466,6 +559,11 @@ FReply UWorldForgeFullMapWidget::NativeOnMouseWheel(
 {
     const float Delta = InMouseEvent.GetWheelDelta();
     Zoom = FMath::Clamp(Zoom + Delta * ZoomStep, MinZoom, MaxZoom);
+
+    if (Zoom > (1.0f + KINDA_SMALL_NUMBER))
+    {
+        bUseStableFullMapCoordinates = false;
+    }
 
     ClampViewCenter();
     ApplyMapTransform();
@@ -616,7 +714,18 @@ void UWorldForgeFullMapWidget::HandleConfirmClicked()
 {
     if (!bHasValidSelection)
     {
+        const FString Reason = TEXT("No valid tile selected.");
         UE_LOG(LogTemp, Warning, TEXT("[FullMap] Confirm clicked with no valid tile selected."));
+        if (bHasHoveredTile && (HoveredTileX != SelectedTileX || HoveredTileY != SelectedTileY))
+        {
+            UE_LOG(LogTemp, Warning,
+                TEXT("[FullMapSelectAudit] ConfirmBlocked Selected=(%d,%d) Hover=(%d,%d) Reason=%s"),
+                SelectedTileX,
+                SelectedTileY,
+                HoveredTileX,
+                HoveredTileY,
+                *Reason);
+        }
         return;
     }
 
@@ -626,9 +735,50 @@ void UWorldForgeFullMapWidget::HandleConfirmClicked()
         return;
     }
 
+    auto LogConfirmAudit = [this](bool bValid, const FString& Reason)
+    {
+        FWorldTileData AuditTile;
+        const bool bHasAuditTile = MapSubsystem && MapSubsystem->GetTileData(SelectedTileIndex, AuditTile);
+        const FString AuditBiome = bHasAuditTile ? AuditTile.BiomeType.ToString() : FString(TEXT("Unknown"));
+        const float AuditElevation = bHasAuditTile ? AuditTile.Elevation : 0.0f;
+        const float AuditWater = bHasAuditTile ? AuditTile.WaterDepth : 0.0f;
+        const bool bIsWater = MapSubsystem ? MapSubsystem->IsTileWaterLike(SelectedTileX, SelectedTileY) : true;
+        const FString AuditReason = Reason.IsEmpty() ? FString(TEXT("None")) : Reason;
+
+        UE_LOG(LogTemp, Log,
+            TEXT("[FullMapSelectAudit] Confirm Selected=(%d,%d) Hover=(%d,%d) Index=%d Biome=%s Elev=%.3f Water=%.3f IsWater=%s Valid=%s Reason=%s"),
+            SelectedTileX,
+            SelectedTileY,
+            HoveredTileX,
+            HoveredTileY,
+            SelectedTileIndex,
+            *AuditBiome,
+            AuditElevation,
+            AuditWater,
+            bIsWater ? TEXT("true") : TEXT("false"),
+            bValid ? TEXT("true") : TEXT("false"),
+            *AuditReason);
+    };
+
+    auto LogConfirmBlockedIfHoverDiffers = [this](const FString& Reason)
+    {
+        if (bHasHoveredTile && (HoveredTileX != SelectedTileX || HoveredTileY != SelectedTileY))
+        {
+            UE_LOG(LogTemp, Warning,
+                TEXT("[FullMapSelectAudit] ConfirmBlocked Selected=(%d,%d) Hover=(%d,%d) Reason=%s"),
+                SelectedTileX,
+                SelectedTileY,
+                HoveredTileX,
+                HoveredTileY,
+                *Reason);
+        }
+    };
+
     if (!bSelectedTileEmbarkValid)
     {
         const FString Reason = SelectedTileBlockReason.IsEmpty() ? TEXT("Invalid embark tile.") : SelectedTileBlockReason;
+        LogConfirmAudit(false, Reason);
+        LogConfirmBlockedIfHoverDiffers(Reason);
         UE_LOG(LogTemp, Warning, TEXT("[FullMap] Confirm blocked: %s"), *Reason);
         if (TXT_SelectedCell)
         {
@@ -656,6 +806,9 @@ void UWorldForgeFullMapWidget::HandleConfirmClicked()
     // ── Spawn rule: reject civ-claimed territory ─────────────────
     if (IsTileClaimedByCivilization(MapSubsystem, SelectedTileIndex))
     {
+        const FString Reason = TEXT("Claimed by another civilization.");
+        LogConfirmAudit(false, Reason);
+        LogConfirmBlockedIfHoverDiffers(Reason);
         UE_LOG(LogTemp, Warning,
             TEXT("[FullMap] Confirm blocked: selected tile %d is already controlled."),
             SelectedTileIndex);
@@ -705,13 +858,30 @@ void UWorldForgeFullMapWidget::HandleConfirmClicked()
 
     if (!bFoundSpawn)
     {
-        UE_LOG(
-            LogTemp,
-            Error,
+        // Ask the voxel manager why the tile was rejected so we can surface a
+        // readable reason to the player instead of silently blocking.
+        FString SpawnBlockReason;
+        VoxelMgr->IsTerrainCellWalkableForNavigation(DesiredCell, &SpawnBlockReason);
+
+        const FString BlockMsg = SpawnBlockReason.IsEmpty()
+            ? FString(TEXT("no safe CubePrototype spawn found near this tile."))
+            : FString::Printf(
+                TEXT("Cube terrain rejected this tile. Reason: %s. Pick another tile."),
+                *SpawnBlockReason);
+
+        UE_LOG(LogTemp, Error,
             TEXT("[FullMap] Confirm failed: (%d,%d) non-spawnable, no fallback found."),
-            DesiredCell.X,
-            DesiredCell.Y
-        );
+            DesiredCell.X, DesiredCell.Y);
+
+        UE_LOG(LogTemp, Warning,
+            TEXT("[FullMapSelectAudit] ConfirmBlocked Selected=(%d,%d) Reason=%s"),
+            DesiredCell.X, DesiredCell.Y, *BlockMsg);
+
+        if (TXT_SelectedCell)
+        {
+            TXT_SelectedCell->SetText(FText::FromString(
+                FString::Printf(TEXT("Cannot embark here: %s"), *BlockMsg)));
+        }
         return;
     }
 
@@ -728,10 +898,12 @@ void UWorldForgeFullMapWidget::HandleConfirmClicked()
         return;
     }
 
-    SelectedTileX = ResolvedCell.X;
-    SelectedTileY = ResolvedCell.Y;
-    SelectedTileIndex = FinalIndex;
-    bHasValidSelection = true;
+    SetSelectedTileFromXY(ResolvedCell.X, ResolvedCell.Y, FinalIndex);
+
+    const FString FinalAuditReason = SelectedTileBlockReason.IsEmpty()
+        ? FString(TEXT("Valid embark region."))
+        : SelectedTileBlockReason;
+    LogConfirmAudit(bSelectedTileEmbarkValid, FinalAuditReason);
 
     UE_LOG(
         LogTemp,
@@ -748,6 +920,25 @@ void UWorldForgeFullMapWidget::HandleConfirmClicked()
     );
 
     MapSubsystem->SetSelectedStartTile(SelectedTileX, SelectedTileY, SelectedTileIndex);
+
+    bool bEmbarkManagerSynced = false;
+    if (UGameInstance* GI = World->GetGameInstance())
+    {
+        if (UWorldForgeEmbarkationManager* EmbarkMgr = GI->GetSubsystem<UWorldForgeEmbarkationManager>())
+        {
+            EmbarkMgr->SetSelectedEmbarkTile(SelectedTileX, SelectedTileY, SelectedTileIndex);
+            bEmbarkManagerSynced = true;
+        }
+    }
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[FullMap] Synced confirmed tile. Selected=(%d,%d) Index=%d WorldMapSubsystem=%s EmbarkationManager=%s"),
+        SelectedTileX,
+        SelectedTileY,
+        SelectedTileIndex,
+        TEXT("true"),
+        bEmbarkManagerSynced ? TEXT("true") : TEXT("false"));
+
     MapSubsystem->RevealTile(SelectedTileIndex, EKnowledgeLevel::Surveyed, 1.0f);
     MapSubsystem->MarkMapTextureDirty();
     MapSubsystem->MarkDetailedMapTextureDirty();
@@ -762,22 +953,26 @@ void UWorldForgeFullMapWidget::HandleConfirmClicked()
         }
     }
 
-    if (APlayerController* PC = UGameplayStatics::GetPlayerController(World, 0))
+    bool bDeferredByBootstrap = false;
+    for (TActorIterator<AWorldGenBootstrapActor> It(World); It; ++It)
     {
-        if (APawn* PlayerPawn = PC->GetPawn())
+        if (AWorldGenBootstrapActor* BootstrapActor = *It)
         {
-            const FVector CameraLocation = SpawnWorldLocation + FVector(0.0f, 0.0f, 1200.0f);
-            PlayerPawn->SetActorLocation(CameraLocation);
-            PlayerPawn->SetActorRotation(FRotator(-65.0f, 0.0f, 0.0f));
-            PC->SetViewTarget(PlayerPawn);
+            if (IsValid(BootstrapActor))
+            {
+                bDeferredByBootstrap = BootstrapActor->NotifyFullMapConfirmedAndDeferDismissWithSpawn(this, SelectedTileX, SelectedTileY, SpawnWorldLocation);
+                if (bDeferredByBootstrap && TXT_SelectedCell)
+                {
+                    TXT_SelectedCell->SetText(FText::FromString(TEXT("Generating terrain... please wait.")));
+                }
+                break;
+            }
         }
-        else
-        {
-            PC->SetInitialLocationAndRotation(
-                SpawnWorldLocation + FVector(0.0f, 0.0f, 1200.0f),
-                FRotator(-65.0f, 0.0f, 0.0f)
-            );
-        }
+    }
+
+    if (!bDeferredByBootstrap)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[CameraHandoff] WARNING: No bootstrap actor found from FullMapWidget confirm."));
     }
 
     for (TActorIterator<AColonyManager> It(World); It; ++It)
@@ -792,12 +987,26 @@ void UWorldForgeFullMapWidget::HandleConfirmClicked()
         }
     }
 
-    RemoveFromParent();
+    if (!bDeferredByBootstrap)
+    {
+        RemoveFromParent();
+    }
 }
 
 // ============================================================
 void UWorldForgeFullMapWidget::HandleCloseClicked()
 {
+    if (UWorld* World = GetWorld())
+    {
+        for (TActorIterator<AWorldGenBootstrapActor> It(World); It; ++It)
+        {
+            if (IsValid(*It))
+            {
+                (*It)->NotifyFullMapCancelled();
+                break;
+            }
+        }
+    }
     RemoveFromParent();
 }
 
@@ -1053,33 +1262,18 @@ void UWorldForgeFullMapWidget::UpdateSelectionVisual()
         return;
     }
 
-    const int32 GridWidth = MapSubsystem->GetGridWidth();
-    const int32 GridHeight = MapSubsystem->GetGridHeight();
-    if (GridWidth <= 0 || GridHeight <= 0)
-    {
-        BRD_SelectedCell->SetRenderOpacity(0.0f);
-        return;
-    }
-
     FVector2D TileCenterIMGMapLocal;
-    if (!TileXYToMapDisplayLocal(SelectedTileX, SelectedTileY, MapDisplayGeometry, TileCenterIMGMapLocal))
+    FVector2D TileMinIMGMapLocal;
+    FVector2D TileMaxIMGMapLocal;
+    if (!TileXYToMapDisplayLocal(SelectedTileX, SelectedTileY, MapDisplayGeometry, TileCenterIMGMapLocal) ||
+        !TileXYToMapDisplayRect(SelectedTileX, SelectedTileY, MapDisplayGeometry, TileMinIMGMapLocal, TileMaxIMGMapLocal))
     {
         BRD_SelectedCell->SetRenderOpacity(0.0f);
         return;
     }
 
-    const float CellW = bUseStableFullMapCoordinates
-        ? MapDisplayGeometry.MapRectSize.X / static_cast<float>(GridWidth)
-        : MapDisplayGeometry.MapRectSize.X * Zoom / static_cast<float>(GridWidth);
-    const float CellH = bUseStableFullMapCoordinates
-        ? MapDisplayGeometry.MapRectSize.Y / static_cast<float>(GridHeight)
-        : MapDisplayGeometry.MapRectSize.Y * Zoom / static_cast<float>(GridHeight);
-
-    // Locator border uses the same tile -> map-display-local conversion as
-    // the painted selected X. Convert through absolute space into the root
-    // widget's local canvas coordinates before moving the border slot.
-    const FVector2D TileMinIMGMapLocal(TileCenterIMGMapLocal.X - CellW * 0.5f, TileCenterIMGMapLocal.Y - CellH * 0.5f);
-    const FVector2D TileMaxIMGMapLocal(TileCenterIMGMapLocal.X + CellW * 0.5f, TileCenterIMGMapLocal.Y + CellH * 0.5f);
+    // Locator border uses the same tile-rect transform as hover outlines,
+    // selected X drawing, and mouse hit conversion.
     const FGeometry WidgetGeometry = GetCachedGeometry();
     const FVector2D TileMinWidgetLocal = WidgetGeometry.AbsoluteToLocal(
         MapDisplayGeometry.IMGMapGeometry.LocalToAbsolute(TileMinIMGMapLocal));
@@ -1097,6 +1291,7 @@ void UWorldForgeFullMapWidget::UpdateSelectionVisual()
     BRD_SelectedCell->SetRenderOpacity(1.0f);
 }
 
+
 // ============================================================
 void UWorldForgeFullMapWidget::UpdateSelectionText()
 {
@@ -1105,34 +1300,49 @@ void UWorldForgeFullMapWidget::UpdateSelectionText()
         return;
     }
 
-    if (!bHasValidSelection)
+    const bool bUseHoveredTile = bHasHoveredTile && HoveredTileIndex != INDEX_NONE;
+    const bool bUseSelectedTile = bHasValidSelection && SelectedTileIndex != INDEX_NONE;
+
+    if (!bUseHoveredTile && !bUseSelectedTile)
     {
         TXT_SelectedCell->SetText(FText::FromString(TEXT("No Tile Selected")));
         UpdateResourceTooltip();
         return;
     }
 
-    FString Str = MapSubsystem
-        ? MapSubsystem->BuildTileSurveyText(SelectedTileX, SelectedTileY, bDebugRevealTileSurveyInfo)
-        : FString::Printf(TEXT("Tile X=%d Y=%d Index=%d"), SelectedTileX, SelectedTileY, SelectedTileIndex);
+    const int32 DetailTileX = bUseHoveredTile ? HoveredTileX : SelectedTileX;
+    const int32 DetailTileY = bUseHoveredTile ? HoveredTileY : SelectedTileY;
+    const int32 DetailTileIndex = bUseHoveredTile ? HoveredTileIndex : SelectedTileIndex;
+    const FString DetailSourceLabel = bUseHoveredTile ? FString(TEXT("Hover Tile")) : FString(TEXT("Selected Tile"));
 
+    UE_LOG(LogTemp, Log,
+        TEXT("[FullMapSelectAudit] DetailPanel Showing=%s Hover=(%d,%d) Selected=(%d,%d)"),
+        *DetailSourceLabel,
+        HoveredTileX,
+        HoveredTileY,
+        SelectedTileX,
+        SelectedTileY);
+
+    const FString SurveyText = MapSubsystem
+        ? MapSubsystem->BuildTileSurveyText(DetailTileX, DetailTileY, bDebugRevealTileSurveyInfo)
+        : FString::Printf(TEXT("Tile X=%d Y=%d Index=%d"), DetailTileX, DetailTileY, DetailTileIndex);
+
+    FString Str = FString::Printf(TEXT("%s:\n%s"), *DetailSourceLabel, *SurveyText);
     Str += FString::Printf(TEXT("\nLayers=0x%02X"), MapSubsystem ? MapSubsystem->GetActiveOverlayLayers() : 0);
 
-    // If the selected tile is near an active settlement/capital, show it
-    // directly in the selection text. This makes it clear that political
-    // territory and the active settlement spawn point are different things.
+    // If the hovered/active tile is near an active settlement/capital, show it
+    // directly in the details text. This keeps tile details aligned with the
+    // same tile source used by hover/resource inspection.
     if (UWorld* World = GetWorld())
     {
         if (const USettlementManager* SettlementMgr = World->GetSubsystem<USettlementManager>())
         {
             const FSettlementState* BestSettlement = nullptr;
             int32 BestDist = MAX_int32;
-
             for (const FSettlementState& Settlement : SettlementMgr->GetAllSettlements())
             {
                 const FIntPoint MarkerCell = Settlement.WorldOrigin + FIntPoint(1, 1);
-                const int32 Dist = FMath::Abs(MarkerCell.X - SelectedTileX) + FMath::Abs(MarkerCell.Y - SelectedTileY);
-
+                const int32 Dist = FMath::Abs(MarkerCell.X - DetailTileX) + FMath::Abs(MarkerCell.Y - DetailTileY);
                 if (Dist < BestDist)
                 {
                     BestDist = Dist;
@@ -1144,7 +1354,6 @@ void UWorldForgeFullMapWidget::UpdateSelectionText()
             {
                 const bool bIsPlayer = SettlementMgr->HasPlayerSettlement() &&
                     BestSettlement->SettlementID == SettlementMgr->GetPlayerSettlementID();
-
                 Str += FString::Printf(
                     TEXT("\n%s: %s | SettlementID=%d CivID=%d Origin=(%d,%d)"),
                     bIsPlayer ? TEXT("Player Colony") : TEXT("NPC Capital"),
@@ -1164,9 +1373,9 @@ void UWorldForgeFullMapWidget::UpdateSelectionText()
     }
 
     TXT_SelectedCell->SetText(FText::FromString(Str));
-
     UpdateResourceTooltip();
 }
+
 
 // ============================================================
 void UWorldForgeFullMapWidget::ApplyMapTransform()
@@ -1176,31 +1385,71 @@ void UWorldForgeFullMapWidget::ApplyMapTransform()
         return;
     }
 
-    // Stable coordinate mode keeps the full map image untransformed so
-    // mouse clicks, selected red X, and capital markers all use the same
-    // exact 0..1 map coordinate space. This avoids the old mismatch where
-    // the image render transform and marker math could drift apart.
-    if (bUseStableFullMapCoordinates)
-    {
-        IMG_Map->SetRenderTransform(FWidgetTransform());
-        return;
-    }
-
     FMapDisplayGeometry MapDisplayGeometry;
     if (!GetCurrentMapDisplayGeometry(MapDisplayGeometry))
     {
         return;
     }
 
-    FWidgetTransform T;
-    T.Scale = FVector2D(Zoom, Zoom);
-    T.Translation = FVector2D(
-        -(ViewCenterX - 0.5f) * MapDisplayGeometry.MapRectSize.X * Zoom,
-        -(ViewCenterY - 0.5f) * MapDisplayGeometry.MapRectSize.Y * Zoom);
+    if (bUseStableFullMapCoordinates)
+    {
+        IMG_Map->SetRenderTransform(FWidgetTransform());
+    }
+    else
+    {
+        FWidgetTransform T;
+        T.Scale = FVector2D(Zoom, Zoom);
+        T.Translation = FVector2D(
+            -(ViewCenterX - 0.5f) * MapDisplayGeometry.MapRectSize.X * Zoom,
+            -(ViewCenterY - 0.5f) * MapDisplayGeometry.MapRectSize.Y * Zoom);
 
-    IMG_Map->SetRenderTransform(T);
+        IMG_Map->SetRenderTransform(T);
+    }
+
+    const FVector2D CurrentPan(ViewCenterX, ViewCenterY);
+    const bool bStateChanged =
+        !bHasLoggedZoomFixState ||
+        bLastLoggedZoomFixUsedStableRootRect != MapDisplayGeometry.bUsingStableRootRect ||
+        FMath::Abs(LastLoggedZoomFixZoom - Zoom) > 0.001f ||
+        !LastLoggedZoomFixPan.Equals(CurrentPan, 0.001f) ||
+        !LastLoggedZoomFixRectPos.Equals(MapDisplayGeometry.MapRectMin, 0.5f) ||
+        !LastLoggedZoomFixRectSize.Equals(MapDisplayGeometry.MapRectSize, 0.5f);
+
+    if (bStateChanged)
+    {
+        UE_LOG(LogTemp, Log,
+            TEXT("[FullMapZoomFix] StableRect Source=%s Pos=(%.1f,%.1f) Size=(%.1f,%.1f) Zoom=%.3f Pan=(%.3f,%.3f)"),
+            MapDisplayGeometry.bUsingStableRootRect ? TEXT("Root") : TEXT("LegacyIMGMap"),
+            MapDisplayGeometry.MapRectMin.X,
+            MapDisplayGeometry.MapRectMin.Y,
+            MapDisplayGeometry.MapRectSize.X,
+            MapDisplayGeometry.MapRectSize.Y,
+            Zoom,
+            ViewCenterX,
+            ViewCenterY);
+
+        if (bHasValidSelection && SelectedTileX != INDEX_NONE && SelectedTileY != INDEX_NONE)
+        {
+            FVector2D StableLocal;
+            if (TileXYToMapDisplayLocal(SelectedTileX, SelectedTileY, MapDisplayGeometry, StableLocal))
+            {
+                UE_LOG(LogTemp, Log,
+                    TEXT("[FullMapZoomFix] Selected Tile=(%d,%d) StableLocal=(%.1f,%.1f)"),
+                    SelectedTileX,
+                    SelectedTileY,
+                    StableLocal.X,
+                    StableLocal.Y);
+            }
+        }
+
+        bHasLoggedZoomFixState = true;
+        bLastLoggedZoomFixUsedStableRootRect = MapDisplayGeometry.bUsingStableRootRect;
+        LastLoggedZoomFixZoom = Zoom;
+        LastLoggedZoomFixPan = CurrentPan;
+        LastLoggedZoomFixRectPos = MapDisplayGeometry.MapRectMin;
+        LastLoggedZoomFixRectSize = MapDisplayGeometry.MapRectSize;
+    }
 }
-
 // ============================================================
 void UWorldForgeFullMapWidget::ApplyRuntimeLayout(const FGeometry& WidgetGeometry)
 {
@@ -1360,13 +1609,12 @@ void UWorldForgeFullMapWidget::ApplyDetailTabHighlight() const
 }
 
 // ============================================================
-// Shared IMG_Map geometry helper.
+// Legacy IMG_Map geometry helper.
 //
-// Every map-space operation uses this same geometry source so clicks,
-// hover outlines, grid lines, capital markers, and selected-tile markers
-// all agree after the PIE window is resized. Paint geometry is preferred
-// because it matches the pixels that were actually drawn this frame; the
-// widget cache is only used before NativePaint has populated the cache.
+// Stable map math now prefers a root-derived untransformed rect so render
+// transforms on IMG_Map cannot skew hit testing or marker placement. The
+// live/cached IMG_Map geometry remains only as a fallback when the stable
+// root/widget geometry is temporarily unavailable.
 // ============================================================
 bool UWorldForgeFullMapWidget::GetCurrentIMGMapGeometry(FGeometry& OutMapGeometry) const
 {
@@ -1398,31 +1646,96 @@ bool UWorldForgeFullMapWidget::GetCurrentMapDisplayGeometry(FMapDisplayGeometry&
 {
     OutMapDisplayGeometry = FMapDisplayGeometry();
 
+    const FGeometry RootGeometry = GetCachedGeometry();
+    const FVector2D RootSize = RootGeometry.GetLocalSize();
+
+    auto TryBuildStableRootRect = [&]() -> bool
+    {
+        if (RootSize.X <= 0.0f || RootSize.Y <= 0.0f)
+        {
+            return false;
+        }
+
+        float MapBottomY = RootSize.Y;
+        bool bUsedBottomBarGeometry = false;
+
+        if (PNL_BottomBar)
+        {
+            const ESlateVisibility BottomBarVisibility = PNL_BottomBar->GetVisibility();
+            if (BottomBarVisibility != ESlateVisibility::Collapsed &&
+                BottomBarVisibility != ESlateVisibility::Hidden)
+            {
+                const FGeometry BottomBarGeometry = PNL_BottomBar->GetCachedGeometry();
+                const FVector2D BottomBarSize = BottomBarGeometry.GetLocalSize();
+                if (BottomBarSize.X > 0.0f && BottomBarSize.Y > 0.0f)
+                {
+                    const FVector2D BarTopLeft = RootGeometry.AbsoluteToLocal(
+                        BottomBarGeometry.LocalToAbsolute(FVector2D::ZeroVector));
+                    const FVector2D BarBottomLeft = RootGeometry.AbsoluteToLocal(
+                        BottomBarGeometry.LocalToAbsolute(FVector2D(0.0f, BottomBarSize.Y)));
+
+                    MapBottomY = FMath::Clamp(
+                        FMath::Min(BarTopLeft.Y, BarBottomLeft.Y),
+                        0.0f,
+                        RootSize.Y);
+                    bUsedBottomBarGeometry = true;
+                }
+            }
+        }
+
+        if (!bUsedBottomBarGeometry)
+        {
+            MapBottomY = FMath::Clamp(RootSize.Y - ResolveBottomBarHeight(), 0.0f, RootSize.Y);
+        }
+
+        const FVector2D StableMapRectSize(RootSize.X, MapBottomY);
+        if (StableMapRectSize.X <= 0.0f || StableMapRectSize.Y <= 0.0f)
+        {
+            return false;
+        }
+
+        OutMapDisplayGeometry.IMGMapGeometry = RootGeometry;
+        OutMapDisplayGeometry.IMGMapLocalSize = RootSize;
+        OutMapDisplayGeometry.MapRectMin = FVector2D::ZeroVector;
+        OutMapDisplayGeometry.MapRectSize = StableMapRectSize;
+        OutMapDisplayGeometry.bIsValid = true;
+        OutMapDisplayGeometry.bUsedAspectCorrectedRect = false;
+        OutMapDisplayGeometry.bUsingStableRootRect = true;
+        bHasLoggedStableRectFallbackWarning = false;
+        return true;
+    };
+
+    if (TryBuildStableRootRect())
+    {
+        return true;
+    }
+
+    if (!bHasLoggedStableRectFallbackWarning)
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[FullMapZoomFix] WARNING: Stable map rect invalid; falling back to previous geometry path."));
+        bHasLoggedStableRectFallbackWarning = true;
+    }
+
     FGeometry MapGeometry;
-    if (!GetCurrentIMGMapGeometry(MapGeometry))
+    if (GetCurrentIMGMapGeometry(MapGeometry))
     {
-        return false;
+        const FVector2D IMGMapSize = MapGeometry.GetLocalSize();
+        if (IMGMapSize.X > 0.0f && IMGMapSize.Y > 0.0f)
+        {
+            OutMapDisplayGeometry.IMGMapGeometry = MapGeometry;
+            OutMapDisplayGeometry.IMGMapLocalSize = IMGMapSize;
+            OutMapDisplayGeometry.MapRectMin = FVector2D::ZeroVector;
+            OutMapDisplayGeometry.MapRectSize = IMGMapSize;
+            OutMapDisplayGeometry.bIsValid = true;
+            OutMapDisplayGeometry.bUsedAspectCorrectedRect = false;
+            OutMapDisplayGeometry.bUsingStableRootRect = false;
+            return true;
+        }
     }
 
-    const FVector2D IMGMapSize = MapGeometry.GetLocalSize();
-    if (IMGMapSize.X <= 0.0f || IMGMapSize.Y <= 0.0f)
-    {
-        return false;
-    }
-
-    OutMapDisplayGeometry.IMGMapGeometry = MapGeometry;
-    OutMapDisplayGeometry.IMGMapLocalSize = IMGMapSize;
-
-    // For the full-map picker, IMG_Map is stretched to fill its allotted
-    // widget area. The displayed map rect is therefore the entire IMG_Map
-    // local rectangle; no centered/aspect-corrected sub-rect is used.
-    OutMapDisplayGeometry.MapRectMin = FVector2D::ZeroVector;
-    OutMapDisplayGeometry.MapRectSize = IMGMapSize;
-    OutMapDisplayGeometry.bIsValid = true;
-    OutMapDisplayGeometry.bUsedAspectCorrectedRect = false;
-    return true;
+    return false;
 }
-
 // ============================================================
 bool UWorldForgeFullMapWidget::IsScreenPositionInsideWidget(const UWidget* Widget, const FVector2D& ScreenPosition) const
 {
@@ -1477,11 +1790,28 @@ FVector2D UWorldForgeFullMapWidget::WidgetUVToWorldUV(const FVector2D& WidgetUV)
     const float VisW = 1.0f / FMath::Max(Zoom, 0.001f);
     const float MinU = ViewCenterX - VisW * 0.5f;
     const float MinV = ViewCenterY - VisW * 0.5f;
-
     return FVector2D(
         FMath::Clamp(MinU + WidgetUV.X * VisW, 0.0f, 1.0f),
         FMath::Clamp(MinV + WidgetUV.Y * VisW, 0.0f, 1.0f));
 }
+
+// ============================================================
+FVector2D UWorldForgeFullMapWidget::WorldUVToWidgetUV(const FVector2D& WorldUV) const
+{
+    const FVector2D ClampedWorldUV(
+        FMath::Clamp(WorldUV.X, 0.0f, 1.0f),
+        FMath::Clamp(WorldUV.Y, 0.0f, 1.0f));
+
+    if (bUseStableFullMapCoordinates)
+    {
+        return ClampedWorldUV;
+    }
+
+    return FVector2D(
+        0.5f + Zoom * (ClampedWorldUV.X - ViewCenterX),
+        0.5f + Zoom * (ClampedWorldUV.Y - ViewCenterY));
+}
+
 
 // ============================================================
 void UWorldForgeFullMapWidget::ClampViewCenter()
@@ -1607,6 +1937,50 @@ void UWorldForgeFullMapWidget::ApplyResponsiveTextBlock(UTextBlock* TextBlock, i
 
 
 // ============================================================
+bool UWorldForgeFullMapWidget::WorldUVToMapDisplayLocal(const FVector2D& WorldUV, const FMapDisplayGeometry& MapDisplayGeometry, FVector2D& OutIMGMapLocal) const
+{
+    if (!MapDisplayGeometry.bIsValid ||
+        MapDisplayGeometry.MapRectSize.X <= 0.0f ||
+        MapDisplayGeometry.MapRectSize.Y <= 0.0f)
+    {
+        return false;
+    }
+
+    const FVector2D WidgetUV = WorldUVToWidgetUV(WorldUV);
+    OutIMGMapLocal = MapDisplayGeometry.MapRectMin + FVector2D(
+        WidgetUV.X * MapDisplayGeometry.MapRectSize.X,
+        WidgetUV.Y * MapDisplayGeometry.MapRectSize.Y);
+    return true;
+}
+
+// ============================================================
+bool UWorldForgeFullMapWidget::TileXYToMapDisplayRect(int32 TileX, int32 TileY, const FMapDisplayGeometry& MapDisplayGeometry, FVector2D& OutMinIMGMapLocal, FVector2D& OutMaxIMGMapLocal) const
+{
+    if (!MapSubsystem)
+    {
+        return false;
+    }
+
+    const int32 GridWidth = MapSubsystem->GetGridWidth();
+    const int32 GridHeight = MapSubsystem->GetGridHeight();
+    if (GridWidth <= 0 || GridHeight <= 0 ||
+        TileX < 0 || TileY < 0 || TileX >= GridWidth || TileY >= GridHeight)
+    {
+        return false;
+    }
+
+    const FVector2D TileMinUV(
+        static_cast<float>(TileX) / static_cast<float>(GridWidth),
+        static_cast<float>(TileY) / static_cast<float>(GridHeight));
+    const FVector2D TileMaxUV(
+        static_cast<float>(TileX + 1) / static_cast<float>(GridWidth),
+        static_cast<float>(TileY + 1) / static_cast<float>(GridHeight));
+
+    return WorldUVToMapDisplayLocal(TileMinUV, MapDisplayGeometry, OutMinIMGMapLocal) &&
+        WorldUVToMapDisplayLocal(TileMaxUV, MapDisplayGeometry, OutMaxIMGMapLocal);
+}
+
+// ============================================================
 bool UWorldForgeFullMapWidget::TileXYToMapDisplayLocal(int32 TileX, int32 TileY, const FMapDisplayGeometry& MapDisplayGeometry, FVector2D& OutIMGMapLocal) const
 {
     if (!IMG_Map || !MapSubsystem)
@@ -1621,37 +1995,19 @@ bool UWorldForgeFullMapWidget::TileXYToMapDisplayLocal(int32 TileX, int32 TileY,
         return false;
     }
 
-    if (!MapDisplayGeometry.bIsValid ||
-        MapDisplayGeometry.MapRectSize.X <= 0.0f ||
-        MapDisplayGeometry.MapRectSize.Y <= 0.0f)
+    const FVector2D TileCenterWorldUV(
+        (static_cast<float>(TileX) + 0.5f) / static_cast<float>(GridWidth),
+        (static_cast<float>(TileY) + 0.5f) / static_cast<float>(GridHeight));
+    const FVector2D WidgetUV = WorldUVToWidgetUV(TileCenterWorldUV);
+
+    if (WidgetUV.X < 0.0f || WidgetUV.X > 1.0f || WidgetUV.Y < 0.0f || WidgetUV.Y > 1.0f)
     {
         return false;
     }
 
-    const float TileU = (static_cast<float>(TileX) + 0.5f) / static_cast<float>(GridWidth);
-    const float TileV = (static_cast<float>(TileY) + 0.5f) / static_cast<float>(GridHeight);
-
-    float ScreenU = TileU;
-    float ScreenV = TileV;
-
-    if (!bUseStableFullMapCoordinates)
-    {
-        ScreenU = 0.5f + Zoom * (TileU - ViewCenterX);
-        ScreenV = 0.5f + Zoom * (TileV - ViewCenterY);
-    }
-
-    if (ScreenU < 0.0f || ScreenU > 1.0f || ScreenV < 0.0f || ScreenV > 1.0f)
-    {
-        return false;
-    }
-
-    // Reverse of mouse conversion: tile -> normalized map UV -> IMG_Map local
-    // position inside the same display rect used for click and grid math.
-    OutIMGMapLocal = MapDisplayGeometry.MapRectMin + FVector2D(
-        ScreenU * MapDisplayGeometry.MapRectSize.X,
-        ScreenV * MapDisplayGeometry.MapRectSize.Y);
-    return true;
+    return WorldUVToMapDisplayLocal(TileCenterWorldUV, MapDisplayGeometry, OutIMGMapLocal);
 }
+
 
 // ============================================================
 bool UWorldForgeFullMapWidget::TileXYToWidgetLocal(int32 TileX, int32 TileY, const FGeometry& AllottedGeometry, FVector2D& OutWidgetLocal) const
@@ -1720,6 +2076,16 @@ void UWorldForgeFullMapWidget::DrawSelectedTileX(
     if (!TileXYToWidgetLocal(SelectedTileX, SelectedTileY, AllottedGeometry, P))
     {
         return;
+    }
+
+    // MAP-ZOOM-02A: Debug — log where the selected X is drawn (deduped by tile coords).
+    if (LastLoggedSelectedDrawTileX != SelectedTileX || LastLoggedSelectedDrawTileY != SelectedTileY)
+    {
+        LastLoggedSelectedDrawTileX = SelectedTileX;
+        LastLoggedSelectedDrawTileY = SelectedTileY;
+        UE_LOG(LogTemp, Log,
+            TEXT("[FullMap] TileToLocal: Tile=(%d,%d) Local=(%.1f,%.1f)"),
+            SelectedTileX, SelectedTileY, P.X, P.Y);
     }
 
     const float S = FMath::Max(4.0f, SelectedTileXSize * FMath::Max(0.1f, SelectedIndicatorScale));
@@ -1835,52 +2201,49 @@ bool UWorldForgeFullMapWidget::MapLocalToTileXY(const FVector2D& IMGMapLocal, co
         return false;
     }
 
-    // Convert IMG_Map local pixels into a 0..1 UV inside the full IMG_Map
-    // local rect. This is the same rect used by grid, marker, hover, and
-    // selection drawing.
+    // Convert IMG_Map local pixels into a visible-map widget UV, then into the
+    // canonical world UV used by hover, selection, markers, and tile details.
     const FVector2D RawWidgetUV(
         (IMGMapLocal.X - MapDisplayGeometry.MapRectMin.X) / MapDisplayGeometry.MapRectSize.X,
         (IMGMapLocal.Y - MapDisplayGeometry.MapRectMin.Y) / MapDisplayGeometry.MapRectSize.Y);
-
-    if (OutNormalizedMapUV)
-    {
-        *OutNormalizedMapUV = RawWidgetUV;
-    }
-
     const FVector2D WidgetUV(
         FMath::Clamp(RawWidgetUV.X, 0.0f, 0.999999f),
         FMath::Clamp(RawWidgetUV.Y, 0.0f, 0.999999f));
     const FVector2D WorldUV = WidgetUVToWorldUV(WidgetUV);
 
+    if (OutNormalizedMapUV)
+    {
+        *OutNormalizedMapUV = WorldUV;
+    }
+
     OutTileX = FMath::Clamp(FMath::FloorToInt(WorldUV.X * static_cast<float>(GridWidth)), 0, GridWidth - 1);
     OutTileY = FMath::Clamp(FMath::FloorToInt(WorldUV.Y * static_cast<float>(GridHeight)), 0, GridHeight - 1);
-
     return MapSubsystem->TileXYToIndex(OutTileX, OutTileY, OutTileIndex);
 }
 
+
 // ============================================================
-// PATCH 3C: Click-to-tile coordinate conversion (resize-safe).
+// PATCH 3C: Click-to-tile coordinate conversion (zoom/pan-safe).
 //
 // Why a shared display rect is used:
-//   Resize drift appears when click conversion, grid painting, and marker
-//   drawing each choose their own idea of IMG_Map size. Cached paint geometry
-//   can be stale after a PIE/game-window resize, so the live IMG_Map cached
-//   geometry is the preferred source and CachedIMGMapPaintGeometry is only a
-//   first-frame fallback.
+//   Zoom drift appears when click conversion, grid painting, and marker
+//   drawing read geometry from a render-transformed IMG_Map. The stable path
+//   derives an untransformed rect from the full widget/root geometry, then
+//   applies zoom/pan explicitly through WidgetUVToWorldUV / WorldUVToWidgetUV.
 //
 // How local position becomes UV:
-//   AbsoluteToLocal converts the desktop-space mouse coordinate into IMG_Map
-//   local pixels. Subtracting MapRectMin and dividing by MapRectSize gives
-//   normalized UV inside the actual displayed map rect.
+//   AbsoluteToLocal converts the desktop-space mouse coordinate into the
+//   stable map rect's local pixels. Subtracting MapRectMin and dividing by
+//   MapRectSize gives normalized UV inside the visible map rect.
 //
 // How UV becomes tile coordinates:
-//   UV is multiplied by (GridWidth, GridHeight) and floored to get the
-//   integer tile column/row.  This is done inside MapLocalToTileXY.
+//   UV is converted into canonical world UV and then multiplied by
+//   (GridWidth, GridHeight) and floored to get the integer tile column/row.
 //
-// Why this fixes window-resize offset:
+// Why this fixes zoom/pan marker drift:
 //   Mouse, hover, grid, selected X, locator border, and capital markers all
-//   use GetCurrentMapDisplayGeometry(), so they cannot disagree about the
-//   visible map rectangle after resize/stretch/shrink.
+//   use GetCurrentMapDisplayGeometry(), so they share one untransformed base
+//   rect even while IMG_Map is visually render-transformed.
 // ============================================================
 bool UWorldForgeFullMapWidget::MouseEventToTileXY(const FPointerEvent& InMouseEvent, int32& OutTileX, int32& OutTileY, int32& OutTileIndex, bool bLogClickConversion) const
 {
@@ -1935,8 +2298,23 @@ bool UWorldForgeFullMapWidget::MouseEventToTileXY(const FPointerEvent& InMouseEv
         return false;
     }
 
+    if (bLogClickConversion)
+    {
+        const FVector2D ViewportSize = GetCachedGeometry().GetLocalSize();
+        UE_LOG(LogTemp, Log,
+            TEXT("[FullMap] Geometry: MapRectLocal=(%.1f,%.1f,%.1f,%.1f) Viewport=(%.1f,%.1f) Tiles=(%d,%d)"),
+            MapDisplayGeometry.MapRectMin.X,
+            MapDisplayGeometry.MapRectMin.Y,
+            MapDisplayGeometry.MapRectSize.X,
+            MapDisplayGeometry.MapRectSize.Y,
+            ViewportSize.X,
+            ViewportSize.Y,
+            MapSubsystem->GetGridWidth(),
+            MapSubsystem->GetGridHeight());
+    }
+
     // Mouse conversion is always:
-    // screen-space pointer -> IMG_Map local pixels -> full IMG_Map rect UV
+    // screen-space pointer -> stable map rect local pixels -> visible map UV
     // -> world/map UV -> tile. Outside the displayed rect returns false
     // instead of clamping, so bottom-bar/popup clicks cannot select edge tiles.
     const FVector2D LocalPos = MapDisplayGeometry.IMGMapGeometry.AbsoluteToLocal(
@@ -1968,6 +2346,21 @@ bool UWorldForgeFullMapWidget::MouseEventToTileXY(const FPointerEvent& InMouseEv
 
     FVector2D NormalizedMapUV = RawUV;
     const bool bConverted = MapLocalToTileXY(LocalPos, MapDisplayGeometry, OutTileX, OutTileY, OutTileIndex, &NormalizedMapUV);
+
+    if (bLogClickConversion)
+    {
+        const FVector2D ScreenPosition = InMouseEvent.GetScreenSpacePosition();
+        UE_LOG(LogTemp, Log,
+            TEXT("[FullMap] MouseToTile: Screen=(%.1f,%.1f) Local=(%.1f,%.1f) UV=(%.4f,%.4f) Tile=(%d,%d)"),
+            ScreenPosition.X,
+            ScreenPosition.Y,
+            LocalPos.X,
+            LocalPos.Y,
+            NormalizedMapUV.X,
+            NormalizedMapUV.Y,
+            OutTileX,
+            OutTileY);
+    }
 
     LogClickConversion(
         &MapDisplayGeometry,
@@ -2105,7 +2498,6 @@ void UWorldForgeFullMapWidget::DrawTileGridOverlay(
         return;
     }
 
-    const FVector2D MapRectMin = MapDisplayGeometry.MapRectMin;
     const FVector2D MapRectSize = MapDisplayGeometry.MapRectSize;
     const int32 GridWidth = MapSubsystem->GetGridWidth();
     const int32 GridHeight = MapSubsystem->GetGridHeight();
@@ -2115,12 +2507,17 @@ void UWorldForgeFullMapWidget::DrawTileGridOverlay(
         return;
     }
 
-    const float TileW = MapRectSize.X / static_cast<float>(GridWidth);
-    const float TileH = MapRectSize.Y / static_cast<float>(GridHeight);
+    const float EffectiveZoom = bUseStableFullMapCoordinates ? 1.0f : Zoom;
+    const float TileW = MapRectSize.X * EffectiveZoom / static_cast<float>(GridWidth);
+    const float TileH = MapRectSize.Y * EffectiveZoom / static_cast<float>(GridHeight);
+    const bool bAllowMinorGrid = bDrawMinorCellGrid && FMath::Min(TileW, TileH) >= MinorGridMinScreenPixels;
+    const bool bAllowMajorGrid = bDrawMajorGrid;
 
-    // Avoid drawing hundreds of tiny unreadable lines at low zoom. Always draw
-    // major grid lines; minor lines appear only when individual tiles are large enough.
-    const bool bDrawMinor = FMath::Min(TileW, TileH) >= 3.0f;
+    if (!bAllowMajorGrid && !bAllowMinorGrid)
+    {
+        return;
+    }
+
     const int32 MajorEvery = FMath::Max(1, MajorGridLineInterval);
 
     auto ToWidgetLocal = [&](const FVector2D& MapLocal) -> FVector2D
@@ -2132,15 +2529,22 @@ void UWorldForgeFullMapWidget::DrawTileGridOverlay(
     for (int32 X = 0; X <= GridWidth; ++X)
     {
         const bool bMajor = (X % MajorEvery) == 0 || X == GridWidth;
-        if (!bMajor && !bDrawMinor)
+        if ((bMajor && !bAllowMajorGrid) || (!bMajor && !bAllowMinorGrid))
         {
             continue;
         }
 
-        const float MX = MapRectMin.X + static_cast<float>(X) * TileW;
+        FVector2D StartMapLocal;
+        FVector2D EndMapLocal;
+        if (!WorldUVToMapDisplayLocal(FVector2D(static_cast<float>(X) / static_cast<float>(GridWidth), 0.0f), MapDisplayGeometry, StartMapLocal) ||
+            !WorldUVToMapDisplayLocal(FVector2D(static_cast<float>(X) / static_cast<float>(GridWidth), 1.0f), MapDisplayGeometry, EndMapLocal))
+        {
+            continue;
+        }
+
         TArray<FVector2D> Points{
-            ToWidgetLocal(FVector2D(MX, MapRectMin.Y)),
-            ToWidgetLocal(FVector2D(MX, MapRectMin.Y + MapRectSize.Y))
+            ToWidgetLocal(StartMapLocal),
+            ToWidgetLocal(EndMapLocal)
         };
 
         FSlateDrawElement::MakeLines(
@@ -2157,15 +2561,22 @@ void UWorldForgeFullMapWidget::DrawTileGridOverlay(
     for (int32 Y = 0; Y <= GridHeight; ++Y)
     {
         const bool bMajor = (Y % MajorEvery) == 0 || Y == GridHeight;
-        if (!bMajor && !bDrawMinor)
+        if ((bMajor && !bAllowMajorGrid) || (!bMajor && !bAllowMinorGrid))
         {
             continue;
         }
 
-        const float MY = MapRectMin.Y + static_cast<float>(Y) * TileH;
+        FVector2D StartMapLocal;
+        FVector2D EndMapLocal;
+        if (!WorldUVToMapDisplayLocal(FVector2D(0.0f, static_cast<float>(Y) / static_cast<float>(GridHeight)), MapDisplayGeometry, StartMapLocal) ||
+            !WorldUVToMapDisplayLocal(FVector2D(1.0f, static_cast<float>(Y) / static_cast<float>(GridHeight)), MapDisplayGeometry, EndMapLocal))
+        {
+            continue;
+        }
+
         TArray<FVector2D> Points{
-            ToWidgetLocal(FVector2D(MapRectMin.X, MY)),
-            ToWidgetLocal(FVector2D(MapRectMin.X + MapRectSize.X, MY))
+            ToWidgetLocal(StartMapLocal),
+            ToWidgetLocal(EndMapLocal)
         };
 
         FSlateDrawElement::MakeLines(
@@ -2179,6 +2590,7 @@ void UWorldForgeFullMapWidget::DrawTileGridOverlay(
             bMajor ? 1.25f : 0.5f);
     }
 }
+
 
 // ============================================================
 void UWorldForgeFullMapWidget::DrawTileOutline(
@@ -2201,21 +2613,12 @@ void UWorldForgeFullMapWidget::DrawTileOutline(
         return;
     }
 
-    const FVector2D MapRectMin = MapDisplayGeometry.MapRectMin;
-    const FVector2D MapRectSize = MapDisplayGeometry.MapRectSize;
-    const int32 GridWidth = MapSubsystem->GetGridWidth();
-    const int32 GridHeight = MapSubsystem->GetGridHeight();
-    if (MapRectSize.X <= 0.0f || MapRectSize.Y <= 0.0f || GridWidth <= 0 || GridHeight <= 0)
+    FVector2D MinIMGMapLocal;
+    FVector2D MaxIMGMapLocal;
+    if (!TileXYToMapDisplayRect(TileX, TileY, MapDisplayGeometry, MinIMGMapLocal, MaxIMGMapLocal))
     {
         return;
     }
-
-    const float TileW = MapRectSize.X / static_cast<float>(GridWidth);
-    const float TileH = MapRectSize.Y / static_cast<float>(GridHeight);
-    const FVector2D Min(
-        MapRectMin.X + static_cast<float>(TileX) * TileW,
-        MapRectMin.Y + static_cast<float>(TileY) * TileH);
-    const FVector2D Max(Min.X + TileW, Min.Y + TileH);
 
     auto ToWidgetLocal = [&](const FVector2D& MapLocal) -> FVector2D
     {
@@ -2224,16 +2627,17 @@ void UWorldForgeFullMapWidget::DrawTileOutline(
     };
 
     TArray<FVector2D> Box{
-        ToWidgetLocal(FVector2D(Min.X, Min.Y)),
-        ToWidgetLocal(FVector2D(Max.X, Min.Y)),
-        ToWidgetLocal(FVector2D(Max.X, Max.Y)),
-        ToWidgetLocal(FVector2D(Min.X, Max.Y)),
-        ToWidgetLocal(FVector2D(Min.X, Min.Y))
+        ToWidgetLocal(FVector2D(MinIMGMapLocal.X, MinIMGMapLocal.Y)),
+        ToWidgetLocal(FVector2D(MaxIMGMapLocal.X, MinIMGMapLocal.Y)),
+        ToWidgetLocal(FVector2D(MaxIMGMapLocal.X, MaxIMGMapLocal.Y)),
+        ToWidgetLocal(FVector2D(MinIMGMapLocal.X, MaxIMGMapLocal.Y)),
+        ToWidgetLocal(FVector2D(MinIMGMapLocal.X, MinIMGMapLocal.Y))
     };
 
     FSlateDrawElement::MakeLines(OutDrawElements, ++LayerId, AllottedGeometry.ToPaintGeometry(), Box, ESlateDrawEffect::None, FLinearColor::Black, true, Thickness + 2.0f);
     FSlateDrawElement::MakeLines(OutDrawElements, ++LayerId, AllottedGeometry.ToPaintGeometry(), Box, ESlateDrawEffect::None, Color, true, Thickness);
 }
+
 
 // ============================================================
 void UWorldForgeFullMapWidget::EnterMapSelectionInputMode()
@@ -2442,7 +2846,10 @@ void UWorldForgeFullMapWidget::UpdateResourceTooltip()
         return;
     }
 
-    if (!MapSubsystem || !bHasValidSelection ||
+    const bool bUseHoveredTile = bHasHoveredTile && HoveredTileIndex != INDEX_NONE;
+    const int32 DetailTileIndex = bUseHoveredTile ? HoveredTileIndex : SelectedTileIndex;
+
+    if (!MapSubsystem || DetailTileIndex == INDEX_NONE ||
         !MapSubsystem->IsOverlayLayerActive(WorldForgeOverlay::Resource))
     {
         TXT_ResourceInfo->SetText(FText::GetEmpty());
@@ -2450,7 +2857,7 @@ void UWorldForgeFullMapWidget::UpdateResourceTooltip()
     }
 
     FWorldTileData Tile;
-    if (!MapSubsystem->GetTileData(SelectedTileIndex, Tile))
+    if (!MapSubsystem->GetTileData(DetailTileIndex, Tile))
     {
         TXT_ResourceInfo->SetText(FText::GetEmpty());
         return;
@@ -2498,3 +2905,4 @@ void UWorldForgeFullMapWidget::UpdateResourceTooltip()
 
     TXT_ResourceInfo->SetText(FText::FromString(Info));
 }
+

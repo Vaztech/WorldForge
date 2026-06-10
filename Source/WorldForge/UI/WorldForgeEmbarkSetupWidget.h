@@ -10,11 +10,31 @@ class UButton;
 class UComboBoxString;
 class UEditableTextBox;
 class UImage;
+class UPaperFlipbook;
+class UPanelWidget;
 class UScrollBox;
 class UTextBlock;
 class UUserWidget;
 class UWidget;
 class UWorldForgeEmbarkationManager;
+class UWorldForgeEmbarkSetupWidget;
+struct FWorldForgeEmbarkColonist;
+
+UCLASS()
+class WORLDFORGE_API UWorldForgeEmbarkColonistRowClickProxy : public UObject
+{
+	GENERATED_BODY()
+
+public:
+	void Initialize(UWorldForgeEmbarkSetupWidget* InOwnerWidget, int32 InColonistIndex);
+
+	UFUNCTION()
+	void HandleClicked();
+
+private:
+	TWeakObjectPtr<UWorldForgeEmbarkSetupWidget> OwnerWidget;
+	int32 ColonistIndex = INDEX_NONE;
+};
 
 /**
  * C++ bridge for the CommonUI embark setup screen.
@@ -27,6 +47,14 @@ UCLASS(BlueprintType, Blueprintable)
 class WORLDFORGE_API UWorldForgeEmbarkSetupWidget : public UCommonActivatableWidget
 {
 	GENERATED_BODY()
+
+public:
+	/**
+	 * Called by the widget that opened this screen (e.g. WBP_WF_MainMenu) so that
+	 * Back can restore it.  Mirrors SetSetupWidgetToRestore on the Loadout widget.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "WorldForge|Embark|Flow")
+	void SetPreviousWidget(UUserWidget* InWidget);
 
 protected:
 	virtual void NativeOnInitialized() override;
@@ -80,6 +108,54 @@ protected:
 
 	UPROPERTY(meta = (BindWidgetOptional))
 	UWidget* PNL_StartingColonists = nullptr;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	UTextBlock* TXT_ColonistListHeader = nullptr;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	UPanelWidget* PNL_ColonistList = nullptr;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	UPanelWidget* VB_ColonistList = nullptr;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	UButton* BTN_ColonistPlaceholder_01 = nullptr;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	UButton* BTN_ColonistPlaceholder_02 = nullptr;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	UButton* BTN_ColonistPlaceholder_03 = nullptr;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	UTextBlock* TXT_ColonistPlaceholder_01 = nullptr;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	UTextBlock* TXT_ColonistPlaceholder_02 = nullptr;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	UTextBlock* TXT_ColonistPlaceholder_03 = nullptr;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	UTextBlock* TXT_ColonistName = nullptr;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	UTextBlock* TXT_ColonistRace = nullptr;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	UTextBlock* TXT_ColonistAge = nullptr;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	UTextBlock* TXT_ColonistBackstory = nullptr;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	UTextBlock* TXT_ColonistSkills = nullptr;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	UTextBlock* TXT_ColonistTraits = nullptr;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	UButton* BTN_RerollSelectedColonist = nullptr;
 
 	// Empty tab content overlay (hidden since content lives in section panels)
 	UPROPERTY(meta = (BindWidgetOptional))
@@ -229,6 +305,18 @@ private:
 	UFUNCTION()
 	void HandleRaceDarkElfClicked();
 
+	UFUNCTION()
+	void HandleColonist01Clicked();
+
+	UFUNCTION()
+	void HandleColonist02Clicked();
+
+	UFUNCTION()
+	void HandleColonist03Clicked();
+
+	UFUNCTION()
+	void HandleRerollSelectedColonistClicked();
+
 	UWorldForgeEmbarkationManager* GetEmbarkationManager() const;
 	void BindControls();
 	void LogBindingStatus() const;
@@ -241,9 +329,20 @@ private:
 	void SetActiveEmbarkTab(EEmbarkSetupTab ActiveTab);
 	void InitializeRaceDisplay();
 	void ConfigureRaceButton(UButton* Button, const FText& Label, bool bEnabled);
+	void OpenColonistsTab();
+	UPanelWidget* GetColonistListPanel() const;
+	void RebuildColonistList(const TArray<FWorldForgeEmbarkColonist>& Colonists);
+	UButton* CreateColonistRowButton(int32 ColonistIndex, const FWorldForgeEmbarkColonist& Colonist);
+	void RefreshColonistButtons();
+	void RefreshColonistButton(int32 ColonistIndex);
+	void SelectStartingColonist(int32 ColonistIndex);
+	void RefreshSelectedColonistDetails();
 	void SelectRaceByName(const TCHAR* RaceName);
 	void SelectRaceByTag(FGameplayTag RaceTag);
 	void UpdateRaceDetails(FGameplayTag RaceTag);
+	void UpdateRacePreviewForTag(FGameplayTag RaceTag);
+	bool ResolveIdleFlipbookForRace(FGameplayTag RaceTag, UPaperFlipbook*& OutFlipbook) const;
+	bool ApplyStaticFlipbookPreview(UPaperFlipbook* Flipbook);
 	void ApplyWorldNameText(const FText& InText);
 	void ApplySeedText(const FText& InText);
 	FString SanitizeSeedInput(const FString& RawSeed) const;
@@ -251,9 +350,19 @@ private:
 	void CommitCurrentFieldsToManager();
 	TSubclassOf<UUserWidget> ResolveEmbarkLoadoutWidgetClass() const;
 	bool OpenEmbarkLoadout();
+	void RestorePreviousWidget();
 
 	UPROPERTY()
 	TObjectPtr<UUserWidget> ActiveEmbarkLoadoutWidget;
 
+	UPROPERTY()
+	TWeakObjectPtr<UUserWidget> PreviousWidget;
+
+	UPROPERTY(Transient)
+	TArray<TObjectPtr<UWorldForgeEmbarkColonistRowClickProxy>> ColonistRowClickProxies;
+
 	bool bApplyingSanitizedSeedText = false;
+	int32 SelectedColonistIndex = INDEX_NONE;
+
+	friend class UWorldForgeEmbarkColonistRowClickProxy;
 };

@@ -7,6 +7,7 @@
 #include "Player/BuildModeTypes.h"
 #include "Mining/MiningTypes.h"
 #include "Grid/LayerViewTypes.h"
+#include "Data/WorldForgeBuildDataTypes.h"
 #include "BuildModeWidget.generated.h"
 
 class UBuildModeManager;
@@ -248,6 +249,26 @@ public:
 	UFUNCTION(BlueprintPure, Category = "WorldForge|BuildUI")
 	int32 GetCurrentCellCount() const;
 
+	// CUBE-MINING-V3-FLOOD: separated mine-plan counts for the UI. GetCurrentCellCount
+	// above is the current active layer only; these expose the full multi-layer plan so
+	// the widget can stop showing one ambiguous number.
+
+	/** Total cells in the full persistent multi-layer mine plan (what Confirm commits). */
+	UFUNCTION(BlueprintPure, Category = "WorldForge|BuildUI|Mining")
+	int32 GetTotalMinePlanCount() const;
+
+	/** Number of distinct voxel layers the mine plan spans. */
+	UFUNCTION(BlueprintPure, Category = "WorldForge|BuildUI|Mining")
+	int32 GetMinePlanLayerCount() const;
+
+	/**
+	 * Ready-to-display summary the Blueprint can bind straight to a text block, e.g.
+	 * "Current layer: 9  •  Plan: 30 across 3 layers". Returns the plain current-layer
+	 * count when not in Mine mode, so a single text block can serve all tools.
+	 */
+	UFUNCTION(BlueprintPure, Category = "WorldForge|BuildUI|Mining")
+	FText GetMinePlanSummaryText() const;
+
 	UFUNCTION(BlueprintPure, Category = "WorldForge|BuildUI")
 	EBuildToolMode GetCurrentToolMode() const;
 
@@ -423,6 +444,8 @@ private:
 	FName ParseBuildPieceIDFromSummary(const FString& Summary) const;
 	FName ParsePrefabIDFromSummary(const FString& Summary) const;
 	FText MakeFarmSeedDisplayName(FName SeedID) const;
+	UWidget* CreateBuildPieceCardContent(const FWorldForgeBuildPieceRow& Row);
+	UWidget* CreatePrefabCardContent(const FWorldForgeBuildingPrefabRow& Row);
 
 	UFUNCTION()
 	void HandleBuildClicked();

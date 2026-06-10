@@ -1,5 +1,7 @@
-﻿#include "WorldEconomySimulation.h"
+#include "WorldEconomySimulation.h"
 
+#include "Economy/ConsumptionSimulator.h"
+#include "Economy/ProductionSimulator.h"
 #include "../Core/WorldForgeRNG.h"
 #include "SettlementManager.h"
 #include "ProcessorManager.h"
@@ -27,6 +29,61 @@ namespace
 
 		return FGameplayTag();
 	}
+
+	static FGameplayTag TryRequestCurrencyTag(const TCHAR* TagName)
+	{
+		return FGameplayTag::RequestGameplayTag(FName(TagName), false);
+	}
+
+	static FGameplayTag PickRegisteredCurrencyTagForCiv(const FCivilizationData& Civ, const FGameplayTag& GovernmentType)
+	{
+		TArray<FGameplayTag> Candidates;
+
+		const FString GovString = GovernmentType.ToString();
+
+		if (GovString.Contains(TEXT("Theocracy")))
+		{
+			Candidates.Add(TryRequestCurrencyTag(TEXT("WorldForge.Currency.Tithe")));
+			Candidates.Add(TryRequestCurrencyTag(TEXT("WorldForge.Currency.Scrip")));
+		}
+		if (GovString.Contains(TEXT("Military")) || GovString.Contains(TEXT("Dictatorship")))
+		{
+			Candidates.Add(TryRequestCurrencyTag(TEXT("WorldForge.Currency.StateIssue")));
+			Candidates.Add(TryRequestCurrencyTag(TEXT("WorldForge.Currency.IronMark")));
+		}
+		if (GovString.Contains(TEXT("Trade")) || GovString.Contains(TEXT("Market")) || Civ.CulturalDNA.EconomicOpenness >= 65.0f)
+		{
+			Candidates.Add(TryRequestCurrencyTag(TEXT("WorldForge.Currency.TradeCoin")));
+			Candidates.Add(TryRequestCurrencyTag(TEXT("WorldForge.Currency.MerchantNote")));
+		}
+
+		if (Civ.RaceType == FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Race.Dwarf")), false))
+		{
+			Candidates.Add(TryRequestCurrencyTag(TEXT("WorldForge.Currency.IronMark")));
+		}
+		else if (Civ.RaceType == FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Race.HighElf")), false))
+		{
+			Candidates.Add(TryRequestCurrencyTag(TEXT("WorldForge.Currency.MemoryCrystal")));
+		}
+		else if (Civ.RaceType == FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Race.Tidecaller")), false))
+		{
+			Candidates.Add(TryRequestCurrencyTag(TEXT("WorldForge.Currency.TidePearl")));
+		}
+		else if (Civ.RaceType == FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Race.FaeKin")), false))
+		{
+			Candidates.Add(TryRequestCurrencyTag(TEXT("WorldForge.Currency.DreamMote")));
+		}
+
+		for (const FGameplayTag& Candidate : Candidates)
+		{
+			if (Candidate.IsValid())
+			{
+				return Candidate;
+			}
+		}
+
+		return FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Currency.Barter")), false);
+	}
 }
 
 void UWorldEconomySimulation::Initialize(FSubsystemCollectionBase& Collection)
@@ -49,8 +106,12 @@ void UWorldEconomySimulation::Deinitialize()
 	SettlementPrices.Empty();
 	TradeRoutes.Empty();
 	CurrencyTrust.Empty();
+	CurrencyTrustByCivID.Empty();
 	CivGovernments.Empty();
 	AllCurrencies.Empty();
+	AllCurrenciesByCivID.Empty();
+	CurrencyTagToCivIDs.Empty();
+	SettlementCurrencyBalances.Empty();
 	AllGovernmentsArray.Empty();
 	AllCurrenciesArray.Empty();
 
@@ -70,9 +131,21 @@ void UWorldEconomySimulation::RegisterDefaultCommodities()
 void UWorldEconomySimulation::RebuildLookupMapsFromArrays()
 {
 	AllCurrencies.Empty();
+	AllCurrenciesByCivID.Empty();
+	CurrencyTagToCivIDs.Empty();
+
 	for (const FCurrencyDefinition& Currency : AllCurrenciesArray)
 	{
-		if (Currency.CurrencyTag.IsValid())
+		if (Currency.IssuingCivID >= 0)
+		{
+			AllCurrenciesByCivID.Add(Currency.IssuingCivID, Currency);
+			CurrencyTagToCivIDs.FindOrAdd(Currency.CurrencyTag).AddUnique(Currency.IssuingCivID);
+		}
+
+		// Legacy compatibility map. If multiple civs share the same registered tag
+		// (currently common when only WorldForge.Currency.Barter exists), do not
+		// overwrite the first entry. Use AllCurrenciesByCivID for real identity.
+		if (Currency.CurrencyTag.IsValid() && !AllCurrencies.Contains(Currency.CurrencyTag))
 		{
 			AllCurrencies.Add(Currency.CurrencyTag, Currency);
 		}
@@ -98,7 +171,15 @@ void UWorldEconomySimulation::RebuildLookupMapsFromArrays()
 void UWorldEconomySimulation::RebuildArraysFromLookupMaps()
 {
 	AllCurrenciesArray.Empty();
-	AllCurrencies.GenerateValueArray(AllCurrenciesArray);
+
+	if (AllCurrenciesByCivID.Num() > 0)
+	{
+		AllCurrenciesByCivID.GenerateValueArray(AllCurrenciesArray);
+	}
+	else
+	{
+		AllCurrencies.GenerateValueArray(AllCurrenciesArray);
+	}
 
 	AllGovernmentsArray.Empty();
 	CivGovernments.GenerateValueArray(AllGovernmentsArray);
@@ -115,8 +196,11 @@ void UWorldEconomySimulation::GenerateWorldEconomy(
 	AllCurrenciesArray.Empty();
 	AllGovernmentsArray.Empty();
 	AllCurrencies.Empty();
+	AllCurrenciesByCivID.Empty();
+	CurrencyTagToCivIDs.Empty();
 	CivGovernments.Empty();
 	CurrencyTrust.Empty();
+	CurrencyTrustByCivID.Empty();
 	OutCurrencies.Empty();
 
 	if (!RNG)
@@ -147,8 +231,22 @@ void UWorldEconomySimulation::GenerateWorldEconomy(
 
 		AllCurrenciesArray.Add(Currency);
 		OutCurrencies.Add(Currency);
-		AllCurrencies.Add(Currency.CurrencyTag, Currency);
-		CurrencyTrust.Add(Currency.CurrencyTag, Currency.TrustState);
+
+		AllCurrenciesByCivID.Add(Civ.CivID, Currency);
+		CurrencyTagToCivIDs.FindOrAdd(Currency.CurrencyTag).AddUnique(Civ.CivID);
+
+		// Legacy compatibility: this map cannot uniquely identify multiple civs
+		// if they share a registered currency tag, so preserve the first entry.
+		if (!AllCurrencies.Contains(Currency.CurrencyTag))
+		{
+			AllCurrencies.Add(Currency.CurrencyTag, Currency);
+		}
+
+		CurrencyTrustByCivID.Add(Civ.CivID, Currency.TrustState);
+		if (!CurrencyTrust.Contains(Currency.CurrencyTag))
+		{
+			CurrencyTrust.Add(Currency.CurrencyTag, Currency.TrustState);
+		}
 
 		UE_LOG(LogTemp, Log,
 			TEXT("[EconomySim] Civ %d Gov=%s Cur=%s Anchor=%.2f"),
@@ -176,17 +274,8 @@ void UWorldEconomySimulation::SimulateEconomicEpoch(
 			continue;
 		}
 
-		FGameplayTag CurrencyTag;
-		for (const TPair<FGameplayTag, FCurrencyDefinition>& Pair : AllCurrencies)
-		{
-			if (Pair.Value.IssuingCivID == Civ.CivID)
-			{
-				CurrencyTag = Pair.Key;
-				break;
-			}
-		}
-
-		if (!CurrencyTag.IsValid())
+		FCurrencyDefinition* Currency = AllCurrenciesByCivID.Find(Civ.CivID);
+		if (!Currency)
 		{
 			continue;
 		}
@@ -202,9 +291,9 @@ void UWorldEconomySimulation::SimulateEconomicEpoch(
 			-0.25f,
 			0.25f);
 
-		QueueTrustDelta(CurrencyTag, ETrustComponent::BackingStrength, GrowthDelta);
-		QueueTrustDelta(CurrencyTag, ETrustComponent::TradeReputation, GrowthDelta * 0.5f);
-		QueueTrustDelta(CurrencyTag, ETrustComponent::GovernmentCredibility, GrowthDelta * 0.25f);
+		QueueTrustDeltaForCiv(Civ.CivID, ETrustComponent::BackingStrength, GrowthDelta);
+		QueueTrustDeltaForCiv(Civ.CivID, ETrustComponent::TradeReputation, GrowthDelta * 0.5f);
+		QueueTrustDeltaForCiv(Civ.CivID, ETrustComponent::GovernmentCredibility, GrowthDelta * 0.25f);
 	}
 
 	ApplyPendingTrustDeltas();
@@ -272,10 +361,10 @@ FCurrencyDefinition UWorldEconomySimulation::GenerateCurrencyForCiv(
 {
 	FCurrencyDefinition Currency;
 
-	// Use a valid registered currency tag instead of requesting dynamic tags
-	// like WorldForge.Economy.Currency.CivX, which are not registered.
-	Currency.CurrencyTag = FGameplayTag::RequestGameplayTag(
-		FName(TEXT("WorldForge.Currency.Barter")));
+	// Pick the best registered currency archetype tag available.
+	// Unique civ identity is tracked by AllCurrenciesByCivID because gameplay tags
+	// must be registered ahead of time and cannot safely be generated per civ.
+	Currency.CurrencyTag = PickRegisteredCurrencyTagForCiv(Civ, GovernmentType);
 
 	if (Civ.RaceType == FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Race.Dwarf"))))
 	{
@@ -536,11 +625,25 @@ void UWorldEconomySimulation::UpdateProduction(
 		}
 
 		const float AverageSkill = TotalSkill / static_cast<float>(WorkerCount);
-		const float SkillMod = FMath::Clamp(AverageSkill / 50.0f, 0.0f, 2.0f);
-		const float Disruption = 1.0f;
 
-		const float RawOutput = FMath::FloorToFloat(
-			static_cast<float>(WorkerCount) * SkillMod * Disruption);
+		FProductionInputs ProductionInputs;
+		ProductionInputs.WorkerCount = WorkerCount;
+		ProductionInputs.SkillMod = FMath::Clamp(AverageSkill / 50.0f, 0.0f, 2.0f);
+		ProductionInputs.BuildingMod = 1.0f;
+		ProductionInputs.BiomeMod = 1.0f;
+		ProductionInputs.DisruptionFactor = 1.0f;
+		ProductionInputs.CosmicMod = 1.0f;
+
+		UProductionSimulator* ProductionSimulator = NewObject<UProductionSimulator>(this);
+		const int32 ProducedAmount = ProductionSimulator
+			? FMath::Max(0, FMath::FloorToInt(ProductionSimulator->ComputeOutput(ProductionInputs)))
+			: 0;
+
+		if (ProducedAmount > 0)
+		{
+			SettlementManager->AddToStockpile(SettlementID, ItemTag, ProducedAmount);
+			SettlementManager->SetVisualDirty(SettlementID);
+		}
 
 		const float CurrentStock = FMath::Max(
 			0.0f,
@@ -551,7 +654,7 @@ void UWorldEconomySimulation::UpdateProduction(
 			static_cast<float>(Settlement->Population) * Price.PriceElasticity * 0.5f);
 
 		Price.SupplyPressure = FMath::Clamp(
-			(CurrentStock + RawOutput) / ExpectedDemand,
+			CurrentStock / ExpectedDemand,
 			0.0f,
 			3.0f);
 	}
@@ -595,18 +698,37 @@ void UWorldEconomySimulation::UpdateConsumption(
 			NeedWeight = 0.3f;
 		}
 
-		const float DemandRate =
-			static_cast<float>(Settlement->Population) *
-			NeedWeight *
-			Price.PriceElasticity;
+		FConsumptionInputs ConsumptionInputs;
+		ConsumptionInputs.Population = Settlement->Population;
+		ConsumptionInputs.NeedWeight = NeedWeight;
+		ConsumptionInputs.SeasonMod = 1.0f;
+		ConsumptionInputs.CulturalMod = 1.0f;
+		ConsumptionInputs.PriceElasticity = Price.PriceElasticity;
+
+		UConsumptionSimulator* ConsumptionSimulator = NewObject<UConsumptionSimulator>(this);
+		const int32 DemandAmount = ConsumptionSimulator
+			? FMath::Max(0, FMath::FloorToInt(ConsumptionSimulator->ComputeDemand(ConsumptionInputs)))
+			: 0;
+
+		const int32 StockBeforeConsumption = SettlementManager->GetStockpileAmount(SettlementID, ItemTag);
+		const int32 ConsumedAmount = FMath::Min(StockBeforeConsumption, DemandAmount);
+
+		if (ConsumedAmount > 0)
+		{
+			SettlementManager->ConsumeFromStockpile(SettlementID, ItemTag, ConsumedAmount);
+			SettlementManager->SetVisualDirty(SettlementID);
+		}
 
 		const float CurrentStock = FMath::Max(
 			0.0f,
 			static_cast<float>(SettlementManager->GetStockpileAmount(SettlementID, ItemTag)));
 
+		const float UnmetDemand = FMath::Max(0.0f, static_cast<float>(DemandAmount - ConsumedAmount));
+		const float EffectiveDemand = static_cast<float>(DemandAmount) + UnmetDemand;
+
 		Price.DemandPressure = (CurrentStock > 0.0f)
-			? FMath::Clamp(DemandRate / CurrentStock, 0.0f, 3.0f)
-			: 2.0f;
+			? FMath::Clamp(EffectiveDemand / CurrentStock, 0.0f, 3.0f)
+			: FMath::Clamp(1.0f + (UnmetDemand * 0.05f), 1.0f, 3.0f);
 	}
 }
 
@@ -621,13 +743,40 @@ void UWorldEconomySimulation::UpdateFlow(float DeltaTime, int32 SettlementID)
 	}
 
 	float RouteStrength = 0.0f;
+	int32 ConnectedRouteCount = 0;
 
 	for (const TPair<int32, FTradeFlowState>& Pair : TradeRoutes)
 	{
-		RouteStrength += FMath::Clamp(Pair.Value.DiplomaticMod, 0.0f, 2.0f);
+		const FTradeFlowState& Flow = Pair.Value;
+		const bool bConnected =
+			Flow.OriginID == SettlementID ||
+			Flow.DestID == SettlementID;
+
+		if (!bConnected)
+		{
+			continue;
+		}
+
+		const float CapacityFactor = FMath::Clamp(
+			Flow.OfficialCapacity + Flow.UnofficialCapacity,
+			0.0f,
+			2.0f);
+
+		RouteStrength +=
+			FMath::Clamp(Flow.DiplomaticMod, 0.0f, 2.0f) *
+			FMath::Clamp(Flow.SafetyFactor, 0.0f, 2.0f) *
+			FMath::Clamp(Flow.TaxFactor, 0.0f, 2.0f) *
+			FMath::Max(0.25f, CapacityFactor);
+
+		++ConnectedRouteCount;
 	}
 
-	RouteStrength /= static_cast<float>(TradeRoutes.Num());
+	if (ConnectedRouteCount <= 0)
+	{
+		return;
+	}
+
+	RouteStrength /= static_cast<float>(ConnectedRouteCount);
 
 	const float FlowAlpha = FMath::Clamp(
 		DeltaTime * 0.02f * RouteStrength,
@@ -692,7 +841,7 @@ void UWorldEconomySimulation::UpdatePriceDiscovery(float DeltaTime, int32 Settle
 
 void UWorldEconomySimulation::UpdateCurrencyTrust(float DeltaTime)
 {
-	for (TPair<FGameplayTag, FCurrencyTrustState>& Pair : CurrencyTrust)
+	for (TPair<int32, FCurrencyTrustState>& Pair : CurrencyTrustByCivID)
 	{
 		FCurrencyTrustState& Trust = Pair.Value;
 
@@ -713,9 +862,9 @@ void UWorldEconomySimulation::UpdateCurrencyTrust(float DeltaTime)
 		Trust.bInFreefall = AverageTrust < 0.3f;
 	}
 
-	for (TPair<FGameplayTag, FCurrencyDefinition>& CurrencyPair : AllCurrencies)
+	for (TPair<int32, FCurrencyDefinition>& CurrencyPair : AllCurrenciesByCivID)
 	{
-		const FCurrencyTrustState* Trust = CurrencyTrust.Find(CurrencyPair.Key);
+		const FCurrencyTrustState* Trust = CurrencyTrustByCivID.Find(CurrencyPair.Key);
 		if (!Trust)
 		{
 			continue;
@@ -733,6 +882,27 @@ void UWorldEconomySimulation::UpdateCurrencyTrust(float DeltaTime)
 			FMath::Max(0.0f, CurrencyPair.Value.BaseAnchorValue * Score);
 
 		CurrencyPair.Value.TrustState = *Trust;
+	}
+
+	CurrencyTrust.Empty();
+	AllCurrencies.Empty();
+
+	for (const TPair<int32, FCurrencyDefinition>& CurrencyPair : AllCurrenciesByCivID)
+	{
+		const FCurrencyDefinition& Currency = CurrencyPair.Value;
+
+		if (!AllCurrencies.Contains(Currency.CurrencyTag))
+		{
+			AllCurrencies.Add(Currency.CurrencyTag, Currency);
+		}
+
+		if (!CurrencyTrust.Contains(Currency.CurrencyTag))
+		{
+			if (const FCurrencyTrustState* Trust = CurrencyTrustByCivID.Find(CurrencyPair.Key))
+			{
+				CurrencyTrust.Add(Currency.CurrencyTag, *Trust);
+			}
+		}
 	}
 }
 
@@ -847,7 +1017,7 @@ float UWorldEconomySimulation::ComputeBlackMarketGap(
 
 void UWorldEconomySimulation::CheckCurrencyCollapse()
 {
-	for (TPair<FGameplayTag, FCurrencyDefinition>& Pair : AllCurrencies)
+	for (TPair<int32, FCurrencyDefinition>& Pair : AllCurrenciesByCivID)
 	{
 		FCurrencyDefinition& Currency = Pair.Value;
 
@@ -924,12 +1094,12 @@ void UWorldEconomySimulation::ScanNarrativePatterns(int32 SettlementID, int32 Cu
 		break;
 	}
 
-	for (const TPair<FGameplayTag, FCurrencyTrustState>& TrustPair : CurrencyTrust)
+	for (const TPair<int32, FCurrencyTrustState>& TrustPair : CurrencyTrustByCivID)
 	{
 		if (TrustPair.Value.bInFreefall)
 		{
-			const FCurrencyDefinition* Currency = AllCurrencies.Find(TrustPair.Key);
-			const FString CurrencyName = Currency ? Currency->DisplayName.ToString() : TrustPair.Key.ToString();
+			const FCurrencyDefinition* Currency = AllCurrenciesByCivID.Find(TrustPair.Key);
+			const FString CurrencyName = Currency ? Currency->DisplayName.ToString() : FString::Printf(TEXT("Civ %d Currency"), TrustPair.Key);
 
 			TryAddNarrativeReport(
 				TAG_Economy_Pattern_CurrencyFreefall,
@@ -999,6 +1169,32 @@ TArray<FString> UWorldEconomySimulation::DrainNarrativeReports()
 
 // ── Trust delta queue ───────────────────────────────────────────────
 
+void UWorldEconomySimulation::QueueTrustDeltaForCiv(
+	int32 CivID,
+	ETrustComponent Component,
+	float Delta)
+{
+	if (CivID < 0)
+	{
+		return;
+	}
+
+	FCurrencyTrustDelta TrustDelta;
+	TrustDelta.Component = Component;
+	TrustDelta.Delta = Delta;
+
+	if (const FCurrencyDefinition* Currency = AllCurrenciesByCivID.Find(CivID))
+	{
+		TrustDelta.CurrencyTag = Currency->CurrencyTag;
+	}
+	else
+	{
+		TrustDelta.CurrencyTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Currency.Barter")), false);
+	}
+
+	PendingTrustDeltasByCivID.FindOrAdd(CivID).Add(TrustDelta);
+}
+
 void UWorldEconomySimulation::QueueTrustDelta(
 	FGameplayTag CurrencyTag,
 	ETrustComponent Component,
@@ -1009,53 +1205,90 @@ void UWorldEconomySimulation::QueueTrustDelta(
 	TrustDelta.Component = Component;
 	TrustDelta.Delta = Delta;
 	PendingTrustDeltas.Add(TrustDelta);
+
+	if (const TArray<int32>* CivIDs = CurrencyTagToCivIDs.Find(CurrencyTag))
+	{
+		for (const int32 CivID : *CivIDs)
+		{
+			PendingTrustDeltasByCivID.FindOrAdd(CivID).Add(TrustDelta);
+		}
+	}
 }
 
 void UWorldEconomySimulation::ApplyPendingTrustDeltas()
 {
-	for (const FCurrencyTrustDelta& Delta : PendingTrustDeltas)
+	auto ApplyDeltaToTrust = [](FCurrencyTrustState& Trust, const FCurrencyTrustDelta& Delta)
 	{
-		FCurrencyTrustState* Trust = CurrencyTrust.Find(Delta.CurrencyTag);
+		switch (Delta.Component)
+		{
+		case ETrustComponent::MilitaryStability:
+			Trust.MilitaryStability =
+				FMath::Clamp(Trust.MilitaryStability + Delta.Delta, 0.0f, 1.0f);
+			break;
+
+		case ETrustComponent::BackingStrength:
+			Trust.BackingStrength =
+				FMath::Clamp(Trust.BackingStrength + Delta.Delta, 0.0f, 1.0f);
+			break;
+
+		case ETrustComponent::TradeReputation:
+			Trust.TradeReputation =
+				FMath::Clamp(Trust.TradeReputation + Delta.Delta, 0.0f, 1.0f);
+			break;
+
+		case ETrustComponent::CosmicFavor:
+			Trust.CosmicFavor =
+				FMath::Clamp(Trust.CosmicFavor + Delta.Delta, 0.0f, 1.0f);
+			break;
+
+		case ETrustComponent::PoliticalCohesion:
+			Trust.PoliticalCohesion =
+				FMath::Clamp(Trust.PoliticalCohesion + Delta.Delta, 0.0f, 1.0f);
+			break;
+
+		case ETrustComponent::GovernmentCredibility:
+			Trust.GovernmentCredibility =
+				FMath::Clamp(Trust.GovernmentCredibility + Delta.Delta, 0.0f, 1.0f);
+			break;
+		}
+	};
+
+	for (const TPair<int32, TArray<FCurrencyTrustDelta>>& CivDeltaPair : PendingTrustDeltasByCivID)
+	{
+		FCurrencyTrustState* Trust = CurrencyTrustByCivID.Find(CivDeltaPair.Key);
 		if (!Trust)
 		{
 			continue;
 		}
 
-		switch (Delta.Component)
+		for (const FCurrencyTrustDelta& Delta : CivDeltaPair.Value)
 		{
-		case ETrustComponent::MilitaryStability:
-			Trust->MilitaryStability =
-				FMath::Clamp(Trust->MilitaryStability + Delta.Delta, 0.0f, 1.0f);
-			break;
+			ApplyDeltaToTrust(*Trust, Delta);
+		}
+	}
 
-		case ETrustComponent::BackingStrength:
-			Trust->BackingStrength =
-				FMath::Clamp(Trust->BackingStrength + Delta.Delta, 0.0f, 1.0f);
-			break;
+	for (const FCurrencyTrustDelta& Delta : PendingTrustDeltas)
+	{
+		if (const TArray<int32>* CivIDs = CurrencyTagToCivIDs.Find(Delta.CurrencyTag))
+		{
+			for (const int32 CivID : *CivIDs)
+			{
+				if (FCurrencyTrustState* Trust = CurrencyTrustByCivID.Find(CivID))
+				{
+					ApplyDeltaToTrust(*Trust, Delta);
+				}
+			}
+		}
 
-		case ETrustComponent::TradeReputation:
-			Trust->TradeReputation =
-				FMath::Clamp(Trust->TradeReputation + Delta.Delta, 0.0f, 1.0f);
-			break;
-
-		case ETrustComponent::CosmicFavor:
-			Trust->CosmicFavor =
-				FMath::Clamp(Trust->CosmicFavor + Delta.Delta, 0.0f, 1.0f);
-			break;
-
-		case ETrustComponent::PoliticalCohesion:
-			Trust->PoliticalCohesion =
-				FMath::Clamp(Trust->PoliticalCohesion + Delta.Delta, 0.0f, 1.0f);
-			break;
-
-		case ETrustComponent::GovernmentCredibility:
-			Trust->GovernmentCredibility =
-				FMath::Clamp(Trust->GovernmentCredibility + Delta.Delta, 0.0f, 1.0f);
-			break;
+		FCurrencyTrustState* LegacyTrust = CurrencyTrust.Find(Delta.CurrencyTag);
+		if (LegacyTrust)
+		{
+			ApplyDeltaToTrust(*LegacyTrust, Delta);
 		}
 	}
 
 	PendingTrustDeltas.Empty();
+	PendingTrustDeltasByCivID.Empty();
 }
 
 // ── Internal helpers ────────────────────────────────────────────────
@@ -1137,6 +1370,46 @@ float UWorldEconomySimulation::GetExchangeRate(
 	return FromCurrency->CurrentAnchorValue / ToCurrency->CurrentAnchorValue;
 }
 
+float UWorldEconomySimulation::GetExchangeRateForCivs(
+	int32 FromCivID,
+	int32 ToCivID) const
+{
+	const FCurrencyDefinition* FromCurrency = AllCurrenciesByCivID.Find(FromCivID);
+	const FCurrencyDefinition* ToCurrency = AllCurrenciesByCivID.Find(ToCivID);
+
+	if (!FromCurrency || !ToCurrency || ToCurrency->CurrentAnchorValue <= 0.0f)
+	{
+		return 1.0f;
+	}
+
+	return FromCurrency->CurrentAnchorValue / ToCurrency->CurrentAnchorValue;
+}
+
+const FCurrencyDefinition* UWorldEconomySimulation::GetCurrencyForCiv(int32 CivID) const
+{
+	return AllCurrenciesByCivID.Find(CivID);
+}
+
+float UWorldEconomySimulation::GetSettlementCurrencyBalance(int32 SettlementID) const
+{
+	if (const float* Balance = SettlementCurrencyBalances.Find(SettlementID))
+	{
+		return *Balance;
+	}
+
+	return 0.0f;
+}
+
+void UWorldEconomySimulation::SetSettlementCurrencyBalance(int32 SettlementID, float NewBalance)
+{
+	if (SettlementID < 0)
+	{
+		return;
+	}
+
+	SettlementCurrencyBalances.Add(SettlementID, FMath::Max(0.0f, NewBalance));
+}
+
 const FGovernmentEconomicProfile* UWorldEconomySimulation::GetGovernment(int32 CivID) const
 {
 	if (const FGovernmentEconomicProfile* FoundGovernment = CivGovernments.Find(CivID))
@@ -1185,6 +1458,23 @@ void UWorldEconomySimulation::ProcessCaravanTransaction(
 	int32 SellerSettlementID,
 	int32 CaravanID)
 {
+	ProcessCaravanTransaction(
+		BuyerSettlementID,
+		SellerSettlementID,
+		CaravanID,
+		TMap<FGameplayTag, int32>(),
+		0.0f,
+		false);
+}
+
+void UWorldEconomySimulation::ProcessCaravanTransaction(
+	int32 BuyerSettlementID,
+	int32 SellerSettlementID,
+	int32 CaravanID,
+	const TMap<FGameplayTag, int32>& CargoByItem,
+	float PaymentAmount,
+	bool bTransferCargo)
+{
 	UWorld* World = GetWorld();
 	if (!World)
 	{
@@ -1210,10 +1500,74 @@ void UWorldEconomySimulation::ProcessCaravanTransaction(
 		return;
 	}
 
-	// ADDED
-	// Recompute destination supply pressure from the stockpile state AFTER cargo delivery.
-	// This intentionally does not touch prices directly. UpdatePriceDiscovery() will react
-	// on the next economy tick, preserving determinism required by the guide.
+	float CargoValueInBuyerCurrency = 0.0f;
+
+	for (const TPair<FGameplayTag, int32>& CargoPair : CargoByItem)
+	{
+		const FGameplayTag& ItemTag = CargoPair.Key;
+		const int32 Amount = FMath::Max(0, CargoPair.Value);
+
+		if (!ItemTag.IsValid() || Amount <= 0)
+		{
+			continue;
+		}
+
+		const float UnitPrice = GetItemPrice(ItemTag, BuyerSettlementID, true);
+		CargoValueInBuyerCurrency += UnitPrice * static_cast<float>(Amount);
+
+		if (bTransferCargo)
+		{
+			const bool bSellerHadCargo = SettlementManager->ConsumeFromStockpile(
+				SellerSettlementID,
+				ItemTag,
+				Amount);
+
+			if (bSellerHadCargo)
+			{
+				SettlementManager->AddToStockpile(BuyerSettlementID, ItemTag, Amount);
+			}
+			else
+			{
+				UE_LOG(LogTemp, Warning,
+					TEXT("[EconomySim] Caravan cargo missing at seller. Caravan=%d Seller=%d Item=%s Amount=%d"),
+					CaravanID,
+					SellerSettlementID,
+					*ItemTag.ToString(),
+					Amount);
+			}
+		}
+	}
+
+	const float EffectivePaymentInBuyerCurrency = (PaymentAmount > 0.0f)
+		? PaymentAmount
+		: CargoValueInBuyerCurrency;
+
+	const int32 BuyerCivID = BuyerSettlement->OwnerCivID;
+	const int32 SellerCivID = SellerSettlement->OwnerCivID;
+	const float ExchangeRate = GetExchangeRateForCivs(BuyerCivID, SellerCivID);
+	const float SellerReceives = EffectivePaymentInBuyerCurrency * ExchangeRate;
+
+	if (EffectivePaymentInBuyerCurrency > 0.0f)
+	{
+		float& BuyerBalance = SettlementCurrencyBalances.FindOrAdd(BuyerSettlementID);
+		float& SellerBalance = SettlementCurrencyBalances.FindOrAdd(SellerSettlementID);
+
+		const float PaidByBuyer = FMath::Min(BuyerBalance, EffectivePaymentInBuyerCurrency);
+		BuyerBalance = FMath::Max(0.0f, BuyerBalance - PaidByBuyer);
+		SellerBalance += PaidByBuyer * ExchangeRate;
+
+		if (PaidByBuyer + KINDA_SMALL_NUMBER < EffectivePaymentInBuyerCurrency)
+		{
+			QueueTrustDeltaForCiv(BuyerCivID, ETrustComponent::TradeReputation, -0.02f);
+			UE_LOG(LogTemp, Warning,
+				TEXT("[EconomySim] Caravan payment shortfall. Caravan=%d Buyer=%d Needed=%.2f Paid=%.2f"),
+				CaravanID,
+				BuyerSettlementID,
+				EffectivePaymentInBuyerCurrency,
+				PaidByBuyer);
+		}
+	}
+
 	for (const FGameplayTag& ItemTag : TrackedItems)
 	{
 		FMarketPrice& Price = GetOrCreatePrice(BuyerSettlementID, ItemTag);
@@ -1232,25 +1586,20 @@ void UWorldEconomySimulation::ProcessCaravanTransaction(
 			3.0f);
 	}
 
-	// ADDED
-	// Apply/log currency exchange using existing settlement currency state.
-	// PaymentAmount is not yet available inside EconomySimulation because caravan ownership
-	// remains in the future Overworld subsystem. Keep this deterministic and log the rate now.
-	const FGameplayTag BuyerCurrency = BuyerSettlement->PlayerCurrencyTag;
-	const FGameplayTag SellerCurrency = SellerSettlement->PlayerCurrencyTag;
-	const float ExchangeRate = GetExchangeRate(BuyerCurrency, SellerCurrency);
+	SettlementManager->SetVisualDirty(BuyerSettlementID);
+	SettlementManager->SetVisualDirty(SellerSettlementID);
 
 	UE_LOG(LogTemp, Log,
-		TEXT("[EconomySim] Caravan transaction processed. Caravan=%d Buyer=%d Seller=%d BuyerCur=%s SellerCur=%s Rate=%.4f"),
+		TEXT("[EconomySim] Caravan transaction processed. Caravan=%d Buyer=%d Seller=%d CargoValueBuyerCur=%.2f PaymentBuyerCur=%.2f SellerReceives=%.2f Rate=%.4f TransferCargo=%s"),
 		CaravanID,
 		BuyerSettlementID,
 		SellerSettlementID,
-		*BuyerCurrency.ToString(),
-		*SellerCurrency.ToString(),
-		ExchangeRate);
+		CargoValueInBuyerCurrency,
+		EffectivePaymentInBuyerCurrency,
+		SellerReceives,
+		ExchangeRate,
+		bTransferCargo ? TEXT("true") : TEXT("false"));
 
-	// ADDED
-	// Keep legacy arrays in sync in case callers inspect economy state before next full tick.
 	RebuildArraysFromLookupMaps();
 }
 
@@ -1260,16 +1609,9 @@ void UWorldEconomySimulation::NotifyWarStarted(int32 AttackerCivID, int32 Defend
 {
 	auto ApplyWarShock = [this](int32 CivID)
 		{
-			for (const TPair<FGameplayTag, FCurrencyDefinition>& Pair : AllCurrencies)
-			{
-				if (Pair.Value.IssuingCivID == CivID)
-				{
-					QueueTrustDelta(Pair.Key, ETrustComponent::MilitaryStability, -0.20f);
-					QueueTrustDelta(Pair.Key, ETrustComponent::TradeReputation, -0.15f);
-					QueueTrustDelta(Pair.Key, ETrustComponent::PoliticalCohesion, -0.08f);
-					break;
-				}
-			}
+			QueueTrustDeltaForCiv(CivID, ETrustComponent::MilitaryStability, -0.20f);
+			QueueTrustDeltaForCiv(CivID, ETrustComponent::TradeReputation, -0.15f);
+			QueueTrustDeltaForCiv(CivID, ETrustComponent::PoliticalCohesion, -0.08f);
 		};
 
 	ApplyWarShock(AttackerCivID);
@@ -1291,19 +1633,10 @@ void UWorldEconomySimulation::NotifyWarStarted(int32 AttackerCivID, int32 Defend
 
 void UWorldEconomySimulation::NotifyWarEnded(int32 WinnerCivID, int32 LoserCivID)
 {
-	for (const TPair<FGameplayTag, FCurrencyDefinition>& Pair : AllCurrencies)
-	{
-		if (Pair.Value.IssuingCivID == WinnerCivID)
-		{
-			QueueTrustDelta(Pair.Key, ETrustComponent::MilitaryStability, 0.12f);
-			QueueTrustDelta(Pair.Key, ETrustComponent::GovernmentCredibility, 0.08f);
-		}
-		else if (Pair.Value.IssuingCivID == LoserCivID)
-		{
-			QueueTrustDelta(Pair.Key, ETrustComponent::MilitaryStability, -0.12f);
-			QueueTrustDelta(Pair.Key, ETrustComponent::PoliticalCohesion, -0.10f);
-		}
-	}
+	QueueTrustDeltaForCiv(WinnerCivID, ETrustComponent::MilitaryStability, 0.12f);
+	QueueTrustDeltaForCiv(WinnerCivID, ETrustComponent::GovernmentCredibility, 0.08f);
+	QueueTrustDeltaForCiv(LoserCivID, ETrustComponent::MilitaryStability, -0.12f);
+	QueueTrustDeltaForCiv(LoserCivID, ETrustComponent::PoliticalCohesion, -0.10f);
 
 	for (TPair<int32, FTradeFlowState>& Pair : TradeRoutes)
 	{
@@ -1366,9 +1699,9 @@ void UWorldEconomySimulation::NotifyDisasterEvent(int32 TileID, FGameplayTag Dis
 		}
 	}
 
-	for (const TPair<FGameplayTag, FCurrencyDefinition>& Pair : AllCurrencies)
+	for (const TPair<int32, FCurrencyDefinition>& Pair : AllCurrenciesByCivID)
 	{
-		QueueTrustDelta(Pair.Key, ETrustComponent::BackingStrength, -0.03f);
+		QueueTrustDeltaForCiv(Pair.Key, ETrustComponent::BackingStrength, -0.03f);
 	}
 
 	UE_LOG(LogTemp, Log,
@@ -1382,16 +1715,12 @@ void UWorldEconomySimulation::NotifyGovernmentChange(int32 CivID, FGameplayTag N
 	FGovernmentEconomicProfile NewProfile = CreateGovernmentProfile(NewGovernmentType, nullptr);
 	CivGovernments.Add(CivID, NewProfile);
 
-	for (TPair<FGameplayTag, FCurrencyDefinition>& Pair : AllCurrencies)
+	if (FCurrencyDefinition* Currency = AllCurrenciesByCivID.Find(CivID))
 	{
-		if (Pair.Value.IssuingCivID == CivID)
-		{
-			Pair.Value.GovernmentType = NewGovernmentType;
+		Currency->GovernmentType = NewGovernmentType;
 
-			QueueTrustDelta(Pair.Key, ETrustComponent::PoliticalCohesion, -0.08f);
-			QueueTrustDelta(Pair.Key, ETrustComponent::GovernmentCredibility, 0.05f);
-			break;
-		}
+		QueueTrustDeltaForCiv(CivID, ETrustComponent::PoliticalCohesion, -0.08f);
+		QueueTrustDeltaForCiv(CivID, ETrustComponent::GovernmentCredibility, 0.05f);
 	}
 
 	RebuildArraysFromLookupMaps();
@@ -1407,9 +1736,9 @@ void UWorldEconomySimulation::NotifyRouteOpened(int32 RouteID)
 	FTradeFlowState& Route = TradeRoutes.FindOrAdd(RouteID);
 	Route.DiplomaticMod = FMath::Max(Route.DiplomaticMod, 1.0f);
 
-	for (const TPair<FGameplayTag, FCurrencyDefinition>& Pair : AllCurrencies)
+	for (const TPair<int32, FCurrencyDefinition>& Pair : AllCurrenciesByCivID)
 	{
-		QueueTrustDelta(Pair.Key, ETrustComponent::TradeReputation, 0.02f);
+		QueueTrustDeltaForCiv(Pair.Key, ETrustComponent::TradeReputation, 0.02f);
 	}
 
 	UE_LOG(LogTemp, Log,
@@ -1424,9 +1753,9 @@ void UWorldEconomySimulation::NotifyRouteClosed(int32 RouteID, const FString& Re
 		Route->DiplomaticMod = 0.0f;
 	}
 
-	for (const TPair<FGameplayTag, FCurrencyDefinition>& Pair : AllCurrencies)
+	for (const TPair<int32, FCurrencyDefinition>& Pair : AllCurrenciesByCivID)
 	{
-		QueueTrustDelta(Pair.Key, ETrustComponent::TradeReputation, -0.04f);
+		QueueTrustDeltaForCiv(Pair.Key, ETrustComponent::TradeReputation, -0.04f);
 	}
 
 	UE_LOG(LogTemp, Log,
@@ -1437,19 +1766,15 @@ void UWorldEconomySimulation::NotifyRouteClosed(int32 RouteID, const FString& Re
 
 void UWorldEconomySimulation::NotifyCivCollapse(int32 CollapsingCivID)
 {
-	for (TPair<FGameplayTag, FCurrencyDefinition>& Pair : AllCurrencies)
+	if (FCurrencyDefinition* Currency = AllCurrenciesByCivID.Find(CollapsingCivID))
 	{
-		if (Pair.Value.IssuingCivID == CollapsingCivID)
-		{
-			QueueTrustDelta(Pair.Key, ETrustComponent::MilitaryStability, -1.0f);
-			QueueTrustDelta(Pair.Key, ETrustComponent::BackingStrength, -1.0f);
-			QueueTrustDelta(Pair.Key, ETrustComponent::TradeReputation, -1.0f);
-			QueueTrustDelta(Pair.Key, ETrustComponent::PoliticalCohesion, -1.0f);
-			QueueTrustDelta(Pair.Key, ETrustComponent::GovernmentCredibility, -1.0f);
+		QueueTrustDeltaForCiv(CollapsingCivID, ETrustComponent::MilitaryStability, -1.0f);
+		QueueTrustDeltaForCiv(CollapsingCivID, ETrustComponent::BackingStrength, -1.0f);
+		QueueTrustDeltaForCiv(CollapsingCivID, ETrustComponent::TradeReputation, -1.0f);
+		QueueTrustDeltaForCiv(CollapsingCivID, ETrustComponent::PoliticalCohesion, -1.0f);
+		QueueTrustDeltaForCiv(CollapsingCivID, ETrustComponent::GovernmentCredibility, -1.0f);
 
-			Pair.Value.bInCrisis = true;
-			break;
-		}
+		Currency->bInCrisis = true;
 	}
 
 	for (TPair<int32, FTradeFlowState>& Pair : TradeRoutes)
@@ -1494,6 +1819,8 @@ FEconomySaveState UWorldEconomySimulation::GetEconomySaveState() const
 		SaveState.PriceHistory.Add(SettlementPair.Key, WrappedHistory);
 	}
 
+	// Save legacy tag-keyed maps for compatibility. Runtime unique identity is rebuilt
+	// from the civ-keyed maps while this subsystem remains alive.
 	SaveState.CurrencyTrust = CurrencyTrust;
 	SaveState.AllCurrencies = AllCurrencies;
 	SaveState.CivGovernments = CivGovernments;
@@ -1529,6 +1856,25 @@ void UWorldEconomySimulation::RestoreEconomyFromSave(const FEconomySaveState& Sa
 	TradeRoutes = SaveState.TradeRoutes;
 	PendingTrustDeltas = SaveState.PendingTrustDeltas;
 
+	AllCurrenciesByCivID.Empty();
+	CurrencyTrustByCivID.Empty();
+	CurrencyTagToCivIDs.Empty();
+
+	for (const TPair<FGameplayTag, FCurrencyDefinition>& Pair : AllCurrencies)
+	{
+		const FCurrencyDefinition& Currency = Pair.Value;
+		if (Currency.IssuingCivID >= 0)
+		{
+			AllCurrenciesByCivID.Add(Currency.IssuingCivID, Currency);
+			CurrencyTagToCivIDs.FindOrAdd(Currency.CurrencyTag).AddUnique(Currency.IssuingCivID);
+
+			if (const FCurrencyTrustState* Trust = CurrencyTrust.Find(Currency.CurrencyTag))
+			{
+				CurrencyTrustByCivID.Add(Currency.IssuingCivID, *Trust);
+			}
+		}
+	}
+
 	RebuildArraysFromLookupMaps();
 
 	UE_LOG(LogTemp, Log, TEXT("[EconomySim] Economy state restored."));
@@ -1546,7 +1892,20 @@ int32 UWorldEconomySimulation::SetDiplomaticModForSettlementPairs(
 	{
 		FTradeFlowState& Flow = Pair.Value;
 
-		Flow.DiplomaticMod = DiplomaticMod;
+		const bool bForwardMatch =
+			FromSettlementIDs.Contains(Flow.OriginID) &&
+			ToSettlementIDs.Contains(Flow.DestID);
+
+		const bool bReverseMatch =
+			FromSettlementIDs.Contains(Flow.DestID) &&
+			ToSettlementIDs.Contains(Flow.OriginID);
+
+		if (!bForwardMatch && !bReverseMatch)
+		{
+			continue;
+		}
+
+		Flow.DiplomaticMod = FMath::Clamp(DiplomaticMod, 0.0f, 2.0f);
 		++ModifiedCount;
 	}
 

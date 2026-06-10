@@ -11,6 +11,16 @@ void UNavigationContext::Initialize(FSubsystemCollectionBase& Collection)
 
 void UNavigationContext::InitializeGrid(int32 SettlementID, int32 GridWidth, int32 GridHeight)
 {
+    // CUBE-TERRAIN-04U-STEP3: preserve walkability data if grid was already stamped this session.
+    if (SettlementGrids.Contains(SettlementID) && SettlementGrids[SettlementID].Num() > 0)
+    {
+        UE_LOG(LogTemp, Log,
+            TEXT("[CubeTerrainNavBuild] SettlementID=%d grid already exists (%d cells); preserving."),
+            SettlementID,
+            SettlementGrids[SettlementID].Num());
+        return;
+    }
+
     TMap<FIntPoint, FNavCell>& Grid = SettlementGrids.FindOrAdd(SettlementID);
     Grid.Empty();
 

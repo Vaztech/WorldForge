@@ -58,7 +58,7 @@ private:
     friend class FCivEconomySeedPass;    // ADDED
     friend class FCivDiplomacySeedPass;  // ADDED
 
-    int32        FindStartingTile(const TArray<FWorldTileData>& Tiles, const TArray<int32>& Used, UWorldForgeRNG* RNG) const;
+    int32        FindStartingTile(const TArray<FWorldTileData>& Tiles, const TArray<int32>& Used, int32 GridWidth, UWorldForgeRNG* RNG) const;
     FGameplayTag AssignRaceFromBiome(FGameplayTag BiomeType, UWorldForgeRNG* RNG) const;
     float        GenerateDNAAxis(float Low, float High, UWorldForgeRNG* RNG) const;
     static const TArray<FGameplayTag>& GetAllRaceTags();

@@ -8,6 +8,19 @@
 
 class UVoxelWorldManager;
 
+// CUBE-MINING-V3-CLAIM: why a mining-designation creation attempt ended, so callers
+// can classify skips correctly (the commit loop previously bucketed every failure as
+// "invalid", hiding unclaimed-land rejections).
+UENUM()
+enum class EMineDesignationResult : uint8
+{
+	Created,
+	InvalidTarget,   // ResolveMineTarget failed (above surface / not solid)
+	Unclaimed,       // entry cell on land the player settlement doesn't own
+	Duplicate,       // an active designation already exists at this voxel
+	CreateFailed     // other / unknown creation failure
+};
+
 /**
  * Manages mining designations for colonist AI.
  *
@@ -35,6 +48,17 @@ public:
 		FIntVector GridPosition,
 		int32 CurrentStep,
 		int32& OutDesignationID);
+
+	// CUBE-MINING-V3-CLAIM: same as CreateMiningDesignation but reports WHY it failed
+	// via OutResult, so the commit loop can count Unclaimed / Invalid / Duplicate
+	// separately instead of lumping all failures into "invalid". The bool overload
+	// above forwards to this one.
+	bool CreateMiningDesignationEx(
+		int32 SettlementID,
+		FIntVector GridPosition,
+		int32 CurrentStep,
+		int32& OutDesignationID,
+		EMineDesignationResult& OutResult);
 
 	UFUNCTION(BlueprintCallable)
 	bool CancelMiningDesignation(int32 DesignationID);

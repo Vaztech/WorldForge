@@ -35,6 +35,8 @@ void ULayerViewSubsystem::ExitLayerView()
     ActiveMode = EBuildToolMode::None;
     bHasSurfaceVoxelLayer = false;
     bHasActiveVoxelLayer = false;
+    ActiveVoxelLayerZ = 0;
+    SurfaceVoxelLayerZ = 0;
 
     UE_LOG(LogLayerView, Log, TEXT("[LayerView] Exited."));
 }

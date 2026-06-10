@@ -23,6 +23,16 @@ namespace
     // is expressed relative to this base size.
     static constexpr float WF_BaseCubeMeshSizeUU = 100.0f;
 
+    static uint32 WF_HashMiningCells(const TArray<FIntVector>& Cells)
+    {
+        uint32 Hash = 2166136261u;
+        for (const FIntVector& Cell : Cells)
+        {
+            Hash = HashCombine(Hash, GetTypeHash(Cell));
+        }
+        return HashCombine(Hash, static_cast<uint32>(Cells.Num()));
+    }
+
     static UMaterialInterface* WF_ReadLayerMaterialFromStruct(void* StructValue, UStruct* StructType)
     {
         if (!StructValue || !StructType)
@@ -250,7 +260,12 @@ void AMiningLayerRenderer::ClearLayer()
     LastActiveVoxelZ              = MIN_int32;
     LastSelectedCount             = MIN_int32;
     LastConfirmedCount            = MIN_int32;
+    LastSelectedCellsHash         = 0;
+    LastConfirmedCellsHash        = 0;
     bLastWasSuppressed            = false;
+    LastTerrainInstanceCount        = 0;
+    LastSelectedGhostInstanceCount  = 0;
+    LastConfirmedGhostInstanceCount = 0;
     bDiagnosticsDumpedThisSession = false;
 }
 
@@ -268,6 +283,10 @@ void AMiningLayerRenderer::SetLayerState(
 
     if (!SelectedGhostHISM || !ConfirmedGhostHISM || !CubeMesh)
     {
+        LastTerrainInstanceCount = 0;
+        LastSelectedGhostInstanceCount = 0;
+        LastConfirmedGhostInstanceCount = 0;
+
         UE_LOG(LogMiningLayerRenderer, Warning,
             TEXT("SetLayerState failed: renderer assets/components incomplete. "
                  "CubeMesh=%s SelectedHISM=%s ConfirmedHISM=%s"),
@@ -313,6 +332,8 @@ void AMiningLayerRenderer::SetLayerState(
 
     const int32 SelCount  = SelectedMineCells.Num();
     const int32 ConfCount = ConfirmedMineCells.Num();
+    const uint32 SelectedHash = WF_HashMiningCells(SelectedMineCells);
+    const uint32 ConfirmedHash = WF_HashMiningCells(ConfirmedMineCells);
 
     const bool bStateUnchanged =
            !bForceNextRebuild
@@ -320,6 +341,8 @@ void AMiningLayerRenderer::SetLayerState(
         && ActiveVoxelZ == LastActiveVoxelZ
         && SelCount  == LastSelectedCount
         && ConfCount == LastConfirmedCount
+        && SelectedHash == LastSelectedCellsHash
+        && ConfirmedHash == LastConfirmedCellsHash
         && bSuppressing == bLastWasSuppressed;
 
     if (bStateUnchanged)
@@ -327,12 +350,14 @@ void AMiningLayerRenderer::SetLayerState(
         return;
     }
 
-    LastCenterVoxel    = CenterVoxel;
-    LastActiveVoxelZ   = ActiveVoxelZ;
-    LastSelectedCount  = SelCount;
-    LastConfirmedCount = ConfCount;
-    bLastWasSuppressed = bSuppressing;
-    bForceNextRebuild  = false;
+    LastCenterVoxel         = CenterVoxel;
+    LastActiveVoxelZ        = ActiveVoxelZ;
+    LastSelectedCount       = SelCount;
+    LastConfirmedCount      = ConfCount;
+    LastSelectedCellsHash   = SelectedHash;
+    LastConfirmedCellsHash  = ConfirmedHash;
+    bLastWasSuppressed      = bSuppressing;
+    bForceNextRebuild       = false;
 
     // -------------------------------------------------------------------------
     // Suppressed path: clear everything and hide.
@@ -347,6 +372,9 @@ void AMiningLayerRenderer::SetLayerState(
         {
             UndergroundBackdropHISM->ClearInstances();
         }
+        LastTerrainInstanceCount = 0;
+        LastSelectedGhostInstanceCount = 0;
+        LastConfirmedGhostInstanceCount = 0;
         SetRendererVisible(false);
 
         UE_LOG(LogMiningLayerRenderer, Log,
@@ -548,6 +576,10 @@ void AMiningLayerRenderer::SetLayerState(
 
     AddGhostCells(ConfirmedGhostHISM, ConfirmedSet, GetConfirmedGhostColor(), ConfirmedGhostTopBiasUU, ConfirmedGhostInstances);
     AddGhostCells(SelectedGhostHISM,  SelectedSet,  GetSelectedGhostColor(),  SelectedGhostTopBiasUU,  SelectedGhostInstances);
+
+    LastTerrainInstanceCount = TerrainInstances;
+    LastSelectedGhostInstanceCount = SelectedGhostInstances;
+    LastConfirmedGhostInstanceCount = ConfirmedGhostInstances;
 
     // ---- 3) Render state finalization --------------------------------------
 

@@ -25,6 +25,9 @@ public:
         FWorldGenConfig Config,
         UWorldForgeRNG* RNG
     );
+    // WorldGenPipeline owns data generation only. Bootstrap owns when the
+    // generated map is handed off to runtime voxel terrain presentation.
+    bool DispatchVoxelTerrainHandoff(UObject* OptionalWorldContext = nullptr);
     UFUNCTION(BlueprintNativeEvent, Category = "WorldForge|WorldGen|Decoration")
     void HandlePCGDecorationPass(const TArray<FWorldTileData>& InWorldTiles, int32 InGridWidth, int32 InGridHeight);
     virtual void HandlePCGDecorationPass_Implementation(const TArray<FWorldTileData>& InWorldTiles, int32 InGridWidth, int32 InGridHeight);
@@ -38,6 +41,7 @@ public:
     const TArray<FMountainProvince>& GetMountainProvinces() const { return MountainProvinces; }
     const TArray<FIntPoint>& GetVolcanicHotspots() const { return VolcanicHotspots; }
     const TArray<FVolcanoData>& GetVolcanoes() const { return Volcanoes; }
+    const TArray<FLakeBasinData>& GetLakeBasins() const { return LakeBasins; }
     const FWindConfig& GetWindConfig() const { return WindConfig; }
     int32 GetGridWidth() const { return GridWidth; }
     int32 GetGridHeight() const { return GridHeight; }
@@ -47,7 +51,13 @@ private:
     void Step02_GenerateHeightmap();
     void Step03_RunTectonics();
     void Step04_AssignBiomes();
-    void Step05_InitVoxelChunks();
+    // LAKE-FIX-01A: BFS flood-fill connected lake tiles into basin groups.
+    // Must run after Step04 (biome tags set) and before the bootstrap-owned
+    // Step05 voxel handoff compatibility path.
+    void BuildLakeBasins();
+    // Retained temporarily as the legacy voxel handoff implementation.
+    // AWorldGenBootstrapActor triggers this through DispatchVoxelTerrainHandoff().
+    bool Step05_InitVoxelChunks();
     void Step06_PCGDecorationPass();
     void Step07_ApplyWorldDriver();
     void Step08_SeedResources();
@@ -60,7 +70,7 @@ private:
     void Step15_RecordFinalState();
     void Step16_FinalizeWorldMap();
 
-    // DF-style staged map update — pushes partial world data to
+    // DF-style staged map update ï¿½ pushes partial world data to
     // WorldMapSubsystem so the player sees the map "build itself"
     // during generation.
     void PushPartialMapUpdate();
@@ -76,6 +86,7 @@ private:
     TArray<FMountainProvince>   MountainProvinces;
     TArray<FIntPoint>           VolcanicHotspots;
     TArray<FVolcanoData>        Volcanoes;
+    TArray<FLakeBasinData>      LakeBasins;      // LAKE-FIX-01A
     FWindConfig                 WindConfig;
     FWorldGenConfig CurrentConfig;
     int64           WorldSeed = 0;

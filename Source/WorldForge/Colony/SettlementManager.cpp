@@ -1,7 +1,52 @@
 #include "SettlementManager.h"
 #include "GameplayTagContainer.h"
 #include "WorldMapSubsystem.h"
+#include "Voxel/VoxelWorldManager.h"
 #include "Engine/World.h"
+#include "UObject/UnrealType.h"
+
+namespace
+{
+    bool TryGetVoxelTerrainMode(const UVoxelWorldManager* VoxelWorldManager, ETerrainMode& OutTerrainMode)
+    {
+        if (!VoxelWorldManager)
+        {
+            return false;
+        }
+
+        // CurrentTerrainMode is a private reflected UPROPERTY; read it locally instead of adding a public API for one claim check.
+        if (const FEnumProperty* TerrainModeProperty = FindFProperty<FEnumProperty>(VoxelWorldManager->GetClass(), TEXT("CurrentTerrainMode")))
+        {
+            const void* ValuePtr = TerrainModeProperty->ContainerPtrToValuePtr<void>(VoxelWorldManager);
+            OutTerrainMode = static_cast<ETerrainMode>(TerrainModeProperty->GetUnderlyingProperty()->GetSignedIntPropertyValue(ValuePtr));
+            return true;
+        }
+
+        if (const FByteProperty* TerrainModeByteProperty = FindFProperty<FByteProperty>(VoxelWorldManager->GetClass(), TEXT("CurrentTerrainMode")))
+        {
+            const void* ValuePtr = TerrainModeByteProperty->ContainerPtrToValuePtr<void>(VoxelWorldManager);
+            OutTerrainMode = static_cast<ETerrainMode>(TerrainModeByteProperty->GetPropertyValue(ValuePtr));
+            return true;
+        }
+
+        return false;
+    }
+
+    const TCHAR* TerrainModeToString(ETerrainMode TerrainMode)
+    {
+        switch (TerrainMode)
+        {
+        case ETerrainMode::Smooth:
+            return TEXT("Smooth");
+        case ETerrainMode::Blocky:
+            return TEXT("Blocky");
+        case ETerrainMode::CubePrototype:
+            return TEXT("CubePrototype");
+        default:
+            return TEXT("Unknown");
+        }
+    }
+}
 
 void USettlementManager::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -346,8 +391,71 @@ bool USettlementManager::DoesSettlementClaimVoxelCellDetailed(
 
     const UWorld* World = GetWorld();
     const UWorldMapSubsystem* WorldMapSubsystem = World ? World->GetSubsystem<UWorldMapSubsystem>() : nullptr;
-    const bool bResolved = WorldMapSubsystem && WorldMapSubsystem->VoxelCellToWorldTileIndex(VoxelCell, OutWorldTileID);
-    if (bResolved)
+    const UVoxelWorldManager* VoxelWorldManager = World ? World->GetSubsystem<UVoxelWorldManager>() : nullptr;
+
+    ETerrainMode TerrainMode = ETerrainMode::Smooth;
+    const bool bTerrainModeResolved = TryGetVoxelTerrainMode(VoxelWorldManager, TerrainMode);
+
+    // After CUBE-MINING-V2, callers may pass absolute world-tile XY directly
+    // (e.g. MineCellTarget) rather than voxel-cell coordinates. Try the
+    // direct interpretation first; fall back to the legacy voxel->chunk
+    // conversion only if that does not resolve to a claimed tile.
+    const FIntPoint DirectCell = VoxelCell;
+    int32 DirectTileID = INDEX_NONE;
+    const bool bDirectResolved = WorldMapSubsystem && WorldMapSubsystem->WorldCellToWorldTileIndex(DirectCell, DirectTileID);
+    const bool bDirectClaimed = bDirectResolved && Settlement->ClaimedWorldTileIDs.Contains(DirectTileID);
+
+    const FIntPoint ConvertedCell = VoxelWorldManager
+        ? VoxelWorldManager->VoxelCellToChunkCell(VoxelCell)
+        : VoxelCell;
+    int32 ConvertedTileID = INDEX_NONE;
+    const bool bConvertedResolved = WorldMapSubsystem && WorldMapSubsystem->WorldCellToWorldTileIndex(ConvertedCell, ConvertedTileID);
+    const bool bConvertedClaimed = bConvertedResolved && Settlement->ClaimedWorldTileIDs.Contains(ConvertedTileID);
+
+    FIntPoint FinalCell = DirectCell;
+    bool bResolved = false;
+    bool bClaimed = false;
+    if (bDirectClaimed)
+    {
+        FinalCell = DirectCell;
+        OutWorldTileID = DirectTileID;
+        bResolved = true;
+        bClaimed = true;
+    }
+    else if (bConvertedClaimed)
+    {
+        FinalCell = ConvertedCell;
+        OutWorldTileID = ConvertedTileID;
+        bResolved = true;
+        bClaimed = true;
+    }
+    else
+    {
+        // Preserve failure path. Prefer the converted interpretation when it
+        // at least resolved to a real tile; otherwise fall back to the direct
+        // interpretation so OutWorldTileID/OutWorldTileXY still reflect the
+        // best available resolution for downstream diagnostics.
+        if (bConvertedResolved)
+        {
+            FinalCell = ConvertedCell;
+            OutWorldTileID = ConvertedTileID;
+            bResolved = true;
+        }
+        else if (bDirectResolved)
+        {
+            FinalCell = DirectCell;
+            OutWorldTileID = DirectTileID;
+            bResolved = true;
+        }
+        else
+        {
+            FinalCell = DirectCell;
+            OutWorldTileID = INDEX_NONE;
+            bResolved = false;
+        }
+    }
+
+    if (bResolved && WorldMapSubsystem)
     {
         int32 TileX = INDEX_NONE;
         int32 TileY = INDEX_NONE;
@@ -357,7 +465,24 @@ bool USettlementManager::DoesSettlementClaimVoxelCellDetailed(
         }
     }
 
-    const bool bClaimed = bResolved && Settlement->ClaimedWorldTileIDs.Contains(OutWorldTileID);
+    const TCHAR* TerrainModeText = bTerrainModeResolved ? TerrainModeToString(TerrainMode) : TEXT("Unknown");
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[CubeSelectionClaimAudit] ClaimConversion TerrainMode=%s InputCell=(%d,%d) DirectCell=(%d,%d) DirectTileID=%d DirectClaimed=%s ConvertedCell=(%d,%d) ConvertedTileID=%d ConvertedClaimed=%s FinalCell=(%d,%d) Claimed=%s"),
+        TerrainModeText,
+        VoxelCell.X,
+        VoxelCell.Y,
+        DirectCell.X,
+        DirectCell.Y,
+        DirectTileID,
+        bDirectClaimed ? TEXT("true") : TEXT("false"),
+        ConvertedCell.X,
+        ConvertedCell.Y,
+        ConvertedTileID,
+        bConvertedClaimed ? TEXT("true") : TEXT("false"),
+        FinalCell.X,
+        FinalCell.Y,
+        bClaimed ? TEXT("true") : TEXT("false"));
 
     if (bLogClaimQueries)
     {
@@ -641,6 +766,16 @@ bool USettlementManager::AddInitialPlayerClaimFootprint(int32 SettlementID, int3
         SkippedAlreadyClaimedCount,
         SkippedControlledCount,
         SkippedWaterCount);
+
+    const int32 FailedCount = SkippedInvalidCount + SkippedAlreadyClaimedCount + SkippedControlledCount + SkippedWaterCount;
+    UE_LOG(LogTemp, Log,
+        TEXT("[CubeSelectionClaimAudit] AddInitialClaim SettlementID=%d Center=(%d,%d) Radius=%d Added=%d Failed=%d"),
+        SettlementID,
+        CenterTileX,
+        CenterTileY,
+        EffectiveRadius,
+        AddedCount,
+        FailedCount);
 
     return bAddedAny;
 }

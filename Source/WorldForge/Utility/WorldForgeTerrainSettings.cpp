@@ -4,7 +4,11 @@ UWorldForgeTerrainSettings::UWorldForgeTerrainSettings()
 {
     // Voxel
     ChunkWorldSize = 3200.0f;
-    VoxelSize = 100.0f;
+    // CUBE-VOXEL-SCALE: SubdivisionsPerTile is the single source of truth; VoxelSize is
+    // derived so the mining grid and render block grid always share one cell size.
+    // 3200 / 16 = 200uu cells (2m). Change SubdivisionsPerTile to re-scale everything.
+    SubdivisionsPerTile = 16;
+    VoxelSize = ChunkWorldSize / static_cast<float>(FMath::Max(1, SubdivisionsPerTile));
     TerrainSurfaceZOffset = 50.0f;
     bAddGlobalFoundation = true;
     GlobalFoundationDepthWorld = 5000.0f;

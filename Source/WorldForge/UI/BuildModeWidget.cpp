@@ -365,6 +365,14 @@ void UBuildModeWidget::SwitchToDigMode()
 
 void UBuildModeWidget::SwitchToMineMode()
 {
+	UBuildModeManager* Mgr = GetManager();
+	if (Mgr && Mgr->IsInMineMode())
+	{
+		ShowStatusToast(FText::FromString(TEXT("Mine already active. Paint tiles then Confirm.")));
+		UE_LOG(LogTemp, Log, TEXT("[CUBE-MINING-01] Mine already active. Paint tiles then Confirm."));
+		return;
+	}
+
 	AWorldForgePlayerController* PC = GetOwningPlayer<AWorldForgePlayerController>();
 	if (PC)
 	{
@@ -376,7 +384,6 @@ void UBuildModeWidget::SwitchToMineMode()
 
 	// Fallback only. This enters Mine mode but cannot activate controller-owned
 	// camera/cutaway subsystems, so the player controller path above is preferred.
-	UBuildModeManager* Mgr = GetManager();
 	if (!Mgr)
 	{
 		return;
@@ -448,6 +455,10 @@ void UBuildModeWidget::ConfirmBuild()
 	}
 
 	UE_LOG(LogTemp, Log, TEXT("[BuildModeWidget] ConfirmBuild pressed. ToolMode=%d CellCount=%d"),
+		static_cast<int32>(Mgr->GetCurrentToolMode()),
+		Mgr->GetSelectedCellCount());
+
+	UE_LOG(LogTemp, Warning, TEXT("[CUBE-MINING-V2] ConfirmBuild clicked. ToolMode=%d CellCount=%d"),
 		static_cast<int32>(Mgr->GetCurrentToolMode()),
 		Mgr->GetSelectedCellCount());
 
@@ -1190,6 +1201,51 @@ int32 UBuildModeWidget::GetCurrentCellCount() const
 {
 	const UBuildModeManager* Mgr = const_cast<UBuildModeWidget*>(this)->GetManager();
 	return Mgr ? Mgr->GetSelectedCellCount() : 0;
+}
+
+int32 UBuildModeWidget::GetTotalMinePlanCount() const
+{
+	const UBuildModeManager* Mgr = const_cast<UBuildModeWidget*>(this)->GetManager();
+	return Mgr ? Mgr->GetTotalMinePlanCount() : 0;
+}
+
+int32 UBuildModeWidget::GetMinePlanLayerCount() const
+{
+	const UBuildModeManager* Mgr = const_cast<UBuildModeWidget*>(this)->GetManager();
+	return Mgr ? Mgr->GetMinePlanLayerCount() : 0;
+}
+
+FText UBuildModeWidget::GetMinePlanSummaryText() const
+{
+	const UBuildModeManager* Mgr = const_cast<UBuildModeWidget*>(this)->GetManager();
+	if (!Mgr)
+	{
+		return FText::FromString(TEXT("Selected: 0"));
+	}
+
+	const int32 CurrentLayer = Mgr->GetSelectedCellCount();
+
+	// Outside Mine mode there is no multi-layer plan; show the plain count so one text
+	// block can serve build/farm/dig as well.
+	if (Mgr->GetCurrentToolMode() != EBuildToolMode::Mine)
+	{
+		return FText::FromString(FString::Printf(TEXT("Selected: %d"), CurrentLayer));
+	}
+
+	const int32 PlanTotal = Mgr->GetTotalMinePlanCount();
+	const int32 PlanLayers = Mgr->GetMinePlanLayerCount();
+
+	if (PlanTotal <= 0)
+	{
+		return FText::FromString(FString::Printf(TEXT("Current layer: %d"), CurrentLayer));
+	}
+
+	return FText::FromString(FString::Printf(
+		TEXT("Current layer: %d  -  Plan: %d across %d layer%s"),
+		CurrentLayer,
+		PlanTotal,
+		PlanLayers,
+		PlanLayers == 1 ? TEXT("") : TEXT("s")));
 }
 
 EBuildToolMode UBuildModeWidget::GetCurrentToolMode() const

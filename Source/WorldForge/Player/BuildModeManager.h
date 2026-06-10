@@ -77,6 +77,15 @@ public:
     UFUNCTION(BlueprintPure, Category = "WorldForge|Build")
     int32 GetFarmPaintedCellCount() const { return FarmPaintedWorldCells.Num(); }
 
+    // CUBE-MINING-V3-FLOOD: expose the multi-layer mine plan to the UI. GetSelectedCellCount
+    // above is the CURRENT active layer only; these report the full persistent plan that
+    // Confirm actually commits, so the widget can show "Current layer: N / Total plan: M".
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Build|Mining")
+    int32 GetTotalMinePlanCount() const;
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Build|Mining")
+    int32 GetMinePlanLayerCount() const;
+
     UFUNCTION(BlueprintPure, Category = "WorldForge|Build|TileSelection")
     int32 GetTileSelectionCount() const
     {
@@ -353,6 +362,9 @@ private:
     // without redundant line traces.
     float CurrentHoveredTerrainZ = 0.0f;
 
+    // CUBE-MINING-01 MVP: absolute voxel Z used for surface mine designations.
+    int32 ActiveMiningZ = INDEX_NONE;
+
     // Suppresses repeated confirm input immediately after a successful commit.
     bool bJustCommitted = false;
 
@@ -453,6 +465,18 @@ private:
     bool bMiningLayerAnchorValid = false;
     FIntVector MiningLayerAnchorVoxel = FIntVector::ZeroValue;
     int32 MiningLayerAnchorZ = MIN_int32;
+    FVector2D MiningLayerAnchorWorldXY = FVector2D::ZeroVector;
+
+    bool bLastMiningVisualProofLogValid = false;
+    int32 LastMiningVisualProofActiveZ = MIN_int32;
+    int32 LastMiningVisualProofRelative = MIN_int32;
+    int32 LastMiningVisualProofCapTerrain = MIN_int32;
+    int32 LastMiningVisualProofSelectedGhost = MIN_int32;
+    int32 LastMiningVisualProofConfirmedGhost = MIN_int32;
+    int32 LastMiningVisualProofOverlaySelected = MIN_int32;
+    int32 LastMiningVisualProofVolumeGhost = MIN_int32;
+    bool bLastMiningVisualProofCutaway = false;
+    bool bLastMiningVisualProofRenderer = false;
 
     TSet<TWeakObjectPtr<AActor>> MiningPresentationHiddenActors;
 
@@ -515,7 +539,7 @@ private:
 
     // Dedicated mine-layer renderer lifecycle.
     void InitializeMiningLayerRenderer();
-    void DestroyMiningLayerRenderer();
+    void DestroyMiningLayerRenderer(const TCHAR* Reason = TEXT("Destroy"));
     void UpdateMiningLayerRenderer();
 
     /**

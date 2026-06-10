@@ -32,6 +32,22 @@ namespace
     }
 }
 
+void AWorldForgeMiniMapHUD::SetLegacyHudSuppressedForFullMap(bool bSuppress)
+{
+    if (bSuppressLegacyHudForFullMap == bSuppress)
+    {
+        return;
+    }
+
+    bSuppressLegacyHudForFullMap = bSuppress;
+
+    UE_LOG(
+        LogTemp,
+        Log,
+        TEXT("[NavigatorHUD] Legacy WorldForge HUD %s."),
+        bSuppressLegacyHudForFullMap ? TEXT("suppressed for full map") : TEXT("restored for gameplay"));
+}
+
 void AWorldForgeMiniMapHUD::SetMiniMapVisible(bool bVisible)
 {
     bShowMiniMap = bVisible;
@@ -52,73 +68,76 @@ void AWorldForgeMiniMapHUD::DrawHUD()
 {
     Super::DrawHUD();
 
-    if (!bShowMiniMap || !Canvas)
+    if (!Canvas)
+    {
+        return;
+    }
+
+    if (!bDrawLegacyMiniMap || bSuppressLegacyHudForFullMap)
     {
         return;
     }
 
     UWorld* World = GetWorld();
-    if (!World)
+    if (World && bShowMiniMap)
     {
-        return;
-    }
+        const USettlementManager* SettlementManager = World->GetSubsystem<USettlementManager>();
+        const UProcessorManager* ProcessorManager = World->GetSubsystem<UProcessorManager>();
+        const UVoxelWorldManager* VoxelWorldManager = World->GetSubsystem<UVoxelWorldManager>();
 
-    const USettlementManager* SettlementManager = World->GetSubsystem<USettlementManager>();
-    const UProcessorManager* ProcessorManager = World->GetSubsystem<UProcessorManager>();
-    const UVoxelWorldManager* VoxelWorldManager = World->GetSubsystem<UVoxelWorldManager>();
+        DrawMiniMapBackground();
 
-    DrawMiniMapBackground();
+        if (bShowCivTerritory)
+        {
+            DrawCivTerritories(World->GetSubsystem<UWorldMapSubsystem>(), VoxelWorldManager);
+        }
 
-    if (bShowCivTerritory)
-    {
-        DrawCivTerritories(World->GetSubsystem<UWorldMapSubsystem>(), VoxelWorldManager);
-    }
+        DrawMiniMapBorder();
 
-    DrawMiniMapBorder();
+        if (bShowTitle)
+        {
+            DrawMiniMapTitle();
+        }
 
-    if (bShowTitle)
-    {
-        DrawMiniMapTitle();
-    }
+        if (SettlementManager && ProcessorManager && bShowPawnDots)
+        {
+            DrawPawnDots(SettlementManager, ProcessorManager);
+        }
 
-    if (SettlementManager && ProcessorManager && bShowPawnDots)
-    {
-        DrawPawnDots(SettlementManager, ProcessorManager);
-    }
+        if (SettlementManager && bShowNPCSettlementMarkers)
+        {
+            DrawNPCSettlementMarkers(SettlementManager);
+        }
 
-    if (SettlementManager && bShowNPCSettlementMarkers)
-    {
-        DrawNPCSettlementMarkers(SettlementManager);
-    }
+        if (SettlementManager && bShowPlayerColonyMarker)
+        {
+            DrawPlayerColonyMarker(SettlementManager);
+        }
 
-    if (SettlementManager && bShowPlayerColonyMarker)
-    {
-        DrawPlayerColonyMarker(SettlementManager);
-    }
+        if (bShowCameraMarker)
+        {
+            DrawCameraLocation(VoxelWorldManager);
+        }
 
-    if (bShowCameraMarker)
-    {
-        DrawCameraLocation(VoxelWorldManager);
-    }
+        if (bShowDirectionIndicator)
+        {
+            DrawDirectionIndicator();
+        }
 
-    if (bShowDirectionIndicator)
-    {
-        DrawDirectionIndicator();
-    }
+        if (bShowDebugStats)
+        {
+            DrawDebugStats(ProcessorManager, VoxelWorldManager);
+        }
 
-    if (bShowDebugStats)
-    {
-        DrawDebugStats(ProcessorManager, VoxelWorldManager);
-    }
+        if (bShowZLevel)
+        {
+            DrawZLevelIndicator(VoxelWorldManager);
+        }
 
-    if (bShowZLevel)
-    {
-        DrawZLevelIndicator(VoxelWorldManager);
-    }
-
-    if (bShowTerrainInfo)
-    {
-        DrawTerrainInfo(VoxelWorldManager);
+        if (bShowTerrainInfo)
+        {
+            DrawTerrainInfo(VoxelWorldManager);
+        }
     }
 }
 
@@ -131,8 +150,8 @@ bool AWorldForgeMiniMapHUD::GetCameraCellAndYaw(FIntPoint& OutCameraCell, float&
         return false;
     }
 
-    const UVoxelWorldManager* VoxelWorldManager = World->GetSubsystem<UVoxelWorldManager>();
-    if (!VoxelWorldManager)
+    const UWorldMapSubsystem* MapSys = World->GetSubsystem<UWorldMapSubsystem>();
+    if (!MapSys || !MapSys->IsInitialized())
     {
         return false;
     }
@@ -141,8 +160,29 @@ bool AWorldForgeMiniMapHUD::GetCameraCellAndYaw(FIntPoint& OutCameraCell, float&
     FRotator CameraRotation;
     PC->GetPlayerViewPoint(CameraLocation, CameraRotation);
 
-    OutCameraCell = VoxelWorldManager->WorldToTerrainCell(CameraLocation);
+    // MiniMapFix: Use WorldPositionToTileXY (authoritative) instead of
+    // VoxelWorldManager::WorldToTerrainCell (depends on stale CachedTerrainGridWidth/Height).
+    int32 TileX = 0;
+    int32 TileY = 0;
+    if (!MapSys->WorldPositionToTileXY(CameraLocation, TileX, TileY))
+    {
+        return false;
+    }
+    OutCameraCell = FIntPoint(TileX, TileY);
     OutYawDegrees = CameraRotation.Yaw;
+
+    // Throttled diagnostic log — fires at most once every 2 seconds.
+    static float LastLogTime_GetCameraCellAndYaw = -1.0f;
+    const float  NowTime = World->GetRealTimeSeconds();
+    if (NowTime - LastLogTime_GetCameraCellAndYaw > 2.0f)
+    {
+        LastLogTime_GetCameraCellAndYaw = NowTime;
+        UE_LOG(LogTemp, Log,
+            TEXT("[MiniMapFix] GetCameraCellAndYaw: CameraPos=(%.1f,%.1f,%.1f) => CameraCell=(%d,%d) Yaw=%.1f"),
+            CameraLocation.X, CameraLocation.Y, CameraLocation.Z,
+            OutCameraCell.X, OutCameraCell.Y, OutYawDegrees);
+    }
+
     return true;
 }
 
@@ -331,9 +371,8 @@ void AWorldForgeMiniMapHUD::DrawMiniMapTextureBackground()
         return;
     }
 
-    const UVoxelWorldManager* VoxelMgr = World->GetSubsystem<UVoxelWorldManager>();
     const APlayerController* PC = GetOwningPlayerController();
-    if (!PC || !VoxelMgr)
+    if (!PC)
     {
         return;
     }
@@ -342,7 +381,14 @@ void AWorldForgeMiniMapHUD::DrawMiniMapTextureBackground()
     FRotator CameraRotation;
     PC->GetPlayerViewPoint(CameraLocation, CameraRotation);
 
-    const FIntPoint CameraCell = VoxelMgr->WorldToTerrainCell(CameraLocation);
+    // MiniMapFix: Use WorldPositionToTileXY instead of the stale-cache WorldToTerrainCell.
+    int32 CamTileX = 0;
+    int32 CamTileY = 0;
+    if (!MapSys->WorldPositionToTileXY(CameraLocation, CamTileX, CamTileY))
+    {
+        return;
+    }
+    const FIntPoint CameraCell(CamTileX, CamTileY);
     const int32 GW = MapSys->GetGridWidth();
     const int32 GH = MapSys->GetGridHeight();
 
@@ -738,7 +784,34 @@ void AWorldForgeMiniMapHUD::DrawZLevelIndicator(const UVoxelWorldManager* VoxelW
 
     if (VoxelWorldManager)
     {
-        const FIntPoint CameraCell = VoxelWorldManager->WorldToTerrainCell(CameraLocation);
+        // MiniMapFix: Use WorldMapSubsystem::WorldPositionToTileXY (authoritative) instead of
+        // VoxelWorldManager::WorldToTerrainCell (depends on stale CachedTerrainGridWidth/Height).
+        FIntPoint CameraCell(0, 0);
+        bool bGotCell = false;
+
+        if (const UWorld* ZWorld = GetWorld())
+        {
+            if (const UWorldMapSubsystem* MapSys = ZWorld->GetSubsystem<UWorldMapSubsystem>())
+            {
+                if (MapSys->IsInitialized())
+                {
+                    int32 TileX = 0;
+                    int32 TileY = 0;
+                    if (MapSys->WorldPositionToTileXY(CameraLocation, TileX, TileY))
+                    {
+                        CameraCell = FIntPoint(TileX, TileY);
+                        bGotCell = true;
+                    }
+                }
+            }
+        }
+
+        if (!bGotCell)
+        {
+            // Fallback: subsystem not ready yet; stale result is acceptable for Z display.
+            CameraCell = VoxelWorldManager->WorldToTerrainCell(CameraLocation);
+        }
+
         FVector SurfaceWorldPos;
         if (VoxelWorldManager->TryGetSurfaceWorldLocation(CameraCell, SurfaceWorldPos))
         {
@@ -801,10 +874,25 @@ void AWorldForgeMiniMapHUD::DrawTerrainInfo(const UVoxelWorldManager* VoxelWorld
         return;
     }
 
-    FIntPoint CameraCell = FIntPoint(0, 0);
-    if (VoxelWorldManager)
+    // MiniMapFix: Use the authoritative helper; ignore VoxelWorldManager stale-cache path.
+    int32 CamTileX = 0;
+    int32 CamTileY = 0;
+    if (!MapSys->WorldPositionToTileXY(CameraLocation, CamTileX, CamTileY))
     {
-        CameraCell = VoxelWorldManager->WorldToTerrainCell(CameraLocation);
+        return;
+    }
+    const FIntPoint CameraCell(CamTileX, CamTileY);
+
+    // Throttled diagnostic log — fires at most once every 2 seconds.
+    static float LastLogTime_DrawTerrainInfo = -1.0f;
+    const float  NowTime_DTI = World ? World->GetRealTimeSeconds() : -1.0f;
+    if (NowTime_DTI >= 0.0f && NowTime_DTI - LastLogTime_DrawTerrainInfo > 2.0f)
+    {
+        LastLogTime_DrawTerrainInfo = NowTime_DTI;
+        UE_LOG(LogTemp, Log,
+            TEXT("[MiniMapFix] DrawTerrainInfo: CameraPos=(%.1f,%.1f,%.1f) => CameraCell=(%d,%d) Grid=%dx%d"),
+            CameraLocation.X, CameraLocation.Y, CameraLocation.Z,
+            CameraCell.X, CameraCell.Y, MapSys->GetGridWidth(), MapSys->GetGridHeight());
     }
 
     const int32 TileIndex = CameraCell.Y * MapSys->GetGridWidth() + CameraCell.X;

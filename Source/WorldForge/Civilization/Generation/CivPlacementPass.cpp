@@ -26,7 +26,7 @@ void FCivPlacementPass::Execute(const UCivilizationGenerator& Generator, FCivGen
         // ADDED: Naming extracted into dedicated pass
         FCivNamingPass::AssignDefaultName(Civ);
 
-        const int32 StartTile = Generator.FindStartingTile(WorldTiles, UsedTileIDs, RNG);
+        const int32 StartTile = Generator.FindStartingTile(WorldTiles, UsedTileIDs, Context.GridWidth, RNG);
         if (StartTile >= 0 && WorldTiles.IsValidIndex(StartTile))
         {
             // ADDED:

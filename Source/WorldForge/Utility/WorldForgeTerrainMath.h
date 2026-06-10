@@ -45,6 +45,27 @@ struct FWorldForgeTerrainMath
         float VoxelY,
         const FWorldForgeTerrainSnapshot& Snapshot);
 
+    // Returns the distance in tile units from the sample point to the
+    // nearest ocean/sea/coastal water tile used by shoreline shaping.
+    // Returns -1.0f when no eligible coastal water tile is nearby.
+    static float SampleCoastalWaterDistanceTiles(
+        float VoxelX,
+        float VoxelY,
+        const FWorldForgeTerrainSnapshot& Snapshot);
+
+    // Applies a conservative shoreline feather to ordinary coast and inlet
+    // land, while preserving lava, volcanic, mountain, and canyon tiles.
+    static float ApplyCoastalShorelineShaping(
+        float VoxelX,
+        float VoxelY,
+        float MacroHeight,
+        const FWorldForgeTerrainSnapshot& Snapshot);
+
+    // Samples coast-adjacent terrain columns and logs shoreline shaping
+    // diagnostics using the current snapshot tuning.
+    static void LogCoastDiagnostics(
+        const FWorldForgeTerrainSnapshot& Snapshot);
+
     // ── v2.1: Mountain ridge detail layer ────────────────────────
     // Samples all PipelineMountainRanges and returns additive voxel
     // height from the closest ridge.  Returns 0 when no range is
@@ -73,5 +94,34 @@ struct FWorldForgeTerrainMath
     static float SampleCanyonRidgeNoise(
         float VoxelX,
         float VoxelY,
+        const FWorldForgeTerrainSnapshot& Snapshot);
+
+    // ── LAKE-FIX-01A: Lake basin shaping ─────────────────────────
+    // Bilinearly interpolates Tile.WaterDepth at voxel resolution.
+    // Returns 0.0 on land tiles, ~0.15–0.25 at lake centers.
+    static float SampleTileWaterDepthBilinear(
+        float VoxelX,
+        float VoxelY,
+        const FWorldForgeTerrainSnapshot& Snapshot);
+
+    // Shapes accepted lake basins using the descriptor metadata built
+    // after Step04. Uses a shallow elliptical core, an outer shoreline
+    // feather ring, and a clamped floor depth so the rendered terrain
+    // stays visually aligned with lightweight lake surfaces.
+    // Returns MacroHeight unchanged when no accepted basin influences
+    // the sample point.
+    static float ApplyLakeBasinShaping(
+        float VoxelX,
+        float VoxelY,
+        float MacroHeight,
+        const FWorldForgeTerrainSnapshot& Snapshot);
+
+    // Applies shallow river channel shaping from lightweight RiverSurfaceDescs.
+    // This is intentionally conservative: enough to visually seat the river
+    // surfaces without introducing deep trenches or a full hydrology model.
+    static float ApplyRiverChannelShaping(
+        float VoxelX,
+        float VoxelY,
+        float MacroHeight,
         const FWorldForgeTerrainSnapshot& Snapshot);
 };

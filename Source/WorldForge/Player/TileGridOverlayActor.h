@@ -135,15 +135,29 @@ public:
 
 	// ── Mining Volume Preview ──────────────────────────────
 
-	/** Draw translucent 3D voxel cubes for mine selections. */
+	/** Refresh the Mine visual overlay channel. Underground Mine renders flat tile overlays, not volume cubes. */
 	void SetMiningVolumeCells(const TArray<FIntVector>& VoxelCoords);
 
-	/** Clear translucent 3D voxel cubes for mine selections. */
+	/**
+	 * Like SetMiningVolumeCells, but each flat tile uses alpha from the parallel
+	 * Tints array (matched by index). Used by the above-layer ghost stack so closer
+	 * planned layers render brighter and deeper ones fade.
+	 */
+	void SetMiningVolumeCellsTinted(const TArray<FIntVector>& VoxelCoords, const TArray<FLinearColor>& Tints);
+
+	/** Clear the auxiliary mining overlay channel. */
 	void ClearMiningVolumeCells();
 
 	// ── Drag Preview (tentative cells during click-drag) ────
 
 	void SetDragPreviewCells(const TMap<FIntVector, float>& CellsWithTerrainZ);
+
+	// Option D: drag preview with per-macro validity tint (blue/amber/red). Keys are macro
+	// indices; with CellSizeUU at the 1600uu macro size, existing placement is correct.
+	void SetDragPreviewCellsTinted(
+		const TMap<FIntVector, float>& MacroCells,
+		const TMap<FIntVector, FLinearColor>& MacroTints);
+
 	void ClearDragPreview();
 
 	/** Clear only the temporary neutral base-grid layer around the cursor.
@@ -207,6 +221,15 @@ public:
 	void ClearAllConfirmedDesignationCells();
 	void CommitSelectedCellsAsConfirmed(EGridDesignationType DesignationType);
 
+	/**
+	 * Remove a single confirmed designation cell by voxel coordinate and designation type.
+	 * Removes the tile instance from ConfirmedTileMeshHISM and selectively rebuilds the
+	 * icon HISM for that designation type (icons are not tracked per-cell in confirmed state).
+	 * Does NOT clear any other designation type, active selection, or drag preview.
+	 * @return true if the cell was found and removed; false if it did not exist for that type.
+	 */
+	bool RemoveConfirmedDesignationCell(const FIntVector& VoxelCoord, EGridDesignationType DesignationType);
+
 	bool HasConfirmedDesignationCells() const { return ConfirmedDesignationCells.Num() > 0; }
 
 	// ── Visibility ──────────────────────────────────────────
@@ -260,9 +283,9 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Overlay|Layout")
 	int32 VisibleGridRadius = 96;
 
-	/** Z offset above terrain surface to prevent Z-fighting (UU). */
-	UPROPERTY(EditDefaultsOnly, Category = "Overlay|Layout")
-	float ZOffset = 25.0f;
+	/** Visual-only Z lift above sampled terrain for overlay planes/lines (UU). */
+	UPROPERTY(EditDefaultsOnly, Category = "Overlay|Layout", meta = (ClampMin = "0.0"))
+	float OverlayVisualZOffset = 5.0f;
 
 	/** Extra Z offset for icon plane above tile plane. */
 	UPROPERTY(EditDefaultsOnly, Category = "Overlay|Layout")
@@ -395,7 +418,7 @@ private:
 	UPROPERTY(VisibleAnywhere, Category = "Overlay")
 	TObjectPtr<UStaticMeshComponent> HoverMeshComp;
 
-	/** Instanced translucent 3D voxel cubes/caps for mine selections. */
+	/** Auxiliary instanced overlay channel for mining visuals; underground Mine uses flat planes here. */
 	UPROPERTY(VisibleAnywhere, Category = "Overlay")
 	TObjectPtr<UHierarchicalInstancedStaticMeshComponent> MiningVolumeHISM;
 
@@ -410,7 +433,7 @@ private:
 
 	// ── Runtime State ───────────────────────────────────────
 
-	float CellSizeUU = 100.0f;
+	float CellSizeUU = 200.0f;
 	bool  bOverlayVisible = false;
 	bool  bHoverActive = false;
 
@@ -426,7 +449,7 @@ private:
 	UPROPERTY()
 	TObjectPtr<UMaterialInstanceDynamic> HoverMID;
 
-	/** MID used by selected mining ghost-style instanced cubes. */
+	/** MID retained for legacy mining ghost material setup; underground Mine selected cells render as flat tiles. */
 	UPROPERTY()
 	TObjectPtr<UMaterialInstanceDynamic> MiningVolumeMID;
 
@@ -439,7 +462,7 @@ private:
 	TMap<FIntVector, int32> SelectedIcons;   // parallel icon instances for active preview/selection
 	TMap<FIntVector, int32> DragCells;
 
-	/** Surface mine selections use flat marker tiles only; underground selections use ghost cubes. */
+	/** Active Mine selections use flat marker tiles; this map tracks only auxiliary flat fallback overlays. */
 	TMap<FIntVector, int32> SurfaceMiningMarkerCells;
 	TMap<FIntVector, int32> MiningVolumeCells;
 
@@ -466,6 +489,15 @@ private:
 	float BaseGridAnchorTerrainZ = 0.0f;
 	bool bBaseGridBuilt = false;
 
+	/**
+	 * Cached world origin of the VoxelWorldActor (GetVoxelWorldOrigin()).
+	 * All transform builders (MakeCellTransform, RebuildBaseGridLineBatch, etc.) prefix
+	 * their X/Y world positions with this offset so the overlay grid aligns with the
+	 * actual voxel terrain regardless of where VoxelWorldActor is placed.
+	 * Updated once in BeginPlay.
+	 */
+	FVector VoxelWorldOrigin = FVector::ZeroVector;
+
 	// ── Internal Helpers ────────────────────────────────────
 
 	/** Build a world-space transform for a cell plane at the given voxel coord + Z. */
@@ -474,7 +506,13 @@ private:
 	/** Same but for the icon plane (smaller, higher Z). */
 	FTransform MakeIconTransform(const FIntVector& VoxelCoord, float TerrainZ) const;
 
-	/** Build a world-space transform for a thin mining designation cap. */
+	/** Build a terrain-tile world-space center for surface mine visuals. */
+	FVector MakeTerrainCellWorldLocation(const FIntVector& VoxelCoord, float WorldZ) const;
+
+	/** Build an icon transform using terrain-tile XY for surface mine visuals. */
+	FTransform MakeSurfaceMineIconTransform(const FIntVector& VoxelCoord, float TerrainZ) const;
+
+	/** Legacy cube transform; active underground Mine selection now uses flat tile overlays instead. */
 	FTransform MakeMiningVolumeTransform(const FIntVector& VoxelCoord) const;
 
 	/** Current cap/outline color based on whether the active layer is underground. */

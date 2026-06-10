@@ -112,6 +112,29 @@ public:
     UPROPERTY()
     TArray<FVolcanoData> PipelineVolcanoes;
 
+    // ── LAKE-FIX-01A: Lake basin descriptors built by BuildLakeBasins() ──
+    // Propagated from UWorldGenPipeline → UVoxelWorldManager → snapshot.
+    // PipelineLakeTileCount is a fast pre-computed sum used as a skip guard.
+    UPROPERTY()
+    TArray<FLakeBasinData> PipelineLakeBasins;
+
+    UPROPERTY()
+    int32 PipelineLakeTileCount = 0;
+
+    // ── RIVER-SYSTEM-01: Lightweight river surface descriptors built from
+    // existing Step03/Step04 river tiles and reused by terrain shaping + bootstrap.
+    UPROPERTY()
+    TArray<FWorldForgeRiverSurfaceDesc> RiverSurfaceDescs;
+
+    UPROPERTY()
+    int32 RiverSurfaceDescCount = 0;
+
+    // ── RIVER-WATER-02B: Full river network descriptors (one per connected component).
+    // Prepared for path-driven terrain carving (02C) and path-following river
+    // water surfaces (02D). Does not affect current 3D behavior.
+    UPROPERTY()
+    TArray<FWorldForgeRiverNetworkDesc> RiverNetworkDescs;
+
     // ── v4.0: 3D SDF Worm Cave Parameters ──
     UPROPERTY()
     float CaveWormFrequency = 0.012f;
@@ -256,6 +279,11 @@ public:
     // during BuildTerrainSnapshot() so it knows how to convert
     // voxel coords → chunk keys.
     // ─────────────────────────────────────────────────────────────
+
+    // ── v5.1: World generation seed — propagated from WorldGenPipeline so
+    // the terrain generator always uses the real embark seed, never 1337.
+    UPROPERTY()
+    int32 WorldSeed = 0;
 
     UPROPERTY()
     FTerrainModificationMap Modifications;

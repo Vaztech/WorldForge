@@ -21,13 +21,22 @@ public:
     UFUNCTION(BlueprintCallable, Category = "WorldForge|MiniMap")
     void SetMiniMapVisible(bool bVisible);
 
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|HUD")
+    void SetLegacyHudSuppressedForFullMap(bool bSuppress);
+
     UFUNCTION(BlueprintCallable, Category = "WorldForge|MiniMap")
     void ToggleMiniMapVisible();
 
     UFUNCTION(BlueprintPure, Category = "WorldForge|MiniMap")
     bool IsMiniMapVisible() const { return bShowMiniMap; }
 
+    UFUNCTION(BlueprintPure, Category = "WorldForge|HUD")
+    bool IsLegacyHudSuppressedForFullMap() const { return bSuppressLegacyHudForFullMap; }
+
 protected:
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|MiniMap")
+    bool bDrawLegacyMiniMap = true;
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|MiniMap")
     bool bShowMiniMap = true;
 
@@ -81,6 +90,10 @@ protected:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|MiniMap")
     FIntPoint WorldCellMin = FIntPoint(0, 0);
 
+    // DEPRECATED (MiniMapFix): Hard-coded 256-grid assumption — broke on 512/1024 worlds.
+    // Grid dimensions are now read from UWorldMapSubsystem::GridWidth/GridHeight, which are
+    // always set authoritatively by the pipeline.  This property is kept for Blueprint
+    // compatibility only and is NOT used by any C++ minimap or HUD logic.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|MiniMap", meta = (ClampMin = "1", UIMin = "1"))
     FIntPoint WorldCellDimensions = FIntPoint(256, 256);
 
@@ -164,6 +177,8 @@ protected:
     FLinearColor TerrainInfoColor = FLinearColor(0.7f, 0.8f, 1.0f, 1.0f);
 
 private:
+    bool bSuppressLegacyHudForFullMap = false;
+
     FVector2D WorldCellToMiniMap(const FIntPoint& WorldCell) const;
     bool IsWorldCellInBounds(const FIntPoint& WorldCell) const;
     FVector2D ClampToMiniMapBounds(const FVector2D& Point) const;

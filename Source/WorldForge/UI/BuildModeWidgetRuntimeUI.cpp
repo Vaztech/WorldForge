@@ -1,17 +1,20 @@
 #include "BuildModeWidget.h"
 
 #include "Blueprint/WidgetTree.h"
+#include "Build/WorldForgeBuildPrefabDataSubsystem.h"
 #include "Colony/SettlementManager.h"
 #include "Components/CanvasPanel.h"
 #include "Components/CanvasPanelSlot.h"
 #include "Components/HorizontalBox.h"
 #include "Components/HorizontalBoxSlot.h"
+#include "Components/Image.h"
 #include "Components/ScrollBox.h"
 #include "Components/ScrollBoxSlot.h"
 #include "Components/SizeBox.h"
 #include "Components/TextBlock.h"
 #include "Components/VerticalBox.h"
 #include "Components/VerticalBoxSlot.h"
+#include "Engine/Texture2D.h"
 #include "Player/BuildModeManager.h"
 
 namespace
@@ -92,6 +95,71 @@ namespace
 		}
 
 		return Name;
+	}
+
+	// Ensures a bare content-browser path like "/Game/Foo/Bar" gets the
+	// required "Bar.Bar" suffix that LoadObject<> needs to resolve correctly.
+	static FString WF_NormalizeIconPath(const FString& AssetPath)
+	{
+		FString TrimmedPath = AssetPath;
+		TrimmedPath.TrimStartAndEndInline();
+
+		if (TrimmedPath.IsEmpty() || TrimmedPath.Contains(TEXT("'")))
+		{
+			return TrimmedPath;
+		}
+
+		const int32 LastSlashIndex = TrimmedPath.Find(TEXT("/"), ESearchCase::CaseSensitive, ESearchDir::FromEnd);
+		const FString AssetName = LastSlashIndex == INDEX_NONE
+			? TrimmedPath
+			: TrimmedPath.Mid(LastSlashIndex + 1);
+
+		if (AssetName.IsEmpty() || AssetName.Contains(TEXT(".")))
+		{
+			return TrimmedPath;
+		}
+
+		return FString::Printf(TEXT("%s.%s"), *TrimmedPath, *AssetName);
+	}
+
+	// Converts a pipe-delimited "ItemID:Amount" cost string to a human-readable format.
+	// Example: "Wood:10|Stone:5" -> "Wood x10 | Stone x5"
+	// Empty input returns "No cost set".
+	static FString WF_FormatResourceCostForDisplay(const FString& RawCostText)
+	{
+		if (RawCostText.IsEmpty())
+		{
+			return FString(TEXT("No cost set"));
+		}
+
+		TArray<FString> Pairs;
+		RawCostText.ParseIntoArray(Pairs, TEXT("|"));
+
+		TArray<FString> Formatted;
+		Formatted.Reserve(Pairs.Num());
+
+		for (const FString& Pair : Pairs)
+		{
+			FString ItemID;
+			FString Amount;
+			if (Pair.Split(TEXT(":"), &ItemID, &Amount))
+			{
+				ItemID.TrimStartAndEndInline();
+				Amount.TrimStartAndEndInline();
+				Formatted.Add(FString::Printf(TEXT("%s x%s"), *ItemID, *Amount));
+			}
+			else
+			{
+				FString Trimmed = Pair;
+				Trimmed.TrimStartAndEndInline();
+				if (!Trimmed.IsEmpty())
+				{
+					Formatted.Add(Trimmed);
+				}
+			}
+		}
+
+		return Formatted.IsEmpty() ? FString(TEXT("No cost set")) : FString::Join(Formatted, TEXT("  |  "));
 	}
 }
 
@@ -554,6 +622,8 @@ void UBuildModeWidget::HandleMineChromeClicked()
 
 void UBuildModeWidget::HandleConfirmChromeClicked()
 {
+	UE_LOG(LogTemp, Warning, TEXT("[CUBE-MINING-V2] Runtime Confirm button clicked."));
+
 	CollapseTransientPanels();
 	ConfirmBuild();
 }
@@ -573,6 +643,234 @@ void UBuildModeWidget::HandleNativeBuildFeedbackMessage(const FString& Message)
 	}
 }
 
+UWidget* UBuildModeWidget::CreateBuildPieceCardContent(const FWorldForgeBuildPieceRow& Row)
+{
+	// ── Outer horizontal container ────────────────────────────────────────
+	UHorizontalBox* HBox = WidgetTree->ConstructWidget<UHorizontalBox>(
+		UHorizontalBox::StaticClass(),
+		MakeUniqueObjectName(WidgetTree, UHorizontalBox::StaticClass(), TEXT("Card_BuildPiece_HBox")));
+
+	// ── Left column: 56×56 icon or "No Image" placeholder ─────────────────
+	USizeBox* IconSizeBox = WidgetTree->ConstructWidget<USizeBox>(
+		USizeBox::StaticClass(),
+		MakeUniqueObjectName(WidgetTree, USizeBox::StaticClass(), TEXT("Card_BuildPiece_IconBox")));
+	IconSizeBox->SetWidthOverride(56.0f);
+	IconSizeBox->SetHeightOverride(56.0f);
+
+	UTexture2D* IconTexture = nullptr;
+	if (!Row.IconPath.IsEmpty())
+	{
+		const FString ObjectPath = WF_NormalizeIconPath(Row.IconPath);
+		IconTexture = LoadObject<UTexture2D>(nullptr, *ObjectPath);
+		if (!IconTexture)
+		{
+			UE_LOG(LogTemp, Log,
+				TEXT("[BuildModeWidget] BuildPiece card icon load failed: BuildID=%s IconPath=%s"),
+				*Row.BuildID.ToString(), *Row.IconPath);
+		}
+	}
+	else
+	{
+		UE_LOG(LogTemp, Log,
+			TEXT("[BuildModeWidget] BuildPiece card: BuildID=%s has no IconPath"),
+			*Row.BuildID.ToString());
+	}
+
+	if (IconTexture)
+	{
+		UImage* IconImage = WidgetTree->ConstructWidget<UImage>(
+			UImage::StaticClass(),
+			MakeUniqueObjectName(WidgetTree, UImage::StaticClass(), TEXT("Card_BuildPiece_Icon")));
+		IconImage->SetBrushFromTexture(IconTexture, false);
+		IconSizeBox->SetContent(IconImage);
+	}
+	else
+	{
+		UTextBlock* NoImageText = CreateRuntimeTextBlock(
+			MakeUniqueObjectName(WidgetTree, UTextBlock::StaticClass(), TEXT("Card_BuildPiece_NoImg")),
+			FText::FromString(TEXT("No Image")),
+			9);
+		NoImageText->SetColorAndOpacity(FSlateColor(FLinearColor(0.5f, 0.5f, 0.5f, 1.0f)));
+		IconSizeBox->SetContent(NoImageText);
+	}
+
+	if (UHorizontalBoxSlot* IconSlot = HBox->AddChildToHorizontalBox(IconSizeBox))
+	{
+		IconSlot->SetPadding(FMargin(4.0f, 4.0f, 0.0f, 4.0f));
+		IconSlot->SetVerticalAlignment(VAlign_Center);
+		IconSlot->SetSize(FSlateChildSize(ESlateSizeRule::Automatic));
+	}
+
+	// ── Right column: display name, category, resource cost ───────────────
+	UVerticalBox* InfoVBox = WidgetTree->ConstructWidget<UVerticalBox>(
+		UVerticalBox::StaticClass(),
+		MakeUniqueObjectName(WidgetTree, UVerticalBox::StaticClass(), TEXT("Card_BuildPiece_InfoVBox")));
+
+	const FString DisplayNameStr = Row.DisplayName.IsEmpty()
+		? Row.BuildID.ToString()
+		: Row.DisplayName.ToString();
+	UTextBlock* NameText = CreateRuntimeTextBlock(
+		MakeUniqueObjectName(WidgetTree, UTextBlock::StaticClass(), TEXT("Card_BuildPiece_Name")),
+		FText::FromString(DisplayNameStr),
+		13);
+	if (UVerticalBoxSlot* NameSlot = InfoVBox->AddChildToVerticalBox(NameText))
+	{
+		NameSlot->SetPadding(FMargin(0.0f, 2.0f, 0.0f, 1.0f));
+	}
+
+	const FString CatStr = FString::Printf(TEXT("%s / %s"),
+		Row.Category.IsNone() ? TEXT("None") : *Row.Category.ToString(),
+		Row.SubCategory.IsNone() ? TEXT("None") : *Row.SubCategory.ToString());
+	UTextBlock* CatText = CreateRuntimeTextBlock(
+		MakeUniqueObjectName(WidgetTree, UTextBlock::StaticClass(), TEXT("Card_BuildPiece_Cat")),
+		FText::FromString(CatStr),
+		10);
+	CatText->SetColorAndOpacity(FSlateColor(FLinearColor(0.65f, 0.65f, 0.65f, 1.0f)));
+	if (UVerticalBoxSlot* CatSlot = InfoVBox->AddChildToVerticalBox(CatText))
+	{
+		CatSlot->SetPadding(FMargin(0.0f, 0.0f, 0.0f, 1.0f));
+	}
+
+	const FString CostStr = WF_FormatResourceCostForDisplay(Row.ResourceCostText);
+	UTextBlock* CostText = CreateRuntimeTextBlock(
+		MakeUniqueObjectName(WidgetTree, UTextBlock::StaticClass(), TEXT("Card_BuildPiece_Cost")),
+		FText::FromString(CostStr),
+		10);
+	CostText->SetColorAndOpacity(FSlateColor(FLinearColor(1.0f, 0.85f, 0.45f, 1.0f)));
+	if (UVerticalBoxSlot* CostSlot = InfoVBox->AddChildToVerticalBox(CostText))
+	{
+		CostSlot->SetPadding(FMargin(0.0f, 0.0f, 0.0f, 2.0f));
+	}
+
+	if (UHorizontalBoxSlot* InfoSlot = HBox->AddChildToHorizontalBox(InfoVBox))
+	{
+		InfoSlot->SetPadding(FMargin(6.0f, 4.0f, 4.0f, 4.0f));
+		InfoSlot->SetVerticalAlignment(VAlign_Center);
+		InfoSlot->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
+	}
+
+	UE_LOG(LogTemp, Verbose,
+		TEXT("[BuildModeWidget] BuildPiece card created: BuildID=%s HasIcon=%s"),
+		*Row.BuildID.ToString(),
+		IconTexture ? TEXT("true") : TEXT("false"));
+
+	return HBox;
+}
+
+UWidget* UBuildModeWidget::CreatePrefabCardContent(const FWorldForgeBuildingPrefabRow& Row)
+{
+	// ── Outer horizontal container ────────────────────────────────────────
+	UHorizontalBox* HBox = WidgetTree->ConstructWidget<UHorizontalBox>(
+		UHorizontalBox::StaticClass(),
+		MakeUniqueObjectName(WidgetTree, UHorizontalBox::StaticClass(), TEXT("Card_Prefab_HBox")));
+
+	// ── Left column: 56×56 icon or "No Image" placeholder ─────────────────
+	USizeBox* IconSizeBox = WidgetTree->ConstructWidget<USizeBox>(
+		USizeBox::StaticClass(),
+		MakeUniqueObjectName(WidgetTree, USizeBox::StaticClass(), TEXT("Card_Prefab_IconBox")));
+	IconSizeBox->SetWidthOverride(56.0f);
+	IconSizeBox->SetHeightOverride(56.0f);
+
+	UTexture2D* IconTexture = nullptr;
+	if (!Row.IconPath.IsEmpty())
+	{
+		const FString ObjectPath = WF_NormalizeIconPath(Row.IconPath);
+		IconTexture = LoadObject<UTexture2D>(nullptr, *ObjectPath);
+		if (!IconTexture)
+		{
+			UE_LOG(LogTemp, Log,
+				TEXT("[BuildModeWidget] Prefab card icon load failed: PrefabID=%s IconPath=%s"),
+				*Row.PrefabID.ToString(), *Row.IconPath);
+		}
+	}
+	else
+	{
+		UE_LOG(LogTemp, Log,
+			TEXT("[BuildModeWidget] Prefab card: PrefabID=%s has no IconPath"),
+			*Row.PrefabID.ToString());
+	}
+
+	if (IconTexture)
+	{
+		UImage* IconImage = WidgetTree->ConstructWidget<UImage>(
+			UImage::StaticClass(),
+			MakeUniqueObjectName(WidgetTree, UImage::StaticClass(), TEXT("Card_Prefab_Icon")));
+		IconImage->SetBrushFromTexture(IconTexture, false);
+		IconSizeBox->SetContent(IconImage);
+	}
+	else
+	{
+		UTextBlock* NoImageText = CreateRuntimeTextBlock(
+			MakeUniqueObjectName(WidgetTree, UTextBlock::StaticClass(), TEXT("Card_Prefab_NoImg")),
+			FText::FromString(TEXT("No Image")),
+			9);
+		NoImageText->SetColorAndOpacity(FSlateColor(FLinearColor(0.5f, 0.5f, 0.5f, 1.0f)));
+		IconSizeBox->SetContent(NoImageText);
+	}
+
+	if (UHorizontalBoxSlot* IconSlot = HBox->AddChildToHorizontalBox(IconSizeBox))
+	{
+		IconSlot->SetPadding(FMargin(4.0f, 4.0f, 0.0f, 4.0f));
+		IconSlot->SetVerticalAlignment(VAlign_Center);
+		IconSlot->SetSize(FSlateChildSize(ESlateSizeRule::Automatic));
+	}
+
+	// ── Right column: display name, category, resource cost ───────────────
+	UVerticalBox* InfoVBox = WidgetTree->ConstructWidget<UVerticalBox>(
+		UVerticalBox::StaticClass(),
+		MakeUniqueObjectName(WidgetTree, UVerticalBox::StaticClass(), TEXT("Card_Prefab_InfoVBox")));
+
+	const FString DisplayNameStr = Row.DisplayName.IsEmpty()
+		? Row.PrefabID.ToString()
+		: Row.DisplayName.ToString();
+	UTextBlock* NameText = CreateRuntimeTextBlock(
+		MakeUniqueObjectName(WidgetTree, UTextBlock::StaticClass(), TEXT("Card_Prefab_Name")),
+		FText::FromString(DisplayNameStr),
+		13);
+	if (UVerticalBoxSlot* NameSlot = InfoVBox->AddChildToVerticalBox(NameText))
+	{
+		NameSlot->SetPadding(FMargin(0.0f, 2.0f, 0.0f, 1.0f));
+	}
+
+	const FString CatStr = FString::Printf(TEXT("%s / %s"),
+		Row.Category.IsNone() ? TEXT("None") : *Row.Category.ToString(),
+		Row.SubCategory.IsNone() ? TEXT("None") : *Row.SubCategory.ToString());
+	UTextBlock* CatText = CreateRuntimeTextBlock(
+		MakeUniqueObjectName(WidgetTree, UTextBlock::StaticClass(), TEXT("Card_Prefab_Cat")),
+		FText::FromString(CatStr),
+		10);
+	CatText->SetColorAndOpacity(FSlateColor(FLinearColor(0.65f, 0.65f, 0.65f, 1.0f)));
+	if (UVerticalBoxSlot* CatSlot = InfoVBox->AddChildToVerticalBox(CatText))
+	{
+		CatSlot->SetPadding(FMargin(0.0f, 0.0f, 0.0f, 1.0f));
+	}
+
+	const FString CostStr = WF_FormatResourceCostForDisplay(Row.ResourceCostText);
+	UTextBlock* CostText = CreateRuntimeTextBlock(
+		MakeUniqueObjectName(WidgetTree, UTextBlock::StaticClass(), TEXT("Card_Prefab_Cost")),
+		FText::FromString(CostStr),
+		10);
+	CostText->SetColorAndOpacity(FSlateColor(FLinearColor(1.0f, 0.85f, 0.45f, 1.0f)));
+	if (UVerticalBoxSlot* CostSlot = InfoVBox->AddChildToVerticalBox(CostText))
+	{
+		CostSlot->SetPadding(FMargin(0.0f, 0.0f, 0.0f, 2.0f));
+	}
+
+	if (UHorizontalBoxSlot* InfoSlot = HBox->AddChildToHorizontalBox(InfoVBox))
+	{
+		InfoSlot->SetPadding(FMargin(6.0f, 4.0f, 4.0f, 4.0f));
+		InfoSlot->SetVerticalAlignment(VAlign_Center);
+		InfoSlot->SetSize(FSlateChildSize(ESlateSizeRule::Fill));
+	}
+
+	UE_LOG(LogTemp, Verbose,
+		TEXT("[BuildModeWidget] Prefab card created: PrefabID=%s HasIcon=%s"),
+		*Row.PrefabID.ToString(),
+		IconTexture ? TEXT("true") : TEXT("false"));
+
+	return HBox;
+}
+
 void UBuildModeWidget::RefreshBuildPieceList()
 {
 	if (!ScrollBox_BuildPieceOptions)
@@ -582,22 +880,45 @@ void UBuildModeWidget::RefreshBuildPieceList()
 
 	ScrollBox_BuildPieceOptions->ClearChildren();
 
-	const TArray<FString> Summaries = GetBuildDataBuildPieceSummaries(NAME_None);
+	const UWorldForgeBuildPrefabDataSubsystem* DataSubsystem = GetBuildDataSubsystem();
+	if (!DataSubsystem)
+	{
+		ScrollBox_BuildPieceOptions->AddChild(CreateRuntimeTextBlock(
+			MakeUniqueObjectName(WidgetTree, UTextBlock::StaticClass(), TEXT("Text_NoBuildPiecesAvailable")),
+			FText::FromString(TEXT("No build pieces available")),
+			13));
+		return;
+	}
+
+	TArray<FWorldForgeBuildPieceRow> PieceRows;
+	DataSubsystem->GetAllBuildPieces(PieceRows);
+	PieceRows.Sort([](const FWorldForgeBuildPieceRow& A, const FWorldForgeBuildPieceRow& B)
+	{
+		return A.DisplayName.ToString() < B.DisplayName.ToString();
+	});
 
 	constexpr int32 WF_MaxBuildPieceListCount = 100;
 	int32 AddedCount = 0;
 	bool bAnyAdded = false;
 
-	for (const FString& Summary : Summaries)
+	for (const FWorldForgeBuildPieceRow& Row : PieceRows)
 	{
 		if (AddedCount >= WF_MaxBuildPieceListCount)
 		{
 			break;
 		}
 
-		const FName BuildID = ParseBuildPieceIDFromSummary(Summary);
-		if (BuildID.IsNone())
+		if (Row.BuildID.IsNone())
 		{
+			continue;
+		}
+
+		// Skip rows that have no mesh and no preview mesh — they cannot preview or place.
+		if (Row.MeshPath.IsEmpty() && Row.PreviewMeshPath.IsEmpty())
+		{
+			UE_LOG(LogTemp, Log,
+				TEXT("[BuildModeWidget] BuildPiece card skipped (no mesh): BuildID=%s DisplayName=%s"),
+				*Row.BuildID.ToString(), *Row.DisplayName.ToString());
 			continue;
 		}
 
@@ -607,11 +928,8 @@ void UBuildModeWidget::RefreshBuildPieceList()
 		UBuildModeOptionButton* OptionButton = WidgetTree->ConstructWidget<UBuildModeOptionButton>(
 			UBuildModeOptionButton::StaticClass(),
 			MakeUniqueObjectName(WidgetTree, UBuildModeOptionButton::StaticClass(), TEXT("BTN_BuildPieceOption")));
-		OptionButton->InitializeOption(this, EBuildModeOptionButtonKind::BuildPiece, BuildID);
-		OptionButton->SetContent(CreateRuntimeTextBlock(
-			MakeUniqueObjectName(WidgetTree, UTextBlock::StaticClass(), TEXT("TXT_BuildPieceOption")),
-			FText::FromString(Summary),
-			12));
+		OptionButton->InitializeOption(this, EBuildModeOptionButtonKind::BuildPiece, Row.BuildID);
+		OptionButton->SetContent(CreateBuildPieceCardContent(Row));
 
 		if (UScrollBoxSlot* BuildPieceOptionSlot = Cast<UScrollBoxSlot>(ScrollBox_BuildPieceOptions->AddChild(OptionButton)))
 		{
@@ -637,28 +955,43 @@ void UBuildModeWidget::RefreshPrefabList()
 
 	ScrollBox_PrefabOptions->ClearChildren();
 
-	const TArray<FString> Summaries = GetBuildDataPrefabSummaries(NAME_None);
+	const UWorldForgeBuildPrefabDataSubsystem* DataSubsystem = GetBuildDataSubsystem();
+	if (!DataSubsystem)
+	{
+		ScrollBox_PrefabOptions->AddChild(CreateRuntimeTextBlock(
+			MakeUniqueObjectName(WidgetTree, UTextBlock::StaticClass(), TEXT("Text_NoPrefabsAvailable")),
+			FText::FromString(TEXT("No prefabs available")),
+			13));
+		return;
+	}
+
+	TArray<FWorldForgeBuildingPrefabRow> PrefabRows;
+	DataSubsystem->GetAllBuildingPrefabs(PrefabRows);
+	PrefabRows.Sort([](const FWorldForgeBuildingPrefabRow& A, const FWorldForgeBuildingPrefabRow& B)
+	{
+		return A.DisplayName.ToString() < B.DisplayName.ToString();
+	});
 
 	constexpr int32 WF_MaxPrefabListCount = 50;
 	int32 AddedCount = 0;
 	bool bAnyAdded = false;
 
-	for (const FString& Summary : Summaries)
+	for (const FWorldForgeBuildingPrefabRow& Row : PrefabRows)
 	{
 		if (AddedCount >= WF_MaxPrefabListCount)
 		{
 			break;
 		}
 
-		const FName PrefabID = ParsePrefabIDFromSummary(Summary);
-		if (PrefabID.IsNone())
+		if (Row.PrefabID.IsNone())
 		{
 			continue;
 		}
 
-		if (WF_IsDemoOrPluginPrefabID(PrefabID.ToString(), Summary))
+		if (WF_IsDemoOrPluginPrefabID(Row.PrefabID.ToString(), Row.DisplayName.ToString()))
 		{
-			UE_LOG(LogTemp, Verbose, TEXT("[BuildModeWidget] Prefab filtered (demo/plugin): %s"), *Summary);
+			UE_LOG(LogTemp, Verbose,
+				TEXT("[BuildModeWidget] Prefab card filtered (demo/plugin): %s"), *Row.PrefabID.ToString());
 			continue;
 		}
 
@@ -668,11 +1001,8 @@ void UBuildModeWidget::RefreshPrefabList()
 		UBuildModeOptionButton* OptionButton = WidgetTree->ConstructWidget<UBuildModeOptionButton>(
 			UBuildModeOptionButton::StaticClass(),
 			MakeUniqueObjectName(WidgetTree, UBuildModeOptionButton::StaticClass(), TEXT("BTN_PrefabOption")));
-		OptionButton->InitializeOption(this, EBuildModeOptionButtonKind::Prefab, PrefabID);
-		OptionButton->SetContent(CreateRuntimeTextBlock(
-			MakeUniqueObjectName(WidgetTree, UTextBlock::StaticClass(), TEXT("TXT_PrefabOption")),
-			FText::FromString(Summary),
-			12));
+		OptionButton->InitializeOption(this, EBuildModeOptionButtonKind::Prefab, Row.PrefabID);
+		OptionButton->SetContent(CreatePrefabCardContent(Row));
 
 		if (UScrollBoxSlot* PrefabOptionSlot = Cast<UScrollBoxSlot>(ScrollBox_PrefabOptions->AddChild(OptionButton)))
 		{

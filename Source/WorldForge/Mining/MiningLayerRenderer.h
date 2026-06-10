@@ -86,6 +86,10 @@ public:
     UFUNCTION(BlueprintCallable, Category = "WorldForge|MiningLayer|Debug")
     void ForceNextRebuild();
 
+    int32 GetLastTerrainInstanceCount() const { return LastTerrainInstanceCount; }
+    int32 GetLastSelectedGhostInstanceCount() const { return LastSelectedGhostInstanceCount; }
+    int32 GetLastConfirmedGhostInstanceCount() const { return LastConfirmedGhostInstanceCount; }
+
 public:
     // -------------------------------------------------------------------------
     // General config
@@ -269,8 +273,14 @@ private:
     int32      LastActiveVoxelZ             = MIN_int32;
     int32      LastSelectedCount            = MIN_int32;
     int32      LastConfirmedCount           = MIN_int32;
+    uint32     LastSelectedCellsHash        = 0;
+    uint32     LastConfirmedCellsHash       = 0;
     bool       bLastWasSuppressed           = false;
     bool       bForceNextRebuild            = false;
+
+    int32      LastTerrainInstanceCount        = 0;
+    int32      LastSelectedGhostInstanceCount  = 0;
+    int32      LastConfirmedGhostInstanceCount = 0;
     bool       bDiagnosticsDumpedThisSession = false;
 
 private:

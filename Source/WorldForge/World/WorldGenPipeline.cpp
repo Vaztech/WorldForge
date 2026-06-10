@@ -107,6 +107,256 @@ namespace
         }
         return (MaxVal > KINDA_SMALL_NUMBER) ? (Sum / MaxVal) : 0.0f;
     }
+
+    constexpr float Step03SeaThreshold = 0.48f;
+    constexpr float Step03CoastalThreshold = 0.515f;
+    constexpr float Step03RiverLakeDepthThreshold = 0.15f;
+    constexpr float Step03RiverMinDepth = 0.05f;
+    constexpr float Step03RiverMaxDepth = 0.12f;
+    constexpr float Step03RiverChannelDepression = 0.008f;
+    constexpr float Step03RiverMinorUphillAllowance = 0.035f;
+
+    static const FIntPoint GRiverNeighborOffsets[] =
+    {
+        FIntPoint(-1, 0), FIntPoint(1, 0), FIntPoint(0, -1), FIntPoint(0, 1),
+        FIntPoint(-1, -1), FIntPoint(1, -1), FIntPoint(-1, 1), FIntPoint(1, 1)
+    };
+
+    struct FRiverSourceCandidate
+    {
+        FIntPoint Tile = FIntPoint::ZeroValue;
+        float Score = 0.0f;
+    };
+
+    struct FRiverSourceDiagnostics
+    {
+        int32 SourceCandidates = 0;
+        int32 Accepted = 0;
+        int32 RejectedNoDrainage = 0;
+        int32 RejectedWater = 0;
+        int32 RejectedBiome = 0;
+    };
+
+    struct FDrainageSearchResult
+    {
+        bool bFound = false;
+        FIntPoint Target = FIntPoint(-1, -1);
+        FString Reason = TEXT("None");
+    };
+
+    enum class ERiverOutletKind : uint8
+    {
+        None,
+        Coast,
+        Sea,
+        Lake,
+        RiverMerge,
+        LakeEndpoint,
+        Loop,
+        MaxLength
+    };
+
+    static bool IsInGrid(const FIntPoint& Point, int32 GridWidth, int32 GridHeight)
+    {
+        return Point.X >= 0 && Point.X < GridWidth && Point.Y >= 0 && Point.Y < GridHeight;
+    }
+
+    static bool IsVolcanicRiverBlocked(const FIntPoint& Point, const TArray<FVolcanoData>& Volcanoes)
+    {
+        const FVector2D TilePos(static_cast<float>(Point.X), static_cast<float>(Point.Y));
+        for (const FVolcanoData& Volcano : Volcanoes)
+        {
+            const float ExclusionRadius = Volcano.bActive
+                ? FMath::Max(Volcano.ConeRadius, Volcano.LavaFlowRadius)
+                : Volcano.ConeRadius;
+            if (FVector2D::Distance(TilePos, Volcano.Center) <= ExclusionRadius)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static bool IsCoastalRiverOutlet(
+        const FIntPoint& Point,
+        const TArray<FWorldTileData>& WorldTiles,
+        int32 GridWidth,
+        int32 GridHeight)
+    {
+        if (!IsInGrid(Point, GridWidth, GridHeight))
+        {
+            return false;
+        }
+
+        const FWorldTileData& Tile = WorldTiles[Point.Y * GridWidth + Point.X];
+        if (Tile.Elevation < Step03SeaThreshold || Tile.Elevation > Step03CoastalThreshold)
+        {
+            return false;
+        }
+
+        for (const FIntPoint& Offset : GRiverNeighborOffsets)
+        {
+            const FIntPoint Neighbor(Point.X + Offset.X, Point.Y + Offset.Y);
+            if (!IsInGrid(Neighbor, GridWidth, GridHeight))
+            {
+                continue;
+            }
+
+            if (WorldTiles[Neighbor.Y * GridWidth + Neighbor.X].Elevation < Step03SeaThreshold)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    static int32 FindAdjacentSeaTileIndex(
+        const FIntPoint& Point,
+        const TArray<FWorldTileData>& WorldTiles,
+        int32 GridWidth,
+        int32 GridHeight)
+    {
+        for (const FIntPoint& Offset : GRiverNeighborOffsets)
+        {
+            const FIntPoint Neighbor(Point.X + Offset.X, Point.Y + Offset.Y);
+            if (!IsInGrid(Neighbor, GridWidth, GridHeight))
+            {
+                continue;
+            }
+
+            if (WorldTiles[Neighbor.Y * GridWidth + Neighbor.X].Elevation < Step03SeaThreshold)
+            {
+                return Neighbor.Y * GridWidth + Neighbor.X;
+            }
+        }
+
+        return INDEX_NONE;
+    }
+
+    static float ComputeRiverWaterDepth(float FlowUnits, int32 DownstreamDistance)
+    {
+        const float FlowBonus = FMath::Min(0.04f, FMath::Max(0.0f, FlowUnits - 1.0f) * 0.015f);
+        const float DistanceBonus = FMath::Min(0.03f, static_cast<float>(DownstreamDistance) * 0.0015f);
+        return FMath::Clamp(
+            Step03RiverMinDepth + FlowBonus + DistanceBonus,
+            Step03RiverMinDepth,
+            Step03RiverMaxDepth);
+    }
+
+    static const TCHAR* RiverOutletKindToString(ERiverOutletKind Kind)
+    {
+        switch (Kind)
+        {
+        case ERiverOutletKind::Coast:        return TEXT("Coast");
+        case ERiverOutletKind::Sea:          return TEXT("Sea");
+        case ERiverOutletKind::Lake:         return TEXT("Lake");
+        case ERiverOutletKind::RiverMerge:   return TEXT("River");
+        case ERiverOutletKind::LakeEndpoint: return TEXT("LakeEndpoint");
+        case ERiverOutletKind::Loop:         return TEXT("Loop");
+        case ERiverOutletKind::MaxLength:    return TEXT("MaxLength");
+        case ERiverOutletKind::None:
+        default:
+            return TEXT("None");
+        }
+    }
+
+    struct FWaterBalanceStats
+    {
+        int32 WaterCount = 0;
+        int32 LandCount = 0;
+        float WaterPct = 0.0f;
+        float LandPct = 0.0f;
+    };
+
+    struct FHeightDistributionStats
+    {
+        float Mean = 0.0f;
+        float P10 = 0.0f;
+        float P25 = 0.0f;
+        float P50 = 0.0f;
+        float P75 = 0.0f;
+        float P90 = 0.0f;
+        float WaterPct = 0.0f;
+    };
+
+    static float SampleSortedPercentile(const TArray<float>& SortedValues, float Percentile01)
+    {
+        if (SortedValues.Num() <= 0)
+        {
+            return 0.0f;
+        }
+
+        const float ClampedPercentile = FMath::Clamp(Percentile01, 0.0f, 1.0f);
+        const float IndexFloat = ClampedPercentile * static_cast<float>(SortedValues.Num() - 1);
+        const int32 IndexA = FMath::Clamp(FMath::FloorToInt(IndexFloat), 0, SortedValues.Num() - 1);
+        const int32 IndexB = FMath::Clamp(IndexA + 1, 0, SortedValues.Num() - 1);
+        const float Alpha = IndexFloat - static_cast<float>(IndexA);
+
+        return FMath::Lerp(SortedValues[IndexA], SortedValues[IndexB], Alpha);
+    }
+
+    static FHeightDistributionStats CalculateHeightDistributionStats(
+        const TArray<float>& Heights,
+        float SeaThreshold)
+    {
+        FHeightDistributionStats Stats;
+        if (Heights.Num() <= 0)
+        {
+            return Stats;
+        }
+
+        TArray<float> SortedHeights = Heights;
+        SortedHeights.Sort();
+
+        double Sum = 0.0;
+        int32 WaterCount = 0;
+        for (const float Height : Heights)
+        {
+            Sum += Height;
+            if (Height < SeaThreshold)
+            {
+                ++WaterCount;
+            }
+        }
+
+        Stats.Mean = static_cast<float>(Sum / static_cast<double>(Heights.Num()));
+        Stats.P10 = SampleSortedPercentile(SortedHeights, 0.10f);
+        Stats.P25 = SampleSortedPercentile(SortedHeights, 0.25f);
+        Stats.P50 = SampleSortedPercentile(SortedHeights, 0.50f);
+        Stats.P75 = SampleSortedPercentile(SortedHeights, 0.75f);
+        Stats.P90 = SampleSortedPercentile(SortedHeights, 0.90f);
+        Stats.WaterPct = static_cast<float>(WaterCount) * (100.0f / static_cast<float>(Heights.Num()));
+
+        return Stats;
+    }
+
+    static FWaterBalanceStats CalculateWaterBalanceStats(
+        const TArray<FWorldTileData>& Tiles,
+        float SeaThreshold)
+    {
+        FWaterBalanceStats Stats;
+        const int32 TotalTiles = Tiles.Num();
+
+        for (const FWorldTileData& Tile : Tiles)
+        {
+            if (Tile.Elevation < SeaThreshold)
+            {
+                ++Stats.WaterCount;
+            }
+        }
+
+        Stats.LandCount = FMath::Max(0, TotalTiles - Stats.WaterCount);
+
+        if (TotalTiles > 0)
+        {
+            const float InvTotalPct = 100.0f / static_cast<float>(TotalTiles);
+            Stats.WaterPct = static_cast<float>(Stats.WaterCount) * InvTotalPct;
+            Stats.LandPct = static_cast<float>(Stats.LandCount) * InvTotalPct;
+        }
+
+        return Stats;
+    }
 }
 
 void UWorldGenPipeline::GenerateWorld(
@@ -136,6 +386,7 @@ void UWorldGenPipeline::GenerateWorld(
     MountainProvinces.Reset();
     VolcanicHotspots.Reset();
     Volcanoes.Reset();
+    LakeBasins.Reset(); // LAKE-FIX-01A
 
     WorldTiles.SetNum(GridWidth * GridHeight);
     for (int32 i = 0; i < WorldTiles.Num(); i++)
@@ -158,6 +409,11 @@ void UWorldGenPipeline::GenerateWorld(
     Step04_AssignBiomes();
     PushPartialMapUpdate();                      // terrain colors improve
 
+    // LAKE-FIX-01A: Flood-fill connected lake tiles into basin groups.
+    // Must run after Step04 (biome/WaterDepth set) and before the bootstrap-owned
+    // Step05 voxel handoff compatibility path.
+    BuildLakeBasins();
+
     // CRITICAL HANDOFF FIX:
     // Resource veins must be seeded before voxel terrain initialization.
     // Step05 hands WorldTiles to VoxelWorldManager, which may immediately cache/snapshot
@@ -165,8 +421,8 @@ void UWorldGenPipeline::GenerateWorld(
     // If resources are seeded after Step05, VoxelWorldManager sees 0 vein tiles.
     Step08_SeedResources();
     PushPartialMapUpdate();                      // resource overlay/data now exists before terrain snapshot
-
-    Step05_InitVoxelChunks();
+    // WorldGenPipeline now stops at generated data. Bootstrap owns when the
+    // runtime voxel terrain handoff is requested after map subsystem init.
     Step06_PCGDecorationPass();
     Step07_ApplyWorldDriver();
 
@@ -185,12 +441,28 @@ void UWorldGenPipeline::GenerateWorld(
 
     Step16_FinalizeWorldMap();
     PushPartialMapUpdate();                      // final locked map
+    UE_LOG(LogTemp, Log, TEXT("[EmbarkFlow] Data worldgen complete; voxel terrain handoff deferred to bootstrap."));
 
     bComplete = true;
     UE_LOG(LogTemp, Log,
         TEXT("[WorldGen] Complete Tiles=%d Civs=%d Events=%d Currencies=%d Hotspots=%d Volcanoes=%d"),
         WorldTiles.Num(), Civilizations.Num(),
         HistoryLog.Num(), Currencies.Num(), VolcanicHotspots.Num(), Volcanoes.Num());
+}
+
+bool UWorldGenPipeline::DispatchVoxelTerrainHandoff(UObject* OptionalWorldContext)
+{
+    // WorldGenPipeline keeps the legacy Step05 implementation for now, but
+    // AWorldGenBootstrapActor owns when playable voxel terrain actually starts.
+    if (OptionalWorldContext)
+    {
+        if (UWorld* ContextWorld = OptionalWorldContext->GetWorld())
+        {
+            WorldRef = ContextWorld;
+        }
+    }
+
+    return Step05_InitVoxelChunks();
 }
 
 void UWorldGenPipeline::HandlePCGDecorationPass_Implementation(const TArray<FWorldTileData>& InWorldTiles, int32 InGridWidth, int32 InGridHeight)
@@ -267,6 +539,36 @@ void UWorldGenPipeline::Step02_GenerateHeightmap()
 {
     UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step02: Multi-continent heightmap (v3.3)..."));
 
+    constexpr float ReferenceGridSize = 512.0f;
+    constexpr float TargetWaterRatio = 0.38f;
+    constexpr float MinWaterRatio = 0.30f;
+    constexpr float MaxWaterRatio = 0.45f;
+    constexpr float CalibrationStrength = 0.35f;
+    constexpr float DryMaxCalibrationOffset = 0.065f;  // enlarged cap for severe-dry seeds (PreCal < 25%)
+    constexpr float WetMaxCalibrationOffset = 0.045f;  // standard cap for wet/mild-dry correction
+    constexpr float SevereDryThreshold = 0.25f;        // below this ratio, use enlarged dry cap
+    constexpr float SecondPassStrength = 0.25f;
+    constexpr float MaxSecondPassOffset = 0.030f;
+    constexpr float DryWarningWaterPct = 28.0f;
+    constexpr float WetWarningWaterPct = 50.0f;
+    constexpr float RawExtremeDryWarningWaterPct = 22.0f;
+    constexpr float RawExtremeWetWarningWaterPct = 55.0f;
+    constexpr float DrySeedMacroTriggerWaterPct = 25.0f;
+    constexpr float MaxDrySeedOceanBoost = 0.080f;
+    constexpr float DryBoostChannelMaskStart = 0.08f;
+    constexpr float DryBoostChannelMaskEnd = 0.45f;
+    constexpr float DryBoostLowlandMaskStart = 0.52f;
+    constexpr float DryBoostLowlandMaskEnd = 0.72f;
+
+    struct FStep02TileSample
+    {
+        float BaseElevation = 0.0f;
+        float ChannelADepth = 0.0f;
+        float ChannelBDepth = 0.0f;
+        float RidgeVal = 0.0f;
+        float EdgeFade = 0.0f;
+    };
+
     // ── Deterministic offsets ──
     const float OffX = RNGRef->NextFloatRange(UWorldForgeRNG::BRANCH_TERRAIN, -10000.f, 10000.f);
     const float OffY = RNGRef->NextFloatRange(UWorldForgeRNG::BRANCH_TERRAIN, -10000.f, 10000.f);
@@ -293,18 +595,34 @@ void UWorldGenPipeline::Step02_GenerateHeightmap()
 
     // ── Channel carver A — primary ocean gap (low frequency = broad) ──
     const float ChannelAScale = 0.0025f;
-    const float ChannelAThreshold = 0.38f;
-    const float ChannelAStrength = 0.55f;
+    const float ChannelAThreshold = 0.43f;
+    const float ChannelAStrength = 0.42f;
 
     // ── Channel carver B — secondary ocean gap (slightly higher freq) ──
     const float ChannelBScale = 0.0038f;
-    const float ChannelBThreshold = 0.42f;
-    const float ChannelBStrength = 0.45f;
+    const float ChannelBThreshold = 0.47f;
+    const float ChannelBStrength = 0.34f;
 
     // ── Land shaping ──
-    const float LandPower = 0.72f;      // higher = more ocean (was 0.55)
-    const float SeaThreshold = 0.48f;
-    const float LandBias = 0.06f;       // much less bias (was 0.12)
+    const float LandPower = 0.62f;      // higher = more ocean
+    const float SeaThreshold = 0.48f;   // aligned with voxel terrain WaterThreshold
+    const float LandBias = 0.10f;
+
+    const float SafeGridWidth = FMath::Max(1.0f, static_cast<float>(GridWidth));
+    const float WorldSizeScale = ReferenceGridSize / SafeGridWidth;
+    const float ContinentScaleNormalized = ContinentScale * WorldSizeScale;
+    const float ChannelAScaleNormalized = ChannelAScale * WorldSizeScale;
+    const float ChannelBScaleNormalized = ChannelBScale * WorldSizeScale;
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[WorldGen] MacroScale Grid=%dx%d Reference=%.0f WorldScale=%.3f ContinentScale=%.6f ChannelA=%.6f ChannelB=%.6f"),
+        GridWidth,
+        GridHeight,
+        ReferenceGridSize,
+        WorldSizeScale,
+        ContinentScaleNormalized,
+        ChannelAScaleNormalized,
+        ChannelBScaleNormalized);
 
     // ── Edge fade ──
     const FVector2D MapCenter((GridWidth - 1) * 0.5f, (GridHeight - 1) * 0.5f);
@@ -312,11 +630,18 @@ void UWorldGenPipeline::Step02_GenerateHeightmap()
 
     VolcanicHotspots.Reset();
 
+    TArray<FStep02TileSample> TileSamples;
+    TileSamples.SetNum(WorldTiles.Num());
+
+    TArray<float> InitialRawHeights;
+    InitialRawHeights.SetNum(WorldTiles.Num());
+
     for (int32 Y = 0; Y < GridHeight; ++Y)
     {
         for (int32 X = 0; X < GridWidth; ++X)
         {
-            FWorldTileData& Tile = WorldTiles[TileIndex(X, Y)];
+            const int32 Index = TileIndex(X, Y);
+            FStep02TileSample& Sample = TileSamples[Index];
             const float SX = static_cast<float>(X);
             const float SY = static_cast<float>(Y);
 
@@ -332,8 +657,8 @@ void UWorldGenPipeline::Step02_GenerateHeightmap()
 
             // ── 2. Base continent noise ──
             const float ContinentRaw = PerlinFBM2D(
-                (WarpedX + OffX) * ContinentScale,
-                (WarpedY + OffY) * ContinentScale,
+                (WarpedX + OffX) * ContinentScaleNormalized,
+                (WarpedY + OffY) * ContinentScaleNormalized,
                 ContinentOctaves, ContinentPersist, ContinentLacun);
             float Continent01 = (ContinentRaw + 1.0f) * 0.5f;
 
@@ -343,30 +668,30 @@ void UWorldGenPipeline::Step02_GenerateHeightmap()
             // ── 4. Channel carver A — broad primary ocean gap ──
             {
                 const float ChNoise = PerlinFBM2D(
-                    (WarpedX + ChannelAOffX) * ChannelAScale,
-                    (WarpedY + ChannelAOffY) * ChannelAScale,
+                    (WarpedX + ChannelAOffX) * ChannelAScaleNormalized,
+                    (WarpedY + ChannelAOffY) * ChannelAScaleNormalized,
                     3, 0.45f, 2.2f);
                 const float Ch01 = (ChNoise + 1.0f) * 0.5f;
 
                 if (Ch01 > ChannelAThreshold)
                 {
-                    const float Depth = (Ch01 - ChannelAThreshold) / (1.0f - ChannelAThreshold);
-                    Continent01 -= Depth * ChannelAStrength;
+                    Sample.ChannelADepth = (Ch01 - ChannelAThreshold) / (1.0f - ChannelAThreshold);
+                    Continent01 -= Sample.ChannelADepth * ChannelAStrength;
                 }
             }
 
             // ── 5. Channel carver B — secondary ocean gap ──
             {
                 const float ChNoise = PerlinFBM2D(
-                    (WarpedX + ChannelBOffX) * ChannelBScale,
-                    (WarpedY + ChannelBOffY) * ChannelBScale,
+                    (WarpedX + ChannelBOffX) * ChannelBScaleNormalized,
+                    (WarpedY + ChannelBOffY) * ChannelBScaleNormalized,
                     3, 0.50f, 2.0f);
                 const float Ch01 = (ChNoise + 1.0f) * 0.5f;
 
                 if (Ch01 > ChannelBThreshold)
                 {
-                    const float Depth = (Ch01 - ChannelBThreshold) / (1.0f - ChannelBThreshold);
-                    Continent01 -= Depth * ChannelBStrength;
+                    Sample.ChannelBDepth = (Ch01 - ChannelBThreshold) / (1.0f - ChannelBThreshold);
+                    Continent01 -= Sample.ChannelBDepth * ChannelBStrength;
                 }
             }
 
@@ -380,26 +705,107 @@ void UWorldGenPipeline::Step02_GenerateHeightmap()
             // ── 7. Edge fade — guarantee ocean border ──
             const float DistToCenter = FVector2D::Distance(FVector2D(SX, SY), MapCenter);
             const float EdgeNorm = FMath::Clamp(DistToCenter / MaxCenterDist, 0.0f, 1.0f);
-            const float EdgeFade = FMath::SmoothStep(0.65f, 0.92f, EdgeNorm);
+            Sample.EdgeFade = FMath::SmoothStep(0.65f, 0.92f, EdgeNorm);
 
             // ── 8. Combine ──
-            float Elevation = Continent01 * 0.85f + Detail01 * DetailWeight + LandBias;
-            Elevation *= (1.0f - EdgeFade);
+            Sample.BaseElevation = Continent01 * 0.85f + Detail01 * DetailWeight + LandBias;
+            Sample.BaseElevation *= (1.0f - Sample.EdgeFade);
+            Sample.BaseElevation = FMath::Clamp(Sample.BaseElevation, 0.0f, 1.0f);
 
             // ── 9. Ridge noise for volcanic hotspot candidates ──
             const float RidgeRaw = FMath::PerlinNoise2D(FVector2D(
                 (WarpedX + OffX + 1000.f) * 0.012f,
                 (WarpedY + OffY + 1000.f) * 0.012f));
-            float RidgeVal = 1.0f - FMath::Abs(RidgeRaw);
-            RidgeVal = RidgeVal * RidgeVal;
+            Sample.RidgeVal = 1.0f - FMath::Abs(RidgeRaw);
+            Sample.RidgeVal = Sample.RidgeVal * Sample.RidgeVal;
 
+            float InitialElevation = Sample.BaseElevation;
+            if (InitialElevation > SeaThreshold)
+            {
+                const float CoastalFade = FMath::Clamp(
+                    (InitialElevation - SeaThreshold) / 0.15f, 0.0f, 1.0f);
+                InitialElevation += Sample.RidgeVal * 0.10f * CoastalFade;
+            }
+
+            InitialRawHeights[Index] = FMath::Clamp(InitialElevation, 0.0f, 1.0f);
+        }
+    }
+
+    const FHeightDistributionStats InitialRawStats = CalculateHeightDistributionStats(InitialRawHeights, SeaThreshold);
+
+    float DrySeedOceanBoost = 0.0f;
+    if (InitialRawStats.WaterPct < DrySeedMacroTriggerWaterPct
+        && InitialRawStats.Mean > SeaThreshold
+        && InitialRawStats.P50 > SeaThreshold)
+    {
+        const float WaterDeficitAlpha = FMath::Clamp(
+            (DrySeedMacroTriggerWaterPct - InitialRawStats.WaterPct) / 12.0f,
+            0.0f,
+            1.0f);
+        const float MeanHighAlpha = FMath::Clamp(
+            (InitialRawStats.Mean - SeaThreshold) / 0.14f,
+            0.0f,
+            1.0f);
+        const float MedianHighAlpha = FMath::Clamp(
+            (InitialRawStats.P50 - SeaThreshold) / 0.14f,
+            0.0f,
+            1.0f);
+
+        DrySeedOceanBoost = FMath::Clamp(
+            (WaterDeficitAlpha * 0.60f + MeanHighAlpha * 0.25f + MedianHighAlpha * 0.15f) * MaxDrySeedOceanBoost,
+            0.0f,
+            MaxDrySeedOceanBoost);
+    }
+
+    if (DrySeedOceanBoost > 0.0f)
+    {
+        UE_LOG(LogTemp, Log,
+            TEXT("[WorldGen] MacroBalance Step02 DrySeedOceanBoost=%.4f InitialWaterPct=%.1f InitialMean=%.3f InitialMedian=%.3f"),
+            DrySeedOceanBoost,
+            InitialRawStats.WaterPct,
+            InitialRawStats.Mean,
+            InitialRawStats.P50);
+    }
+
+    TArray<float> PreCalHeights;
+    PreCalHeights.SetNum(WorldTiles.Num());
+
+    for (int32 Y = 0; Y < GridHeight; ++Y)
+    {
+        for (int32 X = 0; X < GridWidth; ++X)
+        {
+            const int32 Index = TileIndex(X, Y);
+            const FStep02TileSample& Sample = TileSamples[Index];
+            FWorldTileData& Tile = WorldTiles[Index];
+
+            float BaseElevation = Sample.BaseElevation;
+            if (DrySeedOceanBoost > 0.0f)
+            {
+                const float ChannelMask = FMath::SmoothStep(
+                    DryBoostChannelMaskStart,
+                    DryBoostChannelMaskEnd,
+                    FMath::Max(Sample.ChannelADepth, Sample.ChannelBDepth));
+                const float LowlandMask = 1.0f - FMath::SmoothStep(
+                    DryBoostLowlandMaskStart,
+                    DryBoostLowlandMaskEnd,
+                    BaseElevation);
+                const float InteriorMask = 1.0f - Sample.EdgeFade * 0.35f;
+                const float OceanMask = FMath::Clamp(
+                    ChannelMask * 0.70f + LowlandMask * 0.30f,
+                    0.0f,
+                    1.0f) * InteriorMask;
+
+                BaseElevation = FMath::Max(0.0f, BaseElevation - DrySeedOceanBoost * OceanMask);
+            }
+
+            float Elevation = BaseElevation;
             if (Elevation > SeaThreshold)
             {
                 const float CoastalFade = FMath::Clamp(
                     (Elevation - SeaThreshold) / 0.15f, 0.0f, 1.0f);
-                Elevation += RidgeVal * 0.10f * CoastalFade;
+                Elevation += Sample.RidgeVal * 0.10f * CoastalFade;
 
-                if (RidgeVal > 0.78f && CoastalFade > 0.3f)
+                if (Sample.RidgeVal > 0.78f && CoastalFade > 0.3f)
                 {
                     VolcanicHotspots.Add(FIntPoint(X, Y));
                 }
@@ -408,20 +814,156 @@ void UWorldGenPipeline::Step02_GenerateHeightmap()
             Tile.Elevation = FMath::Clamp(Elevation, 0.0f, 1.0f);
             Tile.Temperature = 0.5f;
             Tile.Rainfall = 0.5f;
+            PreCalHeights[Index] = Tile.Elevation;
         }
     }
 
-    // ── Diagnostic: count water tiles ──
-    int32 WaterCount = 0;
-    for (const FWorldTileData& Tile : WorldTiles)
+    const FHeightDistributionStats RawHeightStats = CalculateHeightDistributionStats(PreCalHeights, SeaThreshold);
+    UE_LOG(LogTemp, Log,
+        TEXT("[WorldGen] HeightDist Step02 Raw Mean=%.3f P10=%.3f P25=%.3f P50=%.3f P75=%.3f P90=%.3f Sea=%.3f WaterPct=%.1f"),
+        RawHeightStats.Mean,
+        RawHeightStats.P10,
+        RawHeightStats.P25,
+        RawHeightStats.P50,
+        RawHeightStats.P75,
+        RawHeightStats.P90,
+        SeaThreshold,
+        RawHeightStats.WaterPct);
+
+    if (RawHeightStats.WaterPct < RawExtremeDryWarningWaterPct)
     {
-        if (Tile.Elevation < SeaThreshold) ++WaterCount;
+        UE_LOG(LogTemp, Warning,
+            TEXT("[WorldGen] WARNING: Raw Step02 extremely dry before calibration. WaterPct=%.1f MeanElev=%.3f Median=%.3f"),
+            RawHeightStats.WaterPct,
+            RawHeightStats.Mean,
+            RawHeightStats.P50);
+    }
+
+    if (RawHeightStats.WaterPct > RawExtremeWetWarningWaterPct)
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[WorldGen] WARNING: Raw Step02 extremely wet before calibration. WaterPct=%.1f MeanElev=%.3f Median=%.3f"),
+            RawHeightStats.WaterPct,
+            RawHeightStats.Mean,
+            RawHeightStats.P50);
+    }
+
+    const FWaterBalanceStats PreCalStats = CalculateWaterBalanceStats(WorldTiles, SeaThreshold);
+    UE_LOG(LogTemp, Log,
+        TEXT("[WorldGen] WaterBalance Step02 PreCal WaterPct=%.1f LandPct=%.1f"),
+        PreCalStats.WaterPct,
+        PreCalStats.LandPct);
+
+    // ── Pass 1 ──
+    // Good seeds (30–45% water) receive no offset.
+    // Severe-dry seeds (<25%) get an enlarged dry cap to make a stronger first correction.
+    float Pass1Offset = 0.0f;
+    const TCHAR* Pass1Reason = TEXT("InRange");
+
+    const bool bSevereDry = (PreCalStats.WaterPct * 0.01f) < SevereDryThreshold;
+    const float EffectiveDryCap = bSevereDry ? DryMaxCalibrationOffset : WetMaxCalibrationOffset;
+
+    if (PreCalStats.WaterPct < (MinWaterRatio * 100.0f))
+    {
+        const float Delta = MinWaterRatio - (PreCalStats.WaterPct * 0.01f);
+        Pass1Offset = -FMath::Clamp(Delta * CalibrationStrength, 0.0f, EffectiveDryCap);
+        Pass1Reason = bSevereDry ? TEXT("SevereDry") : TEXT("TooDry");
+    }
+    else if (PreCalStats.WaterPct > (MaxWaterRatio * 100.0f))
+    {
+        const float Delta = (PreCalStats.WaterPct * 0.01f) - MaxWaterRatio;
+        Pass1Offset = FMath::Clamp(Delta * CalibrationStrength, 0.0f, WetMaxCalibrationOffset);
+        Pass1Reason = TEXT("TooWet");
+    }
+
+    const bool bPass1Applied = !FMath::IsNearlyZero(Pass1Offset, KINDA_SMALL_NUMBER);
+    if (bPass1Applied)
+    {
+        for (FWorldTileData& Tile : WorldTiles)
+        {
+            Tile.Elevation = FMath::Clamp(Tile.Elevation + Pass1Offset, 0.0f, 1.0f);
+        }
+    }
+
+    const FWaterBalanceStats PostPass1Stats = CalculateWaterBalanceStats(WorldTiles, SeaThreshold);
+    UE_LOG(LogTemp, Log,
+        TEXT("[WorldGen] WaterBalance Calibration Pass1 Applied=%s Offset=%.4f Reason=%s"),
+        bPass1Applied ? TEXT("true") : TEXT("false"),
+        Pass1Offset,
+        Pass1Reason);
+    UE_LOG(LogTemp, Log,
+        TEXT("[WorldGen] WaterBalance Step02 PostCal WaterPct=%.1f LandPct=%.1f"),
+        PostPass1Stats.WaterPct,
+        PostPass1Stats.LandPct);
+
+    // ── Pass 2 — smaller nudge if still outside target after Pass 1 ──
+    // Dry correction is full SecondPassStrength; wet correction is deliberately more conservative.
+    float Pass2Offset = 0.0f;
+    const TCHAR* Pass2Reason = TEXT("Skipped");
+
+    if (PostPass1Stats.WaterPct < (MinWaterRatio * 100.0f))
+    {
+        const float RemainingDelta = MinWaterRatio - (PostPass1Stats.WaterPct * 0.01f);
+        Pass2Offset = -FMath::Clamp(RemainingDelta * SecondPassStrength, 0.0f, MaxSecondPassOffset);
+        Pass2Reason = TEXT("StillDry");
+    }
+    else if (PostPass1Stats.WaterPct > (MaxWaterRatio * 100.0f))
+    {
+        const float RemainingDelta = (PostPass1Stats.WaterPct * 0.01f) - MaxWaterRatio;
+        Pass2Offset = FMath::Clamp(RemainingDelta * SecondPassStrength * 0.5f, 0.0f, MaxSecondPassOffset * 0.5f);
+        Pass2Reason = TEXT("StillWet");
+    }
+
+    const bool bPass2Applied = !FMath::IsNearlyZero(Pass2Offset, KINDA_SMALL_NUMBER);
+    if (bPass2Applied)
+    {
+        for (FWorldTileData& Tile : WorldTiles)
+        {
+            Tile.Elevation = FMath::Clamp(Tile.Elevation + Pass2Offset, 0.0f, 1.0f);
+        }
+    }
+
+    const FWaterBalanceStats PostCalStats = CalculateWaterBalanceStats(WorldTiles, SeaThreshold);
+    UE_LOG(LogTemp, Log,
+        TEXT("[WorldGen] WaterBalance Calibration Pass2 Applied=%s Offset=%.4f Reason=%s"),
+        bPass2Applied ? TEXT("true") : TEXT("false"),
+        Pass2Offset,
+        Pass2Reason);
+
+    const float TotalCalOffset = Pass1Offset + Pass2Offset;
+    UE_LOG(LogTemp, Log,
+        TEXT("[WorldGen] WaterBalance Step02 FinalCal WaterPct=%.1f LandPct=%.1f TotalOffset=%.4f Target=%.1f"),
+        PostCalStats.WaterPct,
+        PostCalStats.LandPct,
+        TotalCalOffset,
+        TargetWaterRatio * 100.0f);
+
+    if (PostCalStats.WaterPct < DryWarningWaterPct)
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[WorldGen] WARNING: World still too dry after calibration. WaterPct=%.1f"),
+            PostCalStats.WaterPct);
+    }
+
+    if (PostCalStats.WaterPct > WetWarningWaterPct)
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[WorldGen] WARNING: World still too wet after calibration. WaterPct=%.1f"),
+            PostCalStats.WaterPct);
     }
 
     UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step02 done. Water=%d (%d%%) Land=%d (%d%%) VolcanicHotspots=%d"),
-        WaterCount, WorldTiles.Num() > 0 ? WaterCount * 100 / WorldTiles.Num() : 0,
-        WorldTiles.Num() - WaterCount, WorldTiles.Num() > 0 ? (WorldTiles.Num() - WaterCount) * 100 / WorldTiles.Num() : 0,
+        PostCalStats.WaterCount, FMath::RoundToInt(PostCalStats.WaterPct),
+        PostCalStats.LandCount, FMath::RoundToInt(PostCalStats.LandPct),
         VolcanicHotspots.Num());
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[WorldGen] WaterBalance Step02 SeaLevel=%.3f HeightBias=%.3f ContinentBias=%.3f WaterPct=%.1f LandPct=%.1f"),
+        SeaThreshold,
+        LandBias,
+        LandPower,
+        PostCalStats.WaterPct,
+        PostCalStats.LandPct);
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -525,7 +1067,8 @@ void UWorldGenPipeline::Step03_RunTectonics()
                 FVector2D(float(X), float(Y)), MountainRanges, Settings.FalloffSharpness);
             Elevation += MountainContribution * 1.5f; // v3.0 was 1.0
 
-            Tile.Elevation = FMath::Clamp(Elevation, 0.0f, 1.0f);
+            // Keep tectonic valley/basin shaping from converting established land into open sea.
+            Tile.Elevation = FMath::Clamp(Elevation, 0.48f, 1.0f);
         }
     }
 
@@ -593,118 +1136,619 @@ void UWorldGenPipeline::Step03_RunTectonics()
     }
 
     // ── Phase D: River generation ──
-    // Trace downhill paths from high-elevation land tiles.
-    // Rivers depress elevation slightly and are marked via WaterDepth > 0.
+    // Build longer outlet-seeking rivers with tributary merges and simple flow accumulation.
     {
         const int32 MaxRiverSources = FMath::Clamp(GridWidth / 8, 8, 64);
-        const float RiverSourceMinElev = 0.70f;
-        const float RiverDepression = 0.03f;
-        const float RiverMinSpacing = GridWidth * 0.06f;
+        const int32 DrainageSearchRadius = FMath::Clamp(GridWidth / 64, 8, 16);
+        const int32 MinRiverLengthTiles = (GridWidth >= 1024) ? 24 : ((GridWidth >= 512) ? 16 : ((GridWidth >= 256) ? 12 : 8));
+        const int32 MaxRiverLengthTiles = FMath::Clamp(GridWidth * 2, 96, 4096);
+        const float RiverSourceMinElev = (GridWidth >= 1024) ? 0.74f : ((GridWidth >= 512) ? 0.72f : 0.70f);
+        const float RiverMinSpacing = GridWidth * 0.055f;
 
-        // Collect candidate sources (high elevation land)
-        TArray<FIntPoint> RiverSources;
+        TArray<float> RiverFlowUnits;
+        RiverFlowUnits.Init(0.0f, WorldTiles.Num());
+
+        TArray<int32> RiverLongestRun;
+        RiverLongestRun.Init(0, WorldTiles.Num());
+
+        TArray<int32> RiverDownstream;
+        RiverDownstream.Init(INDEX_NONE, WorldTiles.Num());
+
+        const auto EvaluateStepScore = [&](const FIntPoint& Current, const FIntPoint& Candidate, bool bUseTarget, const FIntPoint& Target) -> float
+        {
+            if (!IsInGrid(Candidate, GridWidth, GridHeight))
+            {
+                return -MAX_flt;
+            }
+
+            const int32 CurrentIdx = TileIndex(Current.X, Current.Y);
+            const int32 CandidateIdx = TileIndex(Candidate.X, Candidate.Y);
+            const FWorldTileData& CurrentTile = WorldTiles[CurrentIdx];
+            const FWorldTileData& CandidateTile = WorldTiles[CandidateIdx];
+
+            const bool bExistingRiver = RiverFlowUnits[CandidateIdx] > 0.0f;
+            const bool bLakeOutlet = CandidateTile.WaterDepth >= Step03RiverLakeDepthThreshold;
+            const bool bSeaOutlet = CandidateTile.Elevation < Step03SeaThreshold;
+            const bool bCoastalOutlet = IsCoastalRiverOutlet(Candidate, WorldTiles, GridWidth, GridHeight);
+
+            if (!bExistingRiver && !bLakeOutlet && !bSeaOutlet && !bCoastalOutlet
+                && IsVolcanicRiverBlocked(Candidate, Volcanoes))
+            {
+                return -MAX_flt;
+            }
+
+            const float ElevationDelta = CurrentTile.Elevation - CandidateTile.Elevation;
+            const float Uphill = FMath::Max(0.0f, CandidateTile.Elevation - CurrentTile.Elevation);
+            if (Uphill > Step03RiverMinorUphillAllowance
+                && !bExistingRiver && !bLakeOutlet && !bSeaOutlet && !bCoastalOutlet)
+            {
+                return -MAX_flt;
+            }
+
+            float Score = ElevationDelta * 22.0f;
+            Score -= Uphill * 70.0f;
+            Score -= (Candidate.X != Current.X && Candidate.Y != Current.Y) ? 0.15f : 0.0f;
+
+            if (bExistingRiver)
+            {
+                Score += 12.0f;
+            }
+            if (bLakeOutlet)
+            {
+                Score += 8.0f;
+            }
+            if (bCoastalOutlet)
+            {
+                Score += 9.0f;
+            }
+            if (bSeaOutlet)
+            {
+                Score += 14.0f;
+            }
+
+            if (bUseTarget)
+            {
+                const FVector2D CurrentPos(static_cast<float>(Current.X), static_cast<float>(Current.Y));
+                const FVector2D CandidatePos(static_cast<float>(Candidate.X), static_cast<float>(Candidate.Y));
+                const FVector2D TargetPos(static_cast<float>(Target.X), static_cast<float>(Target.Y));
+                const float Progress = FVector2D::Distance(CurrentPos, TargetPos) - FVector2D::Distance(CandidatePos, TargetPos);
+                Score += Progress * 10.0f;
+                if (Candidate == Target)
+                {
+                    Score += 8.0f;
+                }
+            }
+
+            return Score;
+        };
+
+        const auto FindDrainageTarget = [&](const FIntPoint& Current, const TSet<int32>& Visited, int32 SearchRadius) -> FDrainageSearchResult
+        {
+            FDrainageSearchResult Result;
+            const int32 CurrentIdx = TileIndex(Current.X, Current.Y);
+            const float CurrentElevation = WorldTiles[CurrentIdx].Elevation;
+            float BestScore = -MAX_flt;
+
+            for (int32 DY = -SearchRadius; DY <= SearchRadius; ++DY)
+            {
+                for (int32 DX = -SearchRadius; DX <= SearchRadius; ++DX)
+                {
+                    if (DX == 0 && DY == 0)
+                    {
+                        continue;
+                    }
+
+                    if ((DX * DX + DY * DY) > (SearchRadius * SearchRadius))
+                    {
+                        continue;
+                    }
+
+                    const FIntPoint Candidate(Current.X + DX, Current.Y + DY);
+                    if (!IsInGrid(Candidate, GridWidth, GridHeight))
+                    {
+                        continue;
+                    }
+
+                    const int32 CandidateIdx = TileIndex(Candidate.X, Candidate.Y);
+                    if (Visited.Contains(CandidateIdx) && RiverFlowUnits[CandidateIdx] <= 0.0f)
+                    {
+                        continue;
+                    }
+
+                    const FWorldTileData& CandidateTile = WorldTiles[CandidateIdx];
+                    const bool bExistingRiver = RiverFlowUnits[CandidateIdx] > 0.0f;
+                    const bool bLakeOutlet = CandidateTile.WaterDepth >= Step03RiverLakeDepthThreshold;
+                    const bool bSeaOutlet = CandidateTile.Elevation < Step03SeaThreshold;
+                    const bool bCoastalOutlet = IsCoastalRiverOutlet(Candidate, WorldTiles, GridWidth, GridHeight);
+                    const bool bLowerGround = CandidateTile.Elevation + 0.005f < CurrentElevation;
+
+                    if (!bExistingRiver && !bLakeOutlet && !bSeaOutlet && !bCoastalOutlet && !bLowerGround)
+                    {
+                        continue;
+                    }
+
+                    if (!bExistingRiver && !bLakeOutlet && !bSeaOutlet && !bCoastalOutlet
+                        && IsVolcanicRiverBlocked(Candidate, Volcanoes))
+                    {
+                        continue;
+                    }
+
+                    const float Uphill = FMath::Max(0.0f, CandidateTile.Elevation - CurrentElevation);
+                    if (Uphill > Step03RiverMinorUphillAllowance * 1.5f
+                        && !bExistingRiver && !bLakeOutlet && !bSeaOutlet && !bCoastalOutlet)
+                    {
+                        continue;
+                    }
+
+                    float Score = (CurrentElevation - CandidateTile.Elevation) * 12.0f;
+                    Score -= Uphill * 40.0f;
+                    Score -= FMath::Sqrt(static_cast<float>(DX * DX + DY * DY)) * 0.35f;
+
+                    FString Reason = TEXT("LowerGround");
+                    if (bExistingRiver)
+                    {
+                        Score += 12.0f;
+                        Reason = TEXT("ExistingRiver");
+                    }
+                    else if (bLakeOutlet)
+                    {
+                        Score += 10.0f;
+                        Reason = TEXT("Lake");
+                    }
+                    else if (bCoastalOutlet)
+                    {
+                        Score += 9.0f;
+                        Reason = TEXT("Coast");
+                    }
+                    else if (bSeaOutlet)
+                    {
+                        Score += 8.0f;
+                        Reason = TEXT("Sea");
+                    }
+                    else
+                    {
+                        Score += 3.0f;
+                    }
+
+                    if (Score > BestScore)
+                    {
+                        BestScore = Score;
+                        Result.bFound = true;
+                        Result.Target = Candidate;
+                        Result.Reason = Reason;
+                    }
+                }
+            }
+
+            return Result;
+        };
+
+        FRiverSourceDiagnostics SourceDiagnostics;
+        TArray<FRiverSourceCandidate> SourceCandidates;
+        SourceCandidates.Reserve(GridWidth * GridHeight / 8);
+
         for (int32 Y = 2; Y < GridHeight - 2; ++Y)
         {
             for (int32 X = 2; X < GridWidth - 2; ++X)
             {
+                const FIntPoint SourcePoint(X, Y);
                 const FWorldTileData& Tile = WorldTiles[TileIndex(X, Y)];
-                if (Tile.Elevation >= RiverSourceMinElev)
+                if (Tile.Elevation < RiverSourceMinElev)
                 {
-                    RiverSources.Add(FIntPoint(X, Y));
+                    continue;
                 }
+
+                ++SourceDiagnostics.SourceCandidates;
+
+                if (Tile.Elevation < Step03SeaThreshold || Tile.WaterDepth >= Step03RiverLakeDepthThreshold)
+                {
+                    ++SourceDiagnostics.RejectedWater;
+                    continue;
+                }
+
+                if (IsVolcanicRiverBlocked(SourcePoint, Volcanoes))
+                {
+                    ++SourceDiagnostics.RejectedBiome;
+                    continue;
+                }
+
+                int32 LowerNeighborCount = 0;
+                int32 NeighborCount = 0;
+                float NeighborElevationSum = 0.0f;
+                float MinNeighborElevation = Tile.Elevation;
+                float MaxNeighborElevation = Tile.Elevation;
+
+                for (const FIntPoint& Offset : GRiverNeighborOffsets)
+                {
+                    const FIntPoint Neighbor(X + Offset.X, Y + Offset.Y);
+                    if (!IsInGrid(Neighbor, GridWidth, GridHeight))
+                    {
+                        continue;
+                    }
+
+                    const float NeighborElevation = WorldTiles[TileIndex(Neighbor.X, Neighbor.Y)].Elevation;
+                    ++NeighborCount;
+                    NeighborElevationSum += NeighborElevation;
+                    MinNeighborElevation = FMath::Min(MinNeighborElevation, NeighborElevation);
+                    MaxNeighborElevation = FMath::Max(MaxNeighborElevation, NeighborElevation);
+
+                    if (NeighborElevation < Tile.Elevation - 0.002f)
+                    {
+                        ++LowerNeighborCount;
+                    }
+                }
+
+                const bool bHasDirectDrainage = LowerNeighborCount > 0;
+                const TSet<int32> EmptyVisited;
+                const FDrainageSearchResult SourceDrainage = bHasDirectDrainage
+                    ? FDrainageSearchResult()
+                    : FindDrainageTarget(SourcePoint, EmptyVisited, DrainageSearchRadius + 2);
+
+                if (!bHasDirectDrainage && !SourceDrainage.bFound)
+                {
+                    ++SourceDiagnostics.RejectedNoDrainage;
+                    continue;
+                }
+
+                const float MeanNeighborElevation = NeighborCount > 0
+                    ? (NeighborElevationSum / static_cast<float>(NeighborCount))
+                    : Tile.Elevation;
+                const float LocalSlope = FMath::Max(0.0f, Tile.Elevation - MeanNeighborElevation);
+                const float LocalRelief = MaxNeighborElevation - MinNeighborElevation;
+
+                float SourceScore = Tile.Elevation * 0.30f;
+                SourceScore += LocalSlope * 6.0f;
+                SourceScore += LocalRelief * 4.0f;
+                SourceScore += static_cast<float>(LowerNeighborCount) * 0.12f;
+
+                if (Tile.Elevation > 0.92f && LowerNeighborCount <= 1)
+                {
+                    SourceScore -= 0.40f;
+                }
+                if (LocalRelief < 0.025f)
+                {
+                    SourceScore -= 0.30f;
+                }
+
+                FRiverSourceCandidate Candidate;
+                Candidate.Tile = SourcePoint;
+                Candidate.Score = SourceScore;
+                SourceCandidates.Add(Candidate);
             }
         }
 
-        // Shuffle and select spaced sources
-        for (int32 i = RiverSources.Num() - 1; i > 0; --i)
+        SourceCandidates.Sort([](const FRiverSourceCandidate& A, const FRiverSourceCandidate& B)
         {
-            const int32 j = RNGRef->NextInt(UWorldForgeRNG::BRANCH_TERRAIN, 0, i);
-            RiverSources.Swap(i, j);
-        }
+            return A.Score > B.Score;
+        });
 
         TArray<FIntPoint> SelectedSources;
-        for (const FIntPoint& Src : RiverSources)
+        for (const FRiverSourceCandidate& Candidate : SourceCandidates)
         {
-            if (SelectedSources.Num() >= MaxRiverSources) break;
+            if (SelectedSources.Num() >= MaxRiverSources)
+            {
+                break;
+            }
+
             bool bTooClose = false;
             for (const FIntPoint& Existing : SelectedSources)
             {
-                if (FVector2D::Distance(FVector2D(Src), FVector2D(Existing)) < RiverMinSpacing)
+                const FVector2D CandidatePos(static_cast<float>(Candidate.Tile.X), static_cast<float>(Candidate.Tile.Y));
+                const FVector2D ExistingPos(static_cast<float>(Existing.X), static_cast<float>(Existing.Y));
+                if (FVector2D::Distance(CandidatePos, ExistingPos) < RiverMinSpacing)
                 {
-                    bTooClose = true; break;
+                    bTooClose = true;
+                    break;
                 }
             }
-            if (!bTooClose) SelectedSources.Add(Src);
+
+            if (!bTooClose)
+            {
+                SelectedSources.Add(Candidate.Tile);
+            }
         }
 
-        // Trace each river downhill
+        SourceDiagnostics.Accepted = SelectedSources.Num();
+        UE_LOG(LogTemp, Log,
+            TEXT("[RiverGen] Source candidates=%d Accepted=%d RejectedNoDrainage=%d RejectedWater=%d RejectedBiome=%d"),
+            SourceDiagnostics.SourceCandidates,
+            SourceDiagnostics.Accepted,
+            SourceDiagnostics.RejectedNoDrainage,
+            SourceDiagnostics.RejectedWater,
+            SourceDiagnostics.RejectedBiome);
+
         int32 TotalRiverTiles = 0;
-        const int32 MaxRiverLength = GridWidth;
-        static const FIntPoint Neighbors[] = {
-            {-1, 0}, {1, 0}, {0, -1}, {0, 1},
-            {-1, -1}, {1, -1}, {-1, 1}, {1, 1}
-        };
 
         for (const FIntPoint& Source : SelectedSources)
         {
             FIntPoint Current = Source;
+            FIntPoint EndPoint = Source;
             TSet<int32> Visited;
+            TArray<int32> LocalPath;
+            LocalPath.Reserve(MinRiverLengthTiles * 2);
 
-            for (int32 Step = 0; Step < MaxRiverLength; ++Step)
+            ERiverOutletKind OutletKind = ERiverOutletKind::None;
+            int32 TerminalIndex = INDEX_NONE;
+            bool bMerged = false;
+            bool bLakeCreated = false;
+
+            for (int32 Step = 0; Step < MaxRiverLengthTiles; ++Step)
             {
-                const int32 CurIdx = TileIndex(Current.X, Current.Y);
-                if (Visited.Contains(CurIdx)) break;
-                Visited.Add(CurIdx);
+                const int32 CurrentIdx = TileIndex(Current.X, Current.Y);
+                EndPoint = Current;
 
-                FWorldTileData& CurTile = WorldTiles[CurIdx];
-
-                // Reached ocean — stop
-                if (CurTile.Elevation < 0.48f) break;
-
-                // Mark as river (small WaterDepth signals river presence)
-                CurTile.WaterDepth = FMath::Max(CurTile.WaterDepth, 0.05f);
-                CurTile.Elevation = FMath::Max(0.48f, CurTile.Elevation - RiverDepression);
-                ++TotalRiverTiles;
-
-                // Find lowest neighbor
-                float LowestElev = CurTile.Elevation;
-                FIntPoint LowestNeighbor = Current;
-                for (const FIntPoint& N : Neighbors)
+                if (Visited.Contains(CurrentIdx))
                 {
-                    const int32 NX = Current.X + N.X;
-                    const int32 NY = Current.Y + N.Y;
-                    if (NX < 0 || NX >= GridWidth || NY < 0 || NY >= GridHeight) continue;
-                    const float NElev = WorldTiles[TileIndex(NX, NY)].Elevation;
-                    if (NElev < LowestElev)
-                    {
-                        LowestElev = NElev;
-                        LowestNeighbor = FIntPoint(NX, NY);
-                    }
+                    OutletKind = ERiverOutletKind::Loop;
+                    break;
                 }
+                Visited.Add(CurrentIdx);
 
-                // If no downhill neighbor, break (local minimum = lake candidate)
-                if (LowestNeighbor == Current)
+                const FWorldTileData& CurrentTile = WorldTiles[CurrentIdx];
+                if (CurrentTile.Elevation < Step03SeaThreshold)
                 {
-                    // Create a small lake at the local minimum
-                    for (const FIntPoint& N : Neighbors)
-                    {
-                        const int32 NX = Current.X + N.X;
-                        const int32 NY = Current.Y + N.Y;
-                        if (NX >= 0 && NX < GridWidth && NY >= 0 && NY < GridHeight)
-                        {
-                            FWorldTileData& LakeTile = WorldTiles[TileIndex(NX, NY)];
-                            if (LakeTile.Elevation >= 0.48f && LakeTile.Elevation < 0.58f)
-                            {
-                                LakeTile.WaterDepth = FMath::Max(LakeTile.WaterDepth, 0.15f);
-                            }
-                        }
-                    }
-                    CurTile.WaterDepth = FMath::Max(CurTile.WaterDepth, 0.20f);
+                    OutletKind = ERiverOutletKind::Sea;
+                    TerminalIndex = CurrentIdx;
+                    break;
+                }
+                if (CurrentTile.WaterDepth >= Step03RiverLakeDepthThreshold)
+                {
+                    OutletKind = ERiverOutletKind::Lake;
+                    TerminalIndex = CurrentIdx;
+                    break;
+                }
+                if (RiverFlowUnits[CurrentIdx] > 0.0f)
+                {
+                    OutletKind = ERiverOutletKind::RiverMerge;
+                    TerminalIndex = CurrentIdx;
+                    bMerged = true;
+                    break;
+                }
+                if (IsCoastalRiverOutlet(Current, WorldTiles, GridWidth, GridHeight))
+                {
+                    LocalPath.Add(CurrentIdx);
+                    OutletKind = ERiverOutletKind::Coast;
+                    TerminalIndex = FindAdjacentSeaTileIndex(Current, WorldTiles, GridWidth, GridHeight);
                     break;
                 }
 
-                Current = LowestNeighbor;
+                LocalPath.Add(CurrentIdx);
+
+                float BestNaturalScore = -MAX_flt;
+                FIntPoint BestNaturalStep = Current;
+                bool bFoundNaturalStep = false;
+
+                for (const FIntPoint& Offset : GRiverNeighborOffsets)
+                {
+                    const FIntPoint Candidate(Current.X + Offset.X, Current.Y + Offset.Y);
+                    if (!IsInGrid(Candidate, GridWidth, GridHeight))
+                    {
+                        continue;
+                    }
+
+                    const int32 CandidateIdx = TileIndex(Candidate.X, Candidate.Y);
+                    if (Visited.Contains(CandidateIdx))
+                    {
+                        continue;
+                    }
+
+                    const FWorldTileData& CandidateTile = WorldTiles[CandidateIdx];
+                    const bool bOutletNeighbor =
+                        CandidateTile.Elevation < Step03SeaThreshold
+                        || CandidateTile.WaterDepth >= Step03RiverLakeDepthThreshold
+                        || RiverFlowUnits[CandidateIdx] > 0.0f
+                        || IsCoastalRiverOutlet(Candidate, WorldTiles, GridWidth, GridHeight);
+
+                    if (!bOutletNeighbor && CandidateTile.Elevation >= CurrentTile.Elevation - 0.001f)
+                    {
+                        continue;
+                    }
+
+                    const float Score = EvaluateStepScore(Current, Candidate, false, Source);
+                    if (Score > BestNaturalScore)
+                    {
+                        BestNaturalScore = Score;
+                        BestNaturalStep = Candidate;
+                        bFoundNaturalStep = true;
+                    }
+                }
+
+                if (bFoundNaturalStep)
+                {
+                    Current = BestNaturalStep;
+                    continue;
+                }
+
+                const int32 SearchRadius = (LocalPath.Num() < MinRiverLengthTiles)
+                    ? FMath::Min(DrainageSearchRadius + 4, 20)
+                    : DrainageSearchRadius;
+                const FDrainageSearchResult DrainageResult = FindDrainageTarget(Current, Visited, SearchRadius);
+
+                UE_LOG(LogTemp, Log,
+                    TEXT("[RiverGen] Drainage search Current=(%d,%d) Found=%s Target=(%d,%d) Reason=%s"),
+                    Current.X,
+                    Current.Y,
+                    DrainageResult.bFound ? TEXT("Yes") : TEXT("No"),
+                    DrainageResult.Target.X,
+                    DrainageResult.Target.Y,
+                    *DrainageResult.Reason);
+
+                if (DrainageResult.bFound)
+                {
+                    float BestTargetedScore = -MAX_flt;
+                    FIntPoint BestTargetedStep = Current;
+                    bool bFoundTargetedStep = false;
+
+                    for (const FIntPoint& Offset : GRiverNeighborOffsets)
+                    {
+                        const FIntPoint Candidate(Current.X + Offset.X, Current.Y + Offset.Y);
+                        if (!IsInGrid(Candidate, GridWidth, GridHeight))
+                        {
+                            continue;
+                        }
+
+                        const int32 CandidateIdx = TileIndex(Candidate.X, Candidate.Y);
+                        if (Visited.Contains(CandidateIdx))
+                        {
+                            continue;
+                        }
+
+                        const float Score = EvaluateStepScore(Current, Candidate, true, DrainageResult.Target);
+                        if (Score > BestTargetedScore)
+                        {
+                            BestTargetedScore = Score;
+                            BestTargetedStep = Candidate;
+                            bFoundTargetedStep = true;
+                        }
+                    }
+
+                    if (bFoundTargetedStep)
+                    {
+                        Current = BestTargetedStep;
+                        continue;
+                    }
+                }
+
+                const int32 LakeIndex = LocalPath.Pop(false);
+                EndPoint = FIntPoint(LakeIndex % GridWidth, LakeIndex / GridWidth);
+                TerminalIndex = LakeIndex;
+                OutletKind = ERiverOutletKind::LakeEndpoint;
+                bLakeCreated = true;
+                break;
             }
+
+            if ((OutletKind == ERiverOutletKind::None || OutletKind == ERiverOutletKind::Loop)
+                && !LocalPath.IsEmpty())
+            {
+                const int32 LakeIndex = LocalPath.Pop(false);
+                EndPoint = FIntPoint(LakeIndex % GridWidth, LakeIndex / GridWidth);
+                TerminalIndex = LakeIndex;
+                OutletKind = ERiverOutletKind::LakeEndpoint;
+                bLakeCreated = true;
+            }
+            else if (OutletKind == ERiverOutletKind::None)
+            {
+                OutletKind = ERiverOutletKind::MaxLength;
+            }
+
+            if (LocalPath.Num() < 2 && !bMerged)
+            {
+                UE_LOG(LogTemp, Log,
+                    TEXT("[RiverGen] River source=(%d,%d) End=(%d,%d) Length=%d Outlet=%s Merged=%s"),
+                    Source.X,
+                    Source.Y,
+                    EndPoint.X,
+                    EndPoint.Y,
+                    LocalPath.Num(),
+                    RiverOutletKindToString(OutletKind),
+                    bMerged ? TEXT("Yes") : TEXT("No"));
+                continue;
+            }
+
+            for (int32 PathStep = 0; PathStep < LocalPath.Num(); ++PathStep)
+            {
+                const int32 PathTileIdx = LocalPath[PathStep];
+                FWorldTileData& PathTile = WorldTiles[PathTileIdx];
+
+                if (RiverFlowUnits[PathTileIdx] <= KINDA_SMALL_NUMBER)
+                {
+                    PathTile.Elevation = FMath::Max(Step03SeaThreshold, PathTile.Elevation - Step03RiverChannelDepression);
+                }
+
+                RiverFlowUnits[PathTileIdx] += 1.0f;
+                RiverLongestRun[PathTileIdx] = FMath::Max(RiverLongestRun[PathTileIdx], PathStep + 1);
+                PathTile.WaterDepth = FMath::Max(
+                    PathTile.WaterDepth,
+                    ComputeRiverWaterDepth(RiverFlowUnits[PathTileIdx], RiverLongestRun[PathTileIdx]));
+
+                RiverDownstream[PathTileIdx] = (PathStep + 1 < LocalPath.Num())
+                    ? LocalPath[PathStep + 1]
+                    : TerminalIndex;
+            }
+
+            if (bMerged && TerminalIndex != INDEX_NONE)
+            {
+                int32 DownstreamIdx = TerminalIndex;
+                int32 DownstreamDistance = LocalPath.Num() + 1;
+                int32 Guard = 0;
+
+                while (WorldTiles.IsValidIndex(DownstreamIdx)
+                    && RiverFlowUnits[DownstreamIdx] > 0.0f
+                    && Guard < MaxRiverLengthTiles)
+                {
+                    RiverFlowUnits[DownstreamIdx] += 1.0f;
+                    RiverLongestRun[DownstreamIdx] = FMath::Max(RiverLongestRun[DownstreamIdx], DownstreamDistance);
+                    WorldTiles[DownstreamIdx].WaterDepth = FMath::Max(
+                        WorldTiles[DownstreamIdx].WaterDepth,
+                        ComputeRiverWaterDepth(RiverFlowUnits[DownstreamIdx], RiverLongestRun[DownstreamIdx]));
+
+                    const int32 NextDownstreamIdx = RiverDownstream[DownstreamIdx];
+                    if (NextDownstreamIdx == INDEX_NONE
+                        || NextDownstreamIdx == DownstreamIdx
+                        || !WorldTiles.IsValidIndex(NextDownstreamIdx))
+                    {
+                        break;
+                    }
+
+                    if (WorldTiles[NextDownstreamIdx].Elevation < Step03SeaThreshold
+                        || WorldTiles[NextDownstreamIdx].WaterDepth >= Step03RiverLakeDepthThreshold)
+                    {
+                        break;
+                    }
+
+                    DownstreamIdx = NextDownstreamIdx;
+                    ++DownstreamDistance;
+                    ++Guard;
+                }
+            }
+
+            if (bLakeCreated && WorldTiles.IsValidIndex(TerminalIndex))
+            {
+                FWorldTileData& LakeTile = WorldTiles[TerminalIndex];
+                LakeTile.WaterDepth = FMath::Max(LakeTile.WaterDepth, 0.18f);
+                LakeTile.Elevation = FMath::Max(Step03SeaThreshold, LakeTile.Elevation - 0.01f);
+
+                const FIntPoint LakePoint(TerminalIndex % GridWidth, TerminalIndex / GridWidth);
+                for (const FIntPoint& Offset : GRiverNeighborOffsets)
+                {
+                    const FIntPoint Neighbor(LakePoint.X + Offset.X, LakePoint.Y + Offset.Y);
+                    if (!IsInGrid(Neighbor, GridWidth, GridHeight))
+                    {
+                        continue;
+                    }
+
+                    const int32 NeighborIdx = TileIndex(Neighbor.X, Neighbor.Y);
+                    if (RiverFlowUnits[NeighborIdx] > 0.0f)
+                    {
+                        continue;
+                    }
+
+                    FWorldTileData& NeighborTile = WorldTiles[NeighborIdx];
+                    if (NeighborTile.Elevation < Step03SeaThreshold
+                        || NeighborTile.WaterDepth >= Step03RiverLakeDepthThreshold
+                        || IsVolcanicRiverBlocked(Neighbor, Volcanoes))
+                    {
+                        continue;
+                    }
+
+                    if (FMath::Abs(NeighborTile.Elevation - LakeTile.Elevation) < 0.025f)
+                    {
+                        NeighborTile.WaterDepth = FMath::Max(NeighborTile.WaterDepth, Step03RiverLakeDepthThreshold);
+                    }
+                }
+            }
+
+            TotalRiverTiles += LocalPath.Num();
+
+            UE_LOG(LogTemp, Log,
+                TEXT("[RiverGen] River source=(%d,%d) End=(%d,%d) Length=%d Outlet=%s Merged=%s"),
+                Source.X,
+                Source.Y,
+                EndPoint.X,
+                EndPoint.Y,
+                LocalPath.Num(),
+                RiverOutletKindToString(OutletKind),
+                bMerged ? TEXT("Yes") : TEXT("No"));
         }
 
         UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step03 Phase D: %d river sources, %d river tiles"),
@@ -839,6 +1883,11 @@ void UWorldGenPipeline::Step04_AssignBiomes()
     const float ShadowStrength = FMath::Clamp(WindConfig.RainShadowStrength, 0.0f, 1.0f);
     const float ShadowReach = FMath::Max(1.0f, WindConfig.RainShadowReach);
 
+    const float SeaThreshold = 0.48f;
+    const float DeepOceanThreshold = 0.30f;
+    const float OceanThreshold = 0.40f;
+    const float CoastalThreshold = 0.515f;
+
     const float TempOffX = RNGRef->NextFloatRange(UWorldForgeRNG::BRANCH_BIOME, -10000.f, 10000.f);
     const float TempOffY = RNGRef->NextFloatRange(UWorldForgeRNG::BRANCH_BIOME, -10000.f, 10000.f);
     const float RainOffX = RNGRef->NextFloatRange(UWorldForgeRNG::BRANCH_BIOME, -10000.f, 10000.f);
@@ -870,7 +1919,7 @@ void UWorldGenPipeline::Step04_AssignBiomes()
             for (int32 X = 0; X < GridWidth; ++X)
             {
                 FWorldTileData& Tile = WorldTiles[TileIndex(X, Y)];
-                if (Tile.Elevation < 0.48f) continue;
+                if (Tile.Elevation < SeaThreshold) continue;
 
                 float MaxUpwindElev = 0.0f;
                 float ClosestMountainDist = ShadowReach + 1.0f;
@@ -990,11 +2039,11 @@ void UWorldGenPipeline::Step04_AssignBiomes()
         FWorldTileData& Tile = WorldTiles[Idx];
 
         // ── Ocean biomes ──
-        if (Tile.Elevation < 0.30f)
+        if (Tile.Elevation < DeepOceanThreshold)
             Tile.BiomeType = DeepOceanTag;
-        else if (Tile.Elevation < 0.40f)
+        else if (Tile.Elevation < OceanThreshold)
             Tile.BiomeType = OceanTag;
-        else if (Tile.Elevation < 0.48f)
+        else if (Tile.Elevation < SeaThreshold)
             Tile.BiomeType = SeaTag;
 
         // ── Water feature overrides (must check before land biomes) ──
@@ -1022,7 +2071,7 @@ void UWorldGenPipeline::Step04_AssignBiomes()
         }
 
         // ── Coastal ──
-        else if (Tile.Elevation < 0.53f)
+        else if (Tile.Elevation < CoastalThreshold)
             Tile.BiomeType = CoastalTag;
 
         // ── Highland biomes ──
@@ -1205,43 +2254,394 @@ void UWorldGenPipeline::Step04_AssignBiomes()
     }
 
     // ── Diagnostic ──
-    int32 WaterCount = 0, LandCount = 0;
+    int32 DeepOceanCount = 0;
+    int32 OceanCount = 0;
+    int32 SeaCount = 0;
+    int32 CoastalCount = 0;
+    int32 LakeDiagCount = 0;
+    int32 RiverDiagCount = 0;
+
     for (const FWorldTileData& Tile : WorldTiles)
     {
-        const bool bWater = Tile.BiomeType.MatchesTag(DeepOceanTag) || Tile.BiomeType.MatchesTag(OceanTag) || Tile.BiomeType.MatchesTag(SeaTag);
-        if (bWater) ++WaterCount; else ++LandCount;
+        if (Tile.BiomeType.MatchesTag(DeepOceanTag)) ++DeepOceanCount;
+        else if (Tile.BiomeType.MatchesTag(OceanTag)) ++OceanCount;
+        else if (Tile.BiomeType.MatchesTag(SeaTag)) ++SeaCount;
+        else if (Tile.BiomeType.MatchesTag(CoastalTag)) ++CoastalCount;
+
+        if (LakeTag.IsValid() && Tile.BiomeType.MatchesTag(LakeTag)) ++LakeDiagCount;
+        if (RiverTag.IsValid() && Tile.BiomeType.MatchesTag(RiverTag)) ++RiverDiagCount;
     }
+
+    const int32 TotalTiles = WorldTiles.Num();
+    const int32 WaterCount = DeepOceanCount + OceanCount + SeaCount + LakeDiagCount + RiverDiagCount;
+    const int32 LandCount = FMath::Max(0, TotalTiles - WaterCount);
+    const float WaterPct = TotalTiles > 0 ? (static_cast<float>(WaterCount) * 100.0f) / static_cast<float>(TotalTiles) : 0.0f;
+    const float LandPct = TotalTiles > 0 ? (static_cast<float>(LandCount) * 100.0f) / static_cast<float>(TotalTiles) : 0.0f;
 
     UE_LOG(LogTemp, Log,
         TEXT("[WorldGen] Step04 done. Water=%d (%d%%) Land=%d (%d%%) Rivers=%d Lakes=%d Canyons=%d Lava=%d"),
-        WaterCount, WorldTiles.Num() > 0 ? WaterCount * 100 / WorldTiles.Num() : 0,
-        LandCount, WorldTiles.Num() > 0 ? LandCount * 100 / WorldTiles.Num() : 0,
+        WaterCount, FMath::RoundToInt(WaterPct),
+        LandCount, FMath::RoundToInt(LandPct),
         RiverCount, LakeCount, CanyonCount, LavaCount);
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[WorldGen] WaterBalance Step04 WaterPct=%.1f LandPct=%.1f DeepOcean=%d Ocean=%d Sea=%d Coast=%d Lake=%d River=%d Land=%d"),
+        WaterPct,
+        LandPct,
+        DeepOceanCount,
+        OceanCount,
+        SeaCount,
+        CoastalCount,
+        LakeDiagCount,
+        RiverDiagCount,
+        LandCount);
+
+    if (WaterPct > 55.0f)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[WorldGen] WARNING: Water-heavy world generated. WaterPct=%.1f"), WaterPct);
+    }
+
+    if (LandPct < 40.0f)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[WorldGen] WARNING: Low playable land. LandPct=%.1f"), LandPct);
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════
 // STEPS 05–16 (unchanged)
 // ════════════════════════════════════════════════════════════════════
 
-void UWorldGenPipeline::Step05_InitVoxelChunks()
+// ════════════════════════════════════════════════════════════════════
+// LAKE-DESCRIPTOR-QUALITY-01: BuildLakeBasins
+//
+// Diagnose every WaterDepth-derived basin candidate after Step04 biome
+// assignment, then accept only real inland multi-tile lake basins for
+// Step05 handoff. This keeps candidate diagnostics visible without
+// letting 1-tile lava/volcanic/lake artifacts reach the terrain snapshot.
+// ════════════════════════════════════════════════════════════════════
+
+void UWorldGenPipeline::BuildLakeBasins()
+{
+    LakeBasins.Reset();
+
+    if (WorldTiles.IsEmpty() || GridWidth <= 0 || GridHeight <= 0)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[LakeFix] BuildLakeBasins: no tile data — skipping."));
+        return;
+    }
+
+    constexpr float WaterThreshold = 0.48f;
+    constexpr float LakeWaterDepthThreshold = 0.15f;
+    constexpr int32 MinGeneratedLakeBasinTiles = 3;
+    constexpr int32 MinGeneratedLakeBasinWidthTiles = 2;
+    constexpr int32 MinGeneratedLakeBasinHeightTiles = 2;
+    constexpr int32 MaxLoggedCandidateBasins = 20;
+
+    const FGameplayTag DeepOceanTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.DeepOcean")), false);
+    const FGameplayTag OceanTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Ocean")), false);
+    const FGameplayTag SeaTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Sea")), false);
+    const FGameplayTag CoastalTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Coastal")), false);
+    const FGameplayTag RiverTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.River")), false);
+    const FGameplayTag LakeTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Lake")), false);
+    const FGameplayTag VolcanicTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Volcanic")), false);
+    const FGameplayTag LavaTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Lava")), false);
+
+    struct FLakeBasinQualitySummary
+    {
+        int32 CandidateBasins = 0;
+        int32 Accepted = 0;
+        int32 RejectedSmall = 0;
+        int32 RejectedBiome = 0;
+        int32 RejectedOcean = 0;
+        int32 RejectedInvalid = 0;
+        int32 FinalLakeTiles = 0;
+    };
+
+    const auto IsOceanLikeBiome = [&](const FGameplayTag& BiomeTag) -> bool
+    {
+        return (DeepOceanTag.IsValid() && BiomeTag.MatchesTag(DeepOceanTag))
+            || (OceanTag.IsValid() && BiomeTag.MatchesTag(OceanTag))
+            || (SeaTag.IsValid() && BiomeTag.MatchesTag(SeaTag))
+            || (CoastalTag.IsValid() && BiomeTag.MatchesTag(CoastalTag));
+    };
+
+    const auto IsPotentialLakeCandidate = [&](const FWorldTileData& Tile) -> bool
+    {
+        return Tile.WaterDepth >= LakeWaterDepthThreshold && Tile.Elevation >= WaterThreshold;
+    };
+
+    const int32 TileCount = GridWidth * GridHeight;
+    TArray<bool> Visited;
+    Visited.SetNumZeroed(TileCount);
+
+    FLakeBasinQualitySummary Summary;
+    int32 NextAcceptedBasinID = 0;
+    int32 LoggedCandidates = 0;
+
+    TArray<FIntPoint> Queue;
+    Queue.Reserve(256);
+
+    TArray<FIntPoint> BasinCells;
+    BasinCells.Reserve(256);
+
+    for (int32 StartY = 0; StartY < GridHeight; ++StartY)
+    {
+        for (int32 StartX = 0; StartX < GridWidth; ++StartX)
+        {
+            const int32 StartIdx = StartY * GridWidth + StartX;
+            if (Visited[StartIdx])
+            {
+                continue;
+            }
+
+            const FWorldTileData& StartTile = WorldTiles[StartIdx];
+            if (!IsPotentialLakeCandidate(StartTile))
+            {
+                Visited[StartIdx] = true;
+                continue;
+            }
+
+            const int32 CandidateBasinID = Summary.CandidateBasins++;
+
+            FLakeBasinData Basin;
+            Basin.MinTileX = StartX;
+            Basin.MaxTileX = StartX;
+            Basin.MinTileY = StartY;
+            Basin.MaxTileY = StartY;
+
+            BasinCells.Reset();
+
+            int64 SumX = 0;
+            int64 SumY = 0;
+            float SumElevation = 0.0f;
+            int32 LakeBiomeTileCount = 0;
+            bool bHasVolcanicBiome = false;
+            bool bHasLavaBiome = false;
+            bool bHasOceanLikeBiome = false;
+
+            Queue.Reset();
+            Queue.Add(FIntPoint(StartX, StartY));
+            Visited[StartIdx] = true;
+
+            int32 Head = 0;
+            while (Head < Queue.Num())
+            {
+                const FIntPoint Current = Queue[Head++];
+                const int32 Idx = Current.Y * GridWidth + Current.X;
+                const FWorldTileData& CurrentTile = WorldTiles[Idx];
+
+                BasinCells.Add(Current);
+                ++Basin.TileCount;
+                SumX += Current.X;
+                SumY += Current.Y;
+                SumElevation += CurrentTile.Elevation;
+
+                if (LakeTag.IsValid() && CurrentTile.BiomeType.MatchesTag(LakeTag))
+                {
+                    ++LakeBiomeTileCount;
+                }
+                if (VolcanicTag.IsValid() && CurrentTile.BiomeType.MatchesTag(VolcanicTag))
+                {
+                    bHasVolcanicBiome = true;
+                }
+                if (LavaTag.IsValid() && CurrentTile.BiomeType.MatchesTag(LavaTag))
+                {
+                    bHasLavaBiome = true;
+                }
+                if (IsOceanLikeBiome(CurrentTile.BiomeType))
+                {
+                    bHasOceanLikeBiome = true;
+                }
+
+                Basin.MinTileX = FMath::Min(Basin.MinTileX, Current.X);
+                Basin.MaxTileX = FMath::Max(Basin.MaxTileX, Current.X);
+                Basin.MinTileY = FMath::Min(Basin.MinTileY, Current.Y);
+                Basin.MaxTileY = FMath::Max(Basin.MaxTileY, Current.Y);
+
+                const int32 Neighbors[4][2] = { { -1, 0 }, { 1, 0 }, { 0, -1 }, { 0, 1 } };
+                for (const auto& Neighbor : Neighbors)
+                {
+                    const int32 NX = Current.X + Neighbor[0];
+                    const int32 NY = Current.Y + Neighbor[1];
+                    if (NX < 0 || NX >= GridWidth || NY < 0 || NY >= GridHeight)
+                    {
+                        continue;
+                    }
+
+                    const int32 NeighborIdx = NY * GridWidth + NX;
+                    if (Visited[NeighborIdx])
+                    {
+                        continue;
+                    }
+
+                    Visited[NeighborIdx] = true;
+                    if (IsPotentialLakeCandidate(WorldTiles[NeighborIdx]))
+                    {
+                        Queue.Add(FIntPoint(NX, NY));
+                    }
+                }
+            }
+
+            if (Basin.TileCount <= 0 || BasinCells.Num() == 0)
+            {
+                ++Summary.RejectedInvalid;
+                continue;
+            }
+
+            const FVector2D Centroid(
+                static_cast<float>(SumX) / static_cast<float>(Basin.TileCount),
+                static_cast<float>(SumY) / static_cast<float>(Basin.TileCount));
+
+            FIntPoint CenterCell = BasinCells[0];
+            float BestDistSq = MAX_flt;
+            for (const FIntPoint& Cell : BasinCells)
+            {
+                const float DX = static_cast<float>(Cell.X) - Centroid.X;
+                const float DY = static_cast<float>(Cell.Y) - Centroid.Y;
+                const float DistSq = DX * DX + DY * DY;
+                if (DistSq < BestDistSq)
+                {
+                    BestDistSq = DistSq;
+                    CenterCell = Cell;
+                }
+            }
+
+            Basin.CenterTileX = CenterCell.X;
+            Basin.CenterTileY = CenterCell.Y;
+            Basin.WaterSurfaceElevation01 = SumElevation / static_cast<float>(Basin.TileCount);
+            Basin.FloorElevation01 = FMath::Max(0.0f, Basin.WaterSurfaceElevation01 - 0.02f);
+            Basin.ShoreFalloffTiles = 2.0f;
+            Basin.SourceType = 1; // BasinNoise / generic inland water candidate
+
+            const int32 BasinWidthTiles = Basin.MaxTileX - Basin.MinTileX + 1;
+            const int32 BasinHeightTiles = Basin.MaxTileY - Basin.MinTileY + 1;
+            const FGameplayTag CenterBiome = WorldTiles[TileIndex(Basin.CenterTileX, Basin.CenterTileY)].BiomeType;
+
+            bool bAccepted = true;
+            FString Reason = TEXT("Accepted");
+
+            if (!FMath::IsFinite(Basin.WaterSurfaceElevation01)
+                || !FMath::IsFinite(Basin.FloorElevation01)
+                || Basin.WaterSurfaceElevation01 < WaterThreshold
+                || Basin.WaterSurfaceElevation01 > 1.0f
+                || Basin.FloorElevation01 > Basin.WaterSurfaceElevation01)
+            {
+                bAccepted = false;
+                Reason = TEXT("InvalidWaterElevation");
+                ++Summary.RejectedInvalid;
+            }
+            else if (IsOceanLikeBiome(CenterBiome) || bHasOceanLikeBiome)
+            {
+                bAccepted = false;
+                Reason = TEXT("OceanOrCoastal");
+                ++Summary.RejectedOcean;
+            }
+            else if ((LavaTag.IsValid() && CenterBiome.MatchesTag(LavaTag))
+                || (VolcanicTag.IsValid() && CenterBiome.MatchesTag(VolcanicTag))
+                || bHasLavaBiome
+                || bHasVolcanicBiome)
+            {
+                bAccepted = false;
+                Reason = bHasLavaBiome ? TEXT("LavaBiome") : TEXT("VolcanicBiome");
+                ++Summary.RejectedBiome;
+            }
+            else if ((RiverTag.IsValid() && CenterBiome.MatchesTag(RiverTag))
+                || !LakeTag.IsValid()
+                || !CenterBiome.MatchesTag(LakeTag)
+                || LakeBiomeTileCount != Basin.TileCount)
+            {
+                bAccepted = false;
+                Reason = TEXT("NotLakeLike");
+                ++Summary.RejectedBiome;
+            }
+            else if (Basin.TileCount < MinGeneratedLakeBasinTiles)
+            {
+                bAccepted = false;
+                Reason = TEXT("TooSmall");
+                ++Summary.RejectedSmall;
+            }
+            else if (BasinWidthTiles < MinGeneratedLakeBasinWidthTiles || BasinHeightTiles < MinGeneratedLakeBasinHeightTiles)
+            {
+                Reason = TEXT("ThinExtentNotEnforced");
+            }
+
+            if (bAccepted)
+            {
+                Basin.BasinID = NextAcceptedBasinID++;
+                LakeBasins.Add(Basin);
+                ++Summary.Accepted;
+                Summary.FinalLakeTiles += Basin.TileCount;
+            }
+
+            if (LoggedCandidates < MaxLoggedCandidateBasins)
+            {
+                UE_LOG(LogTemp, Log,
+                    TEXT("[LakeFix] Candidate basin Basin=%d Tiles=%d Bounds=(%d,%d)-(%d,%d) Biome=%s WaterElev=%.3f Accepted=%s Reason=%s"),
+                    CandidateBasinID,
+                    Basin.TileCount,
+                    Basin.MinTileX,
+                    Basin.MinTileY,
+                    Basin.MaxTileX,
+                    Basin.MaxTileY,
+                    *CenterBiome.ToString(),
+                    Basin.WaterSurfaceElevation01,
+                    bAccepted ? TEXT("Yes") : TEXT("No"),
+                    *Reason);
+                ++LoggedCandidates;
+            }
+        }
+    }
+
+    const int32 RejectedTotal = Summary.CandidateBasins - Summary.Accepted;
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[LakeFix] Step03 LakeBasins=%d LakeTiles=%d CandidateBasins=%d Accepted=%d Rejected=%d"),
+        LakeBasins.Num(),
+        Summary.FinalLakeTiles,
+        Summary.CandidateBasins,
+        Summary.Accepted,
+        RejectedTotal);
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[LakeFix] Basin quality summary: Candidates=%d Accepted=%d RejectedSmall=%d RejectedBiome=%d RejectedOcean=%d RejectedInvalid=%d FinalLakeTiles=%d"),
+        Summary.CandidateBasins,
+        Summary.Accepted,
+        Summary.RejectedSmall,
+        Summary.RejectedBiome,
+        Summary.RejectedOcean,
+        Summary.RejectedInvalid,
+        Summary.FinalLakeTiles);
+
+    if (Summary.CandidateBasins > MaxLoggedCandidateBasins)
+    {
+        UE_LOG(LogTemp, Log,
+            TEXT("[LakeFix] Candidate basin logging truncated. Logged=%d Total=%d"),
+            MaxLoggedCandidateBasins,
+            Summary.CandidateBasins);
+    }
+}
+
+bool UWorldGenPipeline::Step05_InitVoxelChunks()
 {
     UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step05: Init voxel chunks..."));
 
     if (!WorldRef)
     {
         UE_LOG(LogTemp, Warning, TEXT("[WorldGen] Step05 failed: WorldRef is null."));
-        return;
+        return false;
     }
 
     UVoxelWorldManager* VoxelMgr = WorldRef->GetSubsystem<UVoxelWorldManager>();
     if (!VoxelMgr)
     {
         UE_LOG(LogTemp, Warning, TEXT("[WorldGen] Step05 failed: UVoxelWorldManager not found."));
-        return;
+        return false;
     }
 
+    VoxelMgr->SetWorldSeed(WorldSeed);
     VoxelMgr->SetPipelineMountainRanges(MountainRanges);
     VoxelMgr->SetPipelineVolcanoes(Volcanoes);
+    VoxelMgr->SetPipelineLakeBasins(LakeBasins); // LAKE-FIX-01A
 
     // Diagnostic: verify resource data is already present before VoxelWorldManager
     // snapshots/caches the tile array.
@@ -1277,20 +2677,19 @@ void UWorldGenPipeline::Step05_InitVoxelChunks()
     if (!bAccepted)
     {
         UE_LOG(LogTemp, Warning, TEXT("[WorldGen] Step05: terrain request was not accepted."));
-        return;
+        return false;
     }
 
     UE_LOG(LogTemp, Log,
         TEXT("[WorldGen] Step05 done. TerrainMode=%s BlockHeightStep=%d"),
         CurrentConfig.TerrainMode == ETerrainMode::Blocky ? TEXT("Blocky") : TEXT("Smooth"),
         CurrentConfig.BlockHeightStep);
+    return true;
 }
 
 void UWorldGenPipeline::Step06_PCGDecorationPass()
 {
-    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step06: Decoration hook..."));
-    HandlePCGDecorationPass(WorldTiles, GridWidth, GridHeight);
-    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step06 done"));
+    UE_LOG(LogTemp, Log, TEXT("[WorldGen] Step06 skipped: decorations are dispatched by WorldGenBootstrapActor after terrain-ready."));
 }
 
 void UWorldGenPipeline::Step07_ApplyWorldDriver()

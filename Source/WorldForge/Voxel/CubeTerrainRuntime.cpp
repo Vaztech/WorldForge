@@ -1,0 +1,626 @@
+// CubeTerrainRuntime.cpp — CUBE-TERRAIN-02A
+// Real cube column data model populated from FWorldTileData.
+// No rendering, no actors, no HISM/ISM.
+// Smooth terrain path in VoxelWorldManager is completely unchanged.
+//
+// 02A: Added BlocksPerWorldTile storage + early BlockGrid log.
+//      No change to chunk data model or query API — expansion to per-block
+//      columns is handled entirely in AWFCubeTerrainActor::BuildPatch.
+
+#include "CubeTerrainRuntime.h"
+#include "../Data/WorldForgeDataTypes.h"
+#include "../Data/WorldForgeTags.h"
+
+// ─────────────────────────────────────────────────────────────────
+// 01C height and column constants
+// ─────────────────────────────────────────────────────────────────
+
+static constexpr int32 Cube01C_MaxSurfaceBlocks  = 32;
+static constexpr int32 Cube01C_WaterLevelBlock   = 8;
+static constexpr int32 Cube01C_DirtLayerDepth    = 3;
+static constexpr int32 Cube01C_RockLayerDepth    = 5;
+static constexpr int32 Cube01C_UndergroundDepth  = 12;
+static constexpr int32 Cube01C_TotalColumnDepth  = Cube01C_MaxSurfaceBlocks + Cube01C_UndergroundDepth;
+
+// ─────────────────────────────────────────────────────────────────
+
+static bool BiomeMatchesAny(const FGameplayTag& Biome, std::initializer_list<const TCHAR*> Names)
+{
+    if (!Biome.IsValid()) return false;
+    const FString BiomeStr = Biome.GetTagName().ToString();
+    for (const TCHAR* Name : Names)
+    {
+        if (BiomeStr.Contains(Name)) return true;
+    }
+    return false;
+}
+
+struct FCubeTerrainSurfaceBiomeAudit
+{
+    int32 Tiles = 0;
+    int32 Grass = 0;
+    int32 Dirt = 0;
+    int32 Sand = 0;
+    int32 Rock = 0;
+    int32 Snow = 0;
+    int32 Water = 0;
+    int32 Lava = 0;
+    int32 Basalt = 0;
+    int32 DeepRock = 0;
+    int32 Air = 0;
+    double ElevationSum = 0.0;
+    double WaterDepthSum = 0.0;
+    double RainfallSum = 0.0;
+};
+
+// ─────────────────────────────────────────────────────────────────
+// ClassifyTopBlock — maps tile biome + elevation + water to surface block type.
+// Priority: Water → Lava → Snow → Rock → Sand → Grass (default).
+// ─────────────────────────────────────────────────────────────────
+
+static EWorldForgeCubeBlockType ClassifyTopBlock(
+    const FGameplayTag& BiomeType,
+    float Elevation,
+    float WaterDepth)
+{
+    if (BiomeMatchesAny(BiomeType, {
+            TEXT("DeepOcean"), TEXT("Ocean"), TEXT("Sea"),
+            TEXT("Lake"), TEXT("River"), TEXT("Water"),
+            TEXT("Underwater") })
+        || (WaterDepth > 0.01f && Elevation < 0.48f))
+    {
+        return EWorldForgeCubeBlockType::Water;
+    }
+
+    if (BiomeMatchesAny(BiomeType, { TEXT("Lava"), TEXT("Volcanic") }))
+        return EWorldForgeCubeBlockType::Lava;
+
+    if (BiomeMatchesAny(BiomeType, { TEXT("Snow"), TEXT("SnowPeak"), TEXT("Ice"), TEXT("Tundra") })
+        || Elevation >= 0.90f)
+        return EWorldForgeCubeBlockType::Snow;
+
+    if (BiomeMatchesAny(BiomeType, {
+            TEXT("Mountain"), TEXT("Rock"), TEXT("Cliff"),
+            TEXT("Canyon"), TEXT("Highland") })
+        || Elevation >= 0.75f)
+        return EWorldForgeCubeBlockType::Rock;
+
+    if (BiomeMatchesAny(BiomeType, {
+            TEXT("Coast"), TEXT("Beach"), TEXT("Sand"),
+            TEXT("Desert"), TEXT("Dune") })
+        || Elevation <= 0.15f)
+        return EWorldForgeCubeBlockType::Sand;
+
+    return EWorldForgeCubeBlockType::Grass;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// CubeBlockTypeToTerrainTag — maps block type to WorldForge.Terrain.* tags.
+// ─────────────────────────────────────────────────────────────────
+
+static FGameplayTag CubeBlockTypeToTerrainTag(EWorldForgeCubeBlockType BlockType)
+{
+    switch (BlockType)
+    {
+    case EWorldForgeCubeBlockType::Air:
+    case EWorldForgeCubeBlockType::Water:
+        return FGameplayTag();
+
+    case EWorldForgeCubeBlockType::Grass:
+    case EWorldForgeCubeBlockType::Dirt:
+        return TAG_Terrain_Dirt;
+
+    case EWorldForgeCubeBlockType::Sand:
+        return TAG_Terrain_Sand;
+
+    case EWorldForgeCubeBlockType::Rock:
+    case EWorldForgeCubeBlockType::Snow:
+    case EWorldForgeCubeBlockType::Basalt:
+        return TAG_Terrain_Stone;
+
+    case EWorldForgeCubeBlockType::DeepRock:
+        return TAG_Terrain_Bedrock;
+
+    case EWorldForgeCubeBlockType::Lava:
+        return FGameplayTag();
+
+    default:
+        return FGameplayTag();
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────
+
+void UCubeTerrainRuntime::InitializeRuntime()
+{
+    bRuntimeValid      = false;
+    BlockHeightStep    = 4;
+    BlocksPerWorldTile = 8;
+    CachedGridWidth    = 0;
+    CachedGridHeight   = 0;
+    CubeChunks.Empty();
+    SurfaceZCache.Empty();
+    TerrainDepthCache.Empty();
+    NumColumns    = 0;
+    NumSolidCells = 0;
+    NumWaterCells = 0;
+    MinSurfaceZ   = 0;
+    MaxSurfaceZ   = 0;
+    ChunkCount    = 0;
+
+    UE_LOG(LogTemp, Log, TEXT("[CubeTerrain] Runtime initialized."));
+}
+
+// ─────────────────────────────────────────────────────────────────
+// BuildFromTiles
+//
+// Populates one chunk per tile. Each chunk is 1x1 in XY and
+// Cube01C_TotalColumnDepth cells tall.
+//
+// 02A: InBlocksPerWorldTile is stored and exposed to the render actor.
+//      The chunk data model is unchanged — block grid expansion happens
+//      in AWFCubeTerrainActor::BuildPatch using GetSurfaceZAt/GetRawBlockTypeAt
+//      plus bilinear interpolation and per-block noise.
+// ─────────────────────────────────────────────────────────────────
+
+void UCubeTerrainRuntime::BuildFromTiles(
+    const TArray<FWorldTileData>& WorldTiles,
+    int32 GridWidth,
+    int32 GridHeight,
+    int32 InBlockHeightStep,
+    int32 InBlocksPerWorldTile,
+    float InTileWorldSizeUU)
+{
+    // CUBE-TERRAIN-02A: store block resolution before any early-out.
+    BlocksPerWorldTile = FMath::Max(1, InBlocksPerWorldTile);
+    // CUBE-VOXEL-SCALE: store the true tile world size for GetChunkWorldSize().
+    TileWorldSizeUU = (InTileWorldSizeUU > 1.0f) ? InTileWorldSizeUU : 3200.0f;
+
+    const float EffectiveBlockSizeUU = TileWorldSizeUU / static_cast<float>(BlocksPerWorldTile);
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[CubeTerrain] Build start. Grid=%dx%d Tiles=%d BlockHeightStep=%d BlocksPerTile=%d "
+             "Constants: MaxSurface=%d WaterLevel=%d DirtDepth=%d RockDepth=%d TotalColDepth=%d"),
+        GridWidth, GridHeight, WorldTiles.Num(), InBlockHeightStep, BlocksPerWorldTile,
+        Cube01C_MaxSurfaceBlocks, Cube01C_WaterLevelBlock,
+        Cube01C_DirtLayerDepth, Cube01C_RockLayerDepth, Cube01C_TotalColumnDepth);
+
+    // CUBE-TERRAIN-02A / CUBE-VOXEL-SCALE: block grid readiness log (read by render actor).
+    UE_LOG(LogTemp, Log,
+        TEXT("[CubeTerrainRender] BlockGrid mode enabled. BlocksPerTile=%d TileWorldSizeUU=%.1f EffectiveBlockSizeUU=%.1f"),
+        BlocksPerWorldTile, TileWorldSizeUU, EffectiveBlockSizeUU);
+
+    if (GridWidth <= 0 || GridHeight <= 0 || WorldTiles.Num() == 0)
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[CubeTerrain] WARNING: Build failed. Reason=Invalid grid or empty tile array."));
+        bRuntimeValid = false;
+        return;
+    }
+    if (WorldTiles.Num() != GridWidth * GridHeight)
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[CubeTerrain] WARNING: Build failed. Reason=Tile count mismatch Expected=%d Actual=%d."),
+            GridWidth * GridHeight, WorldTiles.Num());
+        bRuntimeValid = false;
+        return;
+    }
+
+    // ── Reset and size all storage ──────────────────────────────
+    CachedGridWidth  = GridWidth;
+    CachedGridHeight = GridHeight;
+    BlockHeightStep  = FMath::Max(1, InBlockHeightStep);
+
+    const int32 TileCount = GridWidth * GridHeight;
+    CubeChunks.Empty(TileCount);
+    SurfaceZCache.SetNumZeroed(TileCount);
+    TerrainDepthCache.SetNumZeroed(TileCount);
+
+    // ── Per-build accumulators ───────────────────────────────────
+    int32 StatNumColumns   = 0;
+    int32 StatNumSolid     = 0;
+    int32 StatNumWater     = 0;
+    int32 StatMinSurface   = Cube01C_TotalColumnDepth;
+    int32 StatMaxSurface   = 0;
+    int32 StatChunkCount   = 0;
+
+    int32 CntAir=0, CntGrass=0, CntDirt=0, CntSand=0, CntRock=0;
+    int32 CntSnow=0, CntWater=0, CntDeepRock=0, CntLava=0, CntBasalt=0;
+
+    int32 TopCntAir=0, TopCntGrass=0, TopCntDirt=0, TopCntSand=0, TopCntRock=0;
+    int32 TopCntSnow=0, TopCntWater=0, TopCntDeepRock=0, TopCntLava=0, TopCntBasalt=0;
+
+    int32 SandReasonCoast=0, SandReasonBeach=0, SandReasonDesert=0;
+    int32 SandReasonDune=0, SandReasonLowElev=0;
+    int32 LavaReasonLavaBiome=0, LavaReasonVolcanicBiome=0;
+
+    TMap<FString, FCubeTerrainSurfaceBiomeAudit> SurfaceBiomeAudit;
+
+    // ── Tile loop ────────────────────────────────────────────────
+    for (int32 TileY = 0; TileY < GridHeight; ++TileY)
+    {
+        for (int32 TileX = 0; TileX < GridWidth; ++TileX)
+        {
+            const int32 TileIdx = TileY * GridWidth + TileX;
+            const FWorldTileData& Tile = WorldTiles[TileIdx];
+
+            const EWorldForgeCubeBlockType TopBlock =
+                ClassifyTopBlock(Tile.BiomeType, Tile.Elevation, Tile.WaterDepth);
+
+            const FString BiomeAuditName = Tile.BiomeType.IsValid()
+                ? Tile.BiomeType.GetTagName().ToString()
+                : FString(TEXT("<Invalid>"));
+            FCubeTerrainSurfaceBiomeAudit& BiomeAudit = SurfaceBiomeAudit.FindOrAdd(BiomeAuditName);
+            ++BiomeAudit.Tiles;
+            BiomeAudit.ElevationSum += static_cast<double>(Tile.Elevation);
+            BiomeAudit.WaterDepthSum += static_cast<double>(Tile.WaterDepth);
+            BiomeAudit.RainfallSum += static_cast<double>(Tile.Rainfall);
+
+            switch (TopBlock)
+            {
+            case EWorldForgeCubeBlockType::Air:      ++TopCntAir;      ++BiomeAudit.Air;      break;
+            case EWorldForgeCubeBlockType::Grass:    ++TopCntGrass;    ++BiomeAudit.Grass;    break;
+            case EWorldForgeCubeBlockType::Dirt:     ++TopCntDirt;     ++BiomeAudit.Dirt;     break;
+            case EWorldForgeCubeBlockType::Sand:     ++TopCntSand;     ++BiomeAudit.Sand;     break;
+            case EWorldForgeCubeBlockType::Rock:     ++TopCntRock;     ++BiomeAudit.Rock;     break;
+            case EWorldForgeCubeBlockType::Snow:     ++TopCntSnow;     ++BiomeAudit.Snow;     break;
+            case EWorldForgeCubeBlockType::Water:    ++TopCntWater;    ++BiomeAudit.Water;    break;
+            case EWorldForgeCubeBlockType::DeepRock: ++TopCntDeepRock; ++BiomeAudit.DeepRock; break;
+            case EWorldForgeCubeBlockType::Lava:     ++TopCntLava;     ++BiomeAudit.Lava;     break;
+            case EWorldForgeCubeBlockType::Basalt:   ++TopCntBasalt;   ++BiomeAudit.Basalt;   break;
+            default: break;
+            }
+
+            if (TopBlock == EWorldForgeCubeBlockType::Sand)
+            {
+                if (BiomeAuditName.Contains(TEXT("Coast")))  ++SandReasonCoast;
+                if (BiomeAuditName.Contains(TEXT("Beach")))  ++SandReasonBeach;
+                if (BiomeAuditName.Contains(TEXT("Desert"))) ++SandReasonDesert;
+                if (BiomeAuditName.Contains(TEXT("Dune")))   ++SandReasonDune;
+                if (Tile.Elevation <= 0.15f)                  ++SandReasonLowElev;
+            }
+            else if (TopBlock == EWorldForgeCubeBlockType::Lava)
+            {
+                if (BiomeAuditName.Contains(TEXT("Lava")))     ++LavaReasonLavaBiome;
+                if (BiomeAuditName.Contains(TEXT("Volcanic"))) ++LavaReasonVolcanicBiome;
+            }
+
+            const bool bIsWaterTile = (TopBlock == EWorldForgeCubeBlockType::Water);
+            const bool bIsLavaTile  = (TopBlock == EWorldForgeCubeBlockType::Lava);
+
+            int32 SurfaceZ = 0;
+            int32 SeabedZ  = 0;
+
+            if (bIsWaterTile)
+            {
+                SurfaceZ = Cube01C_WaterLevelBlock;
+                SeabedZ  = FMath::Clamp(
+                    FMath::RoundToInt(Tile.Elevation * float(Cube01C_WaterLevelBlock)),
+                    0, Cube01C_WaterLevelBlock - 1);
+            }
+            else
+            {
+                const float NormElev = FMath::Clamp(Tile.Elevation, 0.f, 1.f);
+                int32 RawZ = FMath::RoundToInt(NormElev * float(Cube01C_MaxSurfaceBlocks));
+                RawZ = (RawZ / BlockHeightStep) * BlockHeightStep;
+                RawZ = FMath::Max(RawZ, BlockHeightStep);
+                SurfaceZ = FMath::Clamp(RawZ, 1, Cube01C_MaxSurfaceBlocks);
+            }
+
+            FWorldForgeCubeChunkKey Key;
+            Key.ChunkX = TileX;
+            Key.ChunkY = TileY;
+
+            FWorldForgeCubeChunkData& Chunk = CubeChunks.Add(Key);
+            Chunk.Init(1, 1, Cube01C_TotalColumnDepth);
+
+            ++StatChunkCount;
+            ++StatNumColumns;
+
+            for (int32 Z = 0; Z < Cube01C_TotalColumnDepth; ++Z)
+            {
+                EWorldForgeCubeBlockType BlockType = EWorldForgeCubeBlockType::Air;
+
+                if (bIsWaterTile)
+                {
+                    if (Z > Cube01C_WaterLevelBlock)
+                    {
+                        BlockType = EWorldForgeCubeBlockType::Air;
+                    }
+                    else if (Z >= SeabedZ && Z <= Cube01C_WaterLevelBlock)
+                    {
+                        BlockType = (Z == SeabedZ)
+                            ? EWorldForgeCubeBlockType::Sand
+                            : EWorldForgeCubeBlockType::Water;
+                    }
+                    else
+                    {
+                        const int32 BelowSeabed = SeabedZ - Z;
+                        if (BelowSeabed <= Cube01C_DirtLayerDepth)
+                            BlockType = EWorldForgeCubeBlockType::Sand;
+                        else if (BelowSeabed <= Cube01C_DirtLayerDepth + Cube01C_RockLayerDepth)
+                            BlockType = EWorldForgeCubeBlockType::Rock;
+                        else
+                            BlockType = EWorldForgeCubeBlockType::DeepRock;
+                    }
+                }
+                else if (bIsLavaTile)
+                {
+                    if (Z > SurfaceZ)
+                        BlockType = EWorldForgeCubeBlockType::Air;
+                    else if (Z == SurfaceZ)
+                        BlockType = EWorldForgeCubeBlockType::Lava;
+                    else
+                    {
+                        const int32 Below = SurfaceZ - Z;
+                        if (Below <= Cube01C_DirtLayerDepth)
+                            BlockType = EWorldForgeCubeBlockType::Basalt;
+                        else if (Below <= Cube01C_DirtLayerDepth + Cube01C_RockLayerDepth)
+                            BlockType = EWorldForgeCubeBlockType::Rock;
+                        else
+                            BlockType = EWorldForgeCubeBlockType::DeepRock;
+                    }
+                }
+                else
+                {
+                    if (Z > SurfaceZ)
+                        BlockType = EWorldForgeCubeBlockType::Air;
+                    else if (Z == SurfaceZ)
+                        BlockType = TopBlock;
+                    else
+                    {
+                        const int32 Below = SurfaceZ - Z;
+
+                        EWorldForgeCubeBlockType SubSurface;
+                        if (TopBlock == EWorldForgeCubeBlockType::Rock ||
+                            TopBlock == EWorldForgeCubeBlockType::Snow)
+                            SubSurface = EWorldForgeCubeBlockType::Rock;
+                        else if (TopBlock == EWorldForgeCubeBlockType::Sand)
+                            SubSurface = EWorldForgeCubeBlockType::Sand;
+                        else
+                            SubSurface = EWorldForgeCubeBlockType::Dirt;
+
+                        if (Below <= Cube01C_DirtLayerDepth)
+                            BlockType = SubSurface;
+                        else if (Below <= Cube01C_DirtLayerDepth + Cube01C_RockLayerDepth)
+                            BlockType = EWorldForgeCubeBlockType::Rock;
+                        else
+                            BlockType = EWorldForgeCubeBlockType::DeepRock;
+                    }
+                }
+
+                if (FWorldForgeCubeCell* Cell = Chunk.GetCell(0, 0, Z))
+                    Cell->BlockType = BlockType;
+
+                switch (BlockType)
+                {
+                case EWorldForgeCubeBlockType::Air:      ++CntAir;                      break;
+                case EWorldForgeCubeBlockType::Grass:    ++CntGrass;    ++StatNumSolid; break;
+                case EWorldForgeCubeBlockType::Dirt:     ++CntDirt;     ++StatNumSolid; break;
+                case EWorldForgeCubeBlockType::Sand:     ++CntSand;     ++StatNumSolid; break;
+                case EWorldForgeCubeBlockType::Rock:     ++CntRock;     ++StatNumSolid; break;
+                case EWorldForgeCubeBlockType::Snow:     ++CntSnow;     ++StatNumSolid; break;
+                case EWorldForgeCubeBlockType::Water:    ++CntWater;    ++StatNumWater;  break;
+                case EWorldForgeCubeBlockType::DeepRock: ++CntDeepRock; ++StatNumSolid; break;
+                case EWorldForgeCubeBlockType::Lava:     ++CntLava;     ++StatNumSolid; break;
+                case EWorldForgeCubeBlockType::Basalt:   ++CntBasalt;   ++StatNumSolid; break;
+                default: break;
+                }
+            }
+
+            SurfaceZCache[TileIdx] = SurfaceZ;
+
+            {
+                int32 Depth = 0;
+                for (int32 Z = SurfaceZ; Z >= 0; --Z)
+                {
+                    const FWorldForgeCubeCell* Cell = Chunk.GetCell(0, 0, Z);
+                    if (!Cell || Cell->bRemoved ||
+                        Cell->BlockType == EWorldForgeCubeBlockType::Air)
+                        break;
+                    ++Depth;
+                }
+                TerrainDepthCache[TileIdx] = Depth;
+            }
+
+            StatMinSurface = FMath::Min(StatMinSurface, SurfaceZ);
+            StatMaxSurface = FMath::Max(StatMaxSurface, SurfaceZ);
+        }
+    }
+
+    NumColumns    = StatNumColumns;
+    NumSolidCells = StatNumSolid;
+    NumWaterCells = StatNumWater;
+    MinSurfaceZ   = StatMinSurface;
+    MaxSurfaceZ   = StatMaxSurface;
+    ChunkCount    = StatChunkCount;
+    bRuntimeValid = true;
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[CubeTerrain] Build complete. Columns=%d Chunks=%d SolidCells=%d WaterCells=%d SurfaceZ=[%d,%d] BlocksPerTile=%d"),
+        NumColumns, ChunkCount, NumSolidCells, NumWaterCells, MinSurfaceZ, MaxSurfaceZ, BlocksPerWorldTile);
+    UE_LOG(LogTemp, Log,
+        TEXT("[CubeTerrain] BlockTypes Air=%d Grass=%d Dirt=%d Sand=%d Rock=%d Snow=%d Water=%d DeepRock=%d Lava=%d Basalt=%d"),
+        CntAir, CntGrass, CntDirt, CntSand, CntRock, CntSnow, CntWater, CntDeepRock, CntLava, CntBasalt);
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[CubeTerrainSurfaceAudit] TopBlocks Grass=%d Sand=%d Rock=%d Snow=%d Water=%d Lava=%d Dirt=%d Basalt=%d DeepRock=%d Air=%d"),
+        TopCntGrass, TopCntSand, TopCntRock, TopCntSnow, TopCntWater, TopCntLava,
+        TopCntDirt, TopCntBasalt, TopCntDeepRock, TopCntAir);
+    UE_LOG(LogTemp, Log,
+        TEXT("[CubeTerrainSurfaceAudit] SandReasons Coast=%d Beach=%d Desert=%d Dune=%d LowElev=%d"),
+        SandReasonCoast, SandReasonBeach, SandReasonDesert, SandReasonDune, SandReasonLowElev);
+    UE_LOG(LogTemp, Log,
+        TEXT("[CubeTerrainSurfaceAudit] LavaReasons LavaBiome=%d VolcanicBiome=%d"),
+        LavaReasonLavaBiome, LavaReasonVolcanicBiome);
+
+    for (const TPair<FString, FCubeTerrainSurfaceBiomeAudit>& BiomePair : SurfaceBiomeAudit)
+    {
+        const FCubeTerrainSurfaceBiomeAudit& Audit = BiomePair.Value;
+        const double InvTiles = Audit.Tiles > 0 ? (1.0 / static_cast<double>(Audit.Tiles)) : 0.0;
+        UE_LOG(LogTemp, Log,
+            TEXT("[CubeTerrainSurfaceAudit] Biome=%s Tiles=%d Grass=%d Sand=%d Rock=%d Snow=%d Water=%d Lava=%d AvgElev=%.3f AvgWater=%.3f AvgRain=%.3f"),
+            *BiomePair.Key,
+            Audit.Tiles,
+            Audit.Grass,
+            Audit.Sand,
+            Audit.Rock,
+            Audit.Snow,
+            Audit.Water,
+            Audit.Lava,
+            static_cast<float>(Audit.ElevationSum * InvTiles),
+            static_cast<float>(Audit.WaterDepthSum * InvTiles),
+            static_cast<float>(Audit.RainfallSum * InvTiles));
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────
+
+void UCubeTerrainRuntime::Reset()
+{
+    bRuntimeValid      = false;
+    CachedGridWidth    = 0;
+    CachedGridHeight   = 0;
+    BlockHeightStep    = 4;
+    BlocksPerWorldTile = 8;
+    CubeChunks.Empty();
+    SurfaceZCache.Empty();
+    TerrainDepthCache.Empty();
+    NumColumns    = 0;
+    NumSolidCells = 0;
+    NumWaterCells = 0;
+    MinSurfaceZ   = 0;
+    MaxSurfaceZ   = 0;
+    ChunkCount    = 0;
+
+    UE_LOG(LogTemp, Log, TEXT("[CubeTerrain] Reset."));
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Query methods — backed by real CubeChunks data after BuildFromTiles.
+// ─────────────────────────────────────────────────────────────────
+
+FGameplayTag UCubeTerrainRuntime::GetBlockTypeAt(const FIntVector& GridPos) const
+{
+    if (!bRuntimeValid) return FGameplayTag();
+
+    if (GridPos.X < 0 || GridPos.X >= CachedGridWidth ||
+        GridPos.Y < 0 || GridPos.Y >= CachedGridHeight ||
+        GridPos.Z < 0 || GridPos.Z >= Cube01C_TotalColumnDepth)
+    {
+        return FGameplayTag();
+    }
+
+    const FWorldForgeCubeChunkKey Key{ GridPos.X, GridPos.Y };
+    const FWorldForgeCubeChunkData* Chunk = CubeChunks.Find(Key);
+    if (!Chunk || !Chunk->IsValid()) return FGameplayTag();
+
+    const FWorldForgeCubeCell* Cell = Chunk->GetCell(0, 0, GridPos.Z);
+    if (!Cell || Cell->bRemoved) return FGameplayTag();
+
+    return CubeBlockTypeToTerrainTag(Cell->BlockType);
+}
+
+// ─────────────────────────────────────────────────────────────────
+
+int32 UCubeTerrainRuntime::GetSurfaceZAt(const FIntPoint& GridXY) const
+{
+    if (!bRuntimeValid) return 0;
+    if (GridXY.X < 0 || GridXY.X >= CachedGridWidth ||
+        GridXY.Y < 0 || GridXY.Y >= CachedGridHeight) return 0;
+
+    const int32 Idx = GridXY.Y * CachedGridWidth + GridXY.X;
+    return SurfaceZCache.IsValidIndex(Idx) ? SurfaceZCache[Idx] : 0;
+}
+
+// ─────────────────────────────────────────────────────────────────
+
+int32 UCubeTerrainRuntime::GetTerrainDepthAt(const FIntPoint& GridXY) const
+{
+    if (!bRuntimeValid) return 0;
+    if (GridXY.X < 0 || GridXY.X >= CachedGridWidth ||
+        GridXY.Y < 0 || GridXY.Y >= CachedGridHeight) return 0;
+
+    const int32 Idx = GridXY.Y * CachedGridWidth + GridXY.X;
+    return TerrainDepthCache.IsValidIndex(Idx) ? TerrainDepthCache[Idx] : 0;
+}
+
+// ─────────────────────────────────────────────────────────────────
+
+bool UCubeTerrainRuntime::RemoveBlockAt(const FIntVector& GridPos)
+{
+    if (!bRuntimeValid) return false;
+
+    if (GridPos.X < 0 || GridPos.X >= CachedGridWidth ||
+        GridPos.Y < 0 || GridPos.Y >= CachedGridHeight ||
+        GridPos.Z < 0 || GridPos.Z >= Cube01C_TotalColumnDepth)
+    {
+        return false;
+    }
+
+    const FWorldForgeCubeChunkKey Key{ GridPos.X, GridPos.Y };
+    FWorldForgeCubeChunkData* Chunk = CubeChunks.Find(Key);
+    if (!Chunk || !Chunk->IsValid()) return false;
+
+    FWorldForgeCubeCell* Cell = Chunk->GetCell(0, 0, GridPos.Z);
+    if (!Cell) return false;
+
+    if (Cell->BlockType == EWorldForgeCubeBlockType::Air || Cell->bRemoved) return false;
+    if (Cell->BlockType == EWorldForgeCubeBlockType::Lava ||
+        Cell->BlockType == EWorldForgeCubeBlockType::Water) return false;
+
+    Cell->bRemoved = true;
+
+    const int32 TileIdx = GridPos.Y * CachedGridWidth + GridPos.X;
+    if (SurfaceZCache.IsValidIndex(TileIdx) && SurfaceZCache[TileIdx] == GridPos.Z)
+    {
+        int32 NewSurfaceZ = 0;
+        for (int32 Z = GridPos.Z - 1; Z >= 0; --Z)
+        {
+            const FWorldForgeCubeCell* Below = Chunk->GetCell(0, 0, Z);
+            if (Below && !Below->bRemoved &&
+                Below->BlockType != EWorldForgeCubeBlockType::Air)
+            {
+                NewSurfaceZ = Z;
+                break;
+            }
+        }
+        SurfaceZCache[TileIdx] = NewSurfaceZ;
+
+        int32 NewDepth = 0;
+        for (int32 Z = NewSurfaceZ; Z >= 0; --Z)
+        {
+            const FWorldForgeCubeCell* Below = Chunk->GetCell(0, 0, Z);
+            if (!Below || Below->bRemoved ||
+                Below->BlockType == EWorldForgeCubeBlockType::Air) break;
+            ++NewDepth;
+        }
+        if (TerrainDepthCache.IsValidIndex(TileIdx))
+            TerrainDepthCache[TileIdx] = NewDepth;
+    }
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────
+
+EWorldForgeCubeBlockType UCubeTerrainRuntime::GetRawBlockTypeAt(const FIntVector& GridPos) const
+{
+    if (!bRuntimeValid) return EWorldForgeCubeBlockType::Air;
+
+    if (GridPos.X < 0 || GridPos.X >= CachedGridWidth ||
+        GridPos.Y < 0 || GridPos.Y >= CachedGridHeight ||
+        GridPos.Z < 0 || GridPos.Z >= Cube01C_TotalColumnDepth)
+    {
+        return EWorldForgeCubeBlockType::Air;
+    }
+
+    const FWorldForgeCubeChunkKey Key{ GridPos.X, GridPos.Y };
+    const FWorldForgeCubeChunkData* Chunk = CubeChunks.Find(Key);
+    if (!Chunk || !Chunk->IsValid()) return EWorldForgeCubeBlockType::Air;
+
+    const FWorldForgeCubeCell* Cell = Chunk->GetCell(0, 0, GridPos.Z);
+    if (!Cell || Cell->bRemoved) return EWorldForgeCubeBlockType::Air;
+
+    return Cell->BlockType;
+}

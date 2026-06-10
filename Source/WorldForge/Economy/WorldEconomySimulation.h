@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "CoreMinimal.h"
 #include "Subsystems/WorldSubsystem.h"
@@ -59,6 +59,19 @@ public:
         FGameplayTag FromCurrencyTag,
         FGameplayTag ToCurrencyTag) const;
 
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Economy")
+    float GetExchangeRateForCivs(
+        int32 FromCivID,
+        int32 ToCivID) const;
+
+    const FCurrencyDefinition* GetCurrencyForCiv(int32 CivID) const;
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Economy")
+    float GetSettlementCurrencyBalance(int32 SettlementID) const;
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Economy")
+    void SetSettlementCurrencyBalance(int32 SettlementID, float NewBalance);
+
     // ── Phase 3A: main tick entry point ──────────────────────────────
     // Called by UEconomicProcessor (Processor 9) each fixed step.
     void TickWorldEconomy(float FixedDeltaTime, int32 PlayerSettlementID);
@@ -67,6 +80,11 @@ public:
     // Applied internally at the end of TickWorldEconomy().
     void QueueTrustDelta(
         FGameplayTag CurrencyTag,
+        ETrustComponent Component,
+        float Delta);
+
+    void QueueTrustDeltaForCiv(
+        int32 CivID,
         ETrustComponent Component,
         float Delta);
 
@@ -95,6 +113,14 @@ public:
         int32 BuyerSettlementID,
         int32 SellerSettlementID,
         int32 CaravanID);
+
+    void ProcessCaravanTransaction(
+        int32 BuyerSettlementID,
+        int32 SellerSettlementID,
+        int32 CaravanID,
+        const TMap<FGameplayTag, int32>& CargoByItem,
+        float PaymentAmount,
+        bool bTransferCargo);
 
     // ── Phase 3B event notifications (stubs in 3A) ──────────────────
     void NotifyWarStarted(int32 AttackerCivID, int32 DefenderCivID);
@@ -180,17 +206,30 @@ private:
     TArray<FGovernmentEconomicProfile> AllGovernmentsArray;
 
     // ── Phase 3A runtime lookup state ────────────────────────────────
+    // Legacy tag-keyed map kept for existing callers. Real multi-civ currency
+    // identity lives in AllCurrenciesByCivID because gameplay tags are registered
+    // archetypes and may not be unique per civilization.
     TMap<FGameplayTag, FCurrencyDefinition> AllCurrencies;
+    TMap<int32, FCurrencyDefinition> AllCurrenciesByCivID;
+    TMap<FGameplayTag, TArray<int32>> CurrencyTagToCivIDs;
+
     TMap<int32, FGovernmentEconomicProfile> CivGovernments;
     TMap<int32, TArray<FMarketPrice>> SettlementPrices;
     TMap<int32, FTradeFlowState> TradeRoutes;
+
     TMap<FGameplayTag, FCurrencyTrustState> CurrencyTrust;
+    TMap<int32, FCurrencyTrustState> CurrencyTrustByCivID;
+
+    // Runtime settlement money ledger used by caravan settlement.
+    // This intentionally stays separate from resource stockpiles.
+    TMap<int32, float> SettlementCurrencyBalances;
 
     // Key: SettlementID -> ItemTag -> last N prices
     TMap<int32, TMap<FGameplayTag, TArray<float>>> PriceHistory;
 
     // Pending trust deltas queued during current tick
     TArray<FCurrencyTrustDelta> PendingTrustDeltas;
+    TMap<int32, TArray<FCurrencyTrustDelta>> PendingTrustDeltasByCivID;
 
     // Narrative report state
     TArray<FString> PendingNarrativeReports;

@@ -4,6 +4,7 @@
 #include "../Core/WorldForgeRNG.h"
 #include "WorldForgeDataTypes.h"
 #include "WorldForgeTags.h"
+#include "../World/WorldPlacementValidation.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogFallenCity, Log, All);
 
@@ -32,12 +33,137 @@ namespace RuinNames
 	};
 }
 
+namespace
+{
+	constexpr int32 FallenCitySearchRadii[] = { 3, 6, 10, 16 };
+
+	struct FFallenCityPlacementDiagnostics
+	{
+		int32 Cities = 0;
+		int32 Relocated = 0;
+		int32 RejectedWater = 0;
+		int32 Failed = 0;
+	};
+
+	FFallenCityPlacementDiagnostics& GetFallenCityPlacementDiagnostics()
+	{
+		static FFallenCityPlacementDiagnostics Diagnostics;
+		return Diagnostics;
+	}
+
+	void ResetFallenCityPlacementDiagnostics()
+	{
+		GetFallenCityPlacementDiagnostics() = FFallenCityPlacementDiagnostics();
+	}
+
+	FString DescribeBiomeTag(const FGameplayTag& BiomeTag)
+	{
+		return BiomeTag.IsValid() ? BiomeTag.ToString() : TEXT("<invalid>");
+	}
+
+	bool TryGetValidLoreTile(
+		const FLoreGenerationContext& Ctx,
+		const FIntPoint& TileCoord,
+		const FWorldTileData*& OutTile,
+		EWorldPlacementRejectReason& OutReason)
+	{
+		OutTile = Ctx.GetTile(TileCoord.X, TileCoord.Y);
+		if (!OutTile)
+		{
+			OutReason = EWorldPlacementRejectReason::InvalidBiome;
+			return false;
+		}
+
+		OutReason = WorldForgePlacement::ClassifyLoreSiteTile(*OutTile);
+		return OutReason == EWorldPlacementRejectReason::None;
+	}
+
+	bool TryFindNearbyValidLoreTile(
+		const FLoreGenerationContext& Ctx,
+		const FIntPoint& Origin,
+		FIntPoint& OutTileCoord,
+		const FWorldTileData*& OutTile)
+	{
+		for (int32 Radius : FallenCitySearchRadii)
+		{
+			bool bFound = false;
+			float BestDistanceSq = TNumericLimits<float>::Max();
+
+			const int32 MinX = FMath::Max(0, Origin.X - Radius);
+			const int32 MaxX = FMath::Min(Ctx.WorldWidth - 1, Origin.X + Radius);
+			const int32 MinY = FMath::Max(0, Origin.Y - Radius);
+			const int32 MaxY = FMath::Min(Ctx.WorldHeight - 1, Origin.Y + Radius);
+
+			for (int32 Y = MinY; Y <= MaxY; ++Y)
+			{
+				for (int32 X = MinX; X <= MaxX; ++X)
+				{
+					const int32 DX = X - Origin.X;
+					const int32 DY = Y - Origin.Y;
+					if (FMath::Max(FMath::Abs(DX), FMath::Abs(DY)) > Radius)
+					{
+						continue;
+					}
+
+					const FWorldTileData* CandidateTile = Ctx.GetTile(X, Y);
+					if (!CandidateTile || !WorldForgePlacement::IsValidLoreSiteTile(*CandidateTile))
+					{
+						continue;
+					}
+
+					const float DistanceSq = static_cast<float>(DX * DX + DY * DY);
+					if (!bFound || DistanceSq < BestDistanceSq)
+					{
+						bFound = true;
+						BestDistanceSq = DistanceSq;
+						OutTileCoord = FIntPoint(X, Y);
+						OutTile = CandidateTile;
+					}
+				}
+			}
+
+			if (bFound)
+			{
+				return true;
+			}
+		}
+
+		OutTile = nullptr;
+		return false;
+	}
+
+	bool TryGetValidCivStartFallback(
+		const FCivilizationData& Civ,
+		const FLoreGenerationContext& Ctx,
+		FIntPoint& OutTileCoord,
+		const FWorldTileData*& OutTile)
+	{
+		if (Civ.StartTileIndex < 0 || Ctx.WorldWidth <= 0)
+		{
+			OutTile = nullptr;
+			return false;
+		}
+
+		const FIntPoint StartCoord(Civ.StartTileIndex % Ctx.WorldWidth, Civ.StartTileIndex / Ctx.WorldWidth);
+		EWorldPlacementRejectReason StartReason = EWorldPlacementRejectReason::InvalidBiome;
+		if (!TryGetValidLoreTile(Ctx, StartCoord, OutTile, StartReason))
+		{
+			return false;
+		}
+
+		OutTileCoord = StartCoord;
+		return true;
+	}
+}
+
 // ─────────────────────────────────────────────
 //  Execute
 // ─────────────────────────────────────────────
 
 void FFallenCityPass::Execute(FLoreGenerationContext& Ctx)
 {
+	ResetFallenCityPlacementDiagnostics();
+
 	UE_LOG(LogFallenCity, Log, TEXT("FallenCityPass — BEGIN (%d civs)"),
 		Ctx.Civilizations.Num());
 
@@ -98,10 +224,19 @@ void FFallenCityPass::Execute(FLoreGenerationContext& Ctx)
 
 			// Place the ruin on the map
 			City.TileCoord = ChooseRuinTile(Civ, Ctx);
+			if (City.TileCoord.X < 0 || City.TileCoord.Y < 0)
+			{
+				continue;
+			}
 
 			// Pull biome from tile
 			const FWorldTileData* Tile = Ctx.GetTile(City.TileCoord.X, City.TileCoord.Y);
-			if (Tile)
+			if (!Tile)
+			{
+				++GetFallenCityPlacementDiagnostics().Failed;
+				continue;
+			}
+			else
 			{
 				City.BiomeTag = Tile->BiomeType;
 			}
@@ -131,8 +266,17 @@ void FFallenCityPass::Execute(FLoreGenerationContext& Ctx)
 			City.LoreSnippet = GenerateLoreSnippet(City, Civ, Conqueror);
 
 			Ctx.LoreState.FallenCities.Add(MoveTemp(City));
+			++GetFallenCityPlacementDiagnostics().Cities;
 		}
 	}
+
+	const FFallenCityPlacementDiagnostics& Diagnostics = GetFallenCityPlacementDiagnostics();
+	UE_LOG(LogFallenCity, Log,
+		TEXT("[FallenCity] Placement summary: Cities=%d Relocated=%d RejectedWater=%d Failed=%d"),
+		Diagnostics.Cities,
+		Diagnostics.Relocated,
+		Diagnostics.RejectedWater,
+		Diagnostics.Failed);
 
 	UE_LOG(LogFallenCity, Log, TEXT("FallenCityPass — END | %d fallen cities generated"),
 		Ctx.LoreState.FallenCities.Num());
@@ -187,20 +331,103 @@ FIntPoint FFallenCityPass::ChooseRuinTile(
 	const FCivilizationData& Civ,
 	const FLoreGenerationContext& Ctx)
 {
+	FFallenCityPlacementDiagnostics& Diagnostics = GetFallenCityPlacementDiagnostics();
+	if (Ctx.WorldWidth <= 0 || Ctx.WorldHeight <= 0)
+	{
+		++Diagnostics.Failed;
+		UE_LOG(LogFallenCity, Warning,
+			TEXT("[FallenCity] WARNING: Could not find valid land tile for ruin. Civ=%d OriginalTile=(%d,%d) Biome=%s"),
+			Civ.CivID,
+			-1,
+			-1,
+			TEXT("<invalid>"));
+		return FIntPoint(-1, -1);
+	}
+
+	FIntPoint OriginalTileCoord;
+
 	// Prefer tiles from the civ's settlement list (outer settlements = frontier = more likely to fall)
 	if (Civ.Settlements.Num() > 0)
 	{
 		// Pick from the second half of settlements (later-founded, more vulnerable)
 		int32 StartIdx = FMath::Max(0, Civ.Settlements.Num() / 2);
 		int32 Pick = Ctx.RNG.NextInt(UWorldForgeRNG::BRANCH_PREHISTORY, StartIdx, Civ.Settlements.Num() - 1);
-		return Civ.Settlements[Pick].TileCoord;
+		OriginalTileCoord = Civ.Settlements[Pick].TileCoord;
+	}
+	else
+	{
+		// Fallback: random tile near world center
+		OriginalTileCoord = FIntPoint(
+			Ctx.RNG.NextInt(UWorldForgeRNG::BRANCH_PREHISTORY, Ctx.WorldWidth / 4, 3 * Ctx.WorldWidth / 4),
+			Ctx.RNG.NextInt(UWorldForgeRNG::BRANCH_PREHISTORY, Ctx.WorldHeight / 4, 3 * Ctx.WorldHeight / 4)
+		);
 	}
 
-	// Fallback: random tile near world center
-	return FIntPoint(
-		Ctx.RNG.NextInt(UWorldForgeRNG::BRANCH_PREHISTORY, Ctx.WorldWidth / 4, 3 * Ctx.WorldWidth / 4),
-		Ctx.RNG.NextInt(UWorldForgeRNG::BRANCH_PREHISTORY, Ctx.WorldHeight / 4, 3 * Ctx.WorldHeight / 4)
-	);
+	const FWorldTileData* OriginalTile = nullptr;
+	EWorldPlacementRejectReason OriginalReason = EWorldPlacementRejectReason::InvalidBiome;
+	if (TryGetValidLoreTile(Ctx, OriginalTileCoord, OriginalTile, OriginalReason))
+	{
+		return OriginalTileCoord;
+	}
+
+	if (OriginalReason == EWorldPlacementRejectReason::Water)
+	{
+		++Diagnostics.RejectedWater;
+	}
+
+	const FString OldBiome = OriginalTile ? DescribeBiomeTag(OriginalTile->BiomeType) : TEXT("<invalid>");
+
+	FIntPoint RelocatedTileCoord = FIntPoint::ZeroValue;
+	const FWorldTileData* RelocatedTile = nullptr;
+	if (TryFindNearbyValidLoreTile(Ctx, OriginalTileCoord, RelocatedTileCoord, RelocatedTile))
+	{
+		++Diagnostics.Relocated;
+
+		UE_LOG(LogFallenCity, Log,
+			TEXT("[FallenCity] Relocated invalid ruin tile. Old=(%d,%d) OldBiome=%s New=(%d,%d) NewBiome=%s Reason=%s"),
+			OriginalTileCoord.X,
+			OriginalTileCoord.Y,
+			*OldBiome,
+			RelocatedTileCoord.X,
+			RelocatedTileCoord.Y,
+			*DescribeBiomeTag(RelocatedTile->BiomeType),
+			WorldForgePlacement::ToReasonString(OriginalReason));
+
+		return RelocatedTileCoord;
+	}
+
+	FIntPoint StartFallbackCoord = FIntPoint::ZeroValue;
+	const FWorldTileData* StartFallbackTile = nullptr;
+	if (TryGetValidCivStartFallback(Civ, Ctx, StartFallbackCoord, StartFallbackTile))
+	{
+		++Diagnostics.Relocated;
+
+		const FString RelocationReason = FString::Printf(
+			TEXT("%s:StartTileFallback"),
+			WorldForgePlacement::ToReasonString(OriginalReason));
+
+		UE_LOG(LogFallenCity, Log,
+			TEXT("[FallenCity] Relocated invalid ruin tile. Old=(%d,%d) OldBiome=%s New=(%d,%d) NewBiome=%s Reason=%s"),
+			OriginalTileCoord.X,
+			OriginalTileCoord.Y,
+			*OldBiome,
+			StartFallbackCoord.X,
+			StartFallbackCoord.Y,
+			*DescribeBiomeTag(StartFallbackTile->BiomeType),
+			*RelocationReason);
+
+		return StartFallbackCoord;
+	}
+
+	++Diagnostics.Failed;
+	UE_LOG(LogFallenCity, Warning,
+		TEXT("[FallenCity] WARNING: Could not find valid land tile for ruin. Civ=%d OriginalTile=(%d,%d) Biome=%s"),
+		Civ.CivID,
+		OriginalTileCoord.X,
+		OriginalTileCoord.Y,
+		*OldBiome);
+
+	return FIntPoint(-1, -1);
 }
 
 // ─────────────────────────────────────────────

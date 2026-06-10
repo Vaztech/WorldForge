@@ -6,11 +6,90 @@
 #include "Generation/CivGovernmentSeedPass.h"  // ADDED
 #include "Generation/CivEconomySeedPass.h"     // ADDED
 #include "Generation/CivDiplomacySeedPass.h"   // ADDED
+#include "../World/WorldPlacementValidation.h"
+
+namespace
+{
+    constexpr int32 MaxLoggedStartTileRejections = 8;
+
+    struct FCivPlacementDiagnostics
+    {
+        int32 RejectedWater = 0;
+        int32 RejectedInvalid = 0;
+        int32 LoggedSamples = 0;
+    };
+
+    FCivPlacementDiagnostics& GetCivPlacementDiagnostics()
+    {
+        static FCivPlacementDiagnostics Diagnostics;
+        return Diagnostics;
+    }
+
+    void ResetCivPlacementDiagnostics()
+    {
+        GetCivPlacementDiagnostics() = FCivPlacementDiagnostics();
+    }
+
+    void RecordRejectedStartTile(
+        int32 TileIndex,
+        int32 GridWidth,
+        const FWorldTileData& Tile,
+        EWorldPlacementRejectReason Reason)
+    {
+        FCivPlacementDiagnostics& Diagnostics = GetCivPlacementDiagnostics();
+
+        if (Reason == EWorldPlacementRejectReason::Water)
+        {
+            ++Diagnostics.RejectedWater;
+        }
+        else
+        {
+            ++Diagnostics.RejectedInvalid;
+        }
+
+        if (Diagnostics.LoggedSamples >= MaxLoggedStartTileRejections || GridWidth <= 0)
+        {
+            return;
+        }
+
+        ++Diagnostics.LoggedSamples;
+
+        const FString BiomeName = Tile.BiomeType.IsValid() ? Tile.BiomeType.ToString() : TEXT("<invalid>");
+        const int32 X = TileIndex % GridWidth;
+        const int32 Y = TileIndex / GridWidth;
+
+        UE_LOG(LogTemp, Log,
+            TEXT("[CivGen] Rejected start tile. Tile=(%d,%d) Reason=%s Biome=%s Elev=%.3f"),
+            X,
+            Y,
+            WorldForgePlacement::ToReasonString(Reason),
+            *BiomeName,
+            Tile.Elevation);
+    }
+
+    void LogStartPlacementFilters(
+        int32 Candidates,
+        int32 Accepted,
+        int32 RejectedWater,
+        int32 RejectedLava,
+        int32 RejectedBiome)
+    {
+        UE_LOG(LogTemp, Log,
+            TEXT("[CivGen] Start placement filters. Candidates=%d Accepted=%d RejectedWater=%d RejectedLava=%d RejectedBiome=%d"),
+            Candidates,
+            Accepted,
+            RejectedWater,
+            RejectedLava,
+            RejectedBiome);
+    }
+}
 
 TArray<FCivilizationData> UCivilizationGenerator::GenerateCivilizations(
     int32 StartingCivCount, const TArray<FWorldTileData>& WorldTiles,
     int32 GridWidth, UWorldForgeRNG* RNG)
 {
+    ResetCivPlacementDiagnostics();
+
     // ADDED: Build generation context
     FCivGenContext Context;
     Context.StartingCivCount = StartingCivCount;
@@ -20,6 +99,13 @@ TArray<FCivilizationData> UCivilizationGenerator::GenerateCivilizations(
 
     // KEPT EXISTING: Placement/create pass owns starting civ creation
     FCivPlacementPass::Execute(*this, Context);
+
+    const FCivPlacementDiagnostics& PlacementDiagnostics = GetCivPlacementDiagnostics();
+    UE_LOG(LogTemp, Log,
+        TEXT("[CivGen] Placement summary: Civs=%d RejectedWater=%d RejectedInvalid=%d"),
+        Context.GeneratedCivs.Num(),
+        PlacementDiagnostics.RejectedWater,
+        PlacementDiagnostics.RejectedInvalid);
 
     // ADDED: Cultural DNA must be seeded before downstream government/economy/diplomacy passes.
     FCivCultureSeedPass::Execute(*this, Context.GeneratedCivs, WorldTiles, RNG);
@@ -186,28 +272,92 @@ void UCivilizationGenerator::ClaimTerritories(
 
 int32 UCivilizationGenerator::FindStartingTile(
     const TArray<FWorldTileData>& Tiles,
-    const TArray<int32>& Used, UWorldForgeRNG* RNG) const
+    const TArray<int32>& Used,
+    int32 GridWidth,
+    UWorldForgeRNG* RNG) const
 {
-    if (Tiles.Num() == 0) return -1;
+    if (Tiles.Num() == 0 || GridWidth <= 0 || RNG == nullptr)
+    {
+        return INDEX_NONE;
+    }
+
+    int32 CandidateCount = 0;
+    int32 AcceptedCount = 0;
+    int32 RejectedWater = 0;
+    int32 RejectedLava = 0;
+    int32 RejectedBiome = 0;
+
+    auto RecordLocalRejection = [&](int32 TileIndex, const FWorldTileData& Tile, EWorldPlacementRejectReason Reason)
+    {
+        ++CandidateCount;
+
+        switch (Reason)
+        {
+        case EWorldPlacementRejectReason::Water:
+            ++RejectedWater;
+            break;
+        case EWorldPlacementRejectReason::Lava:
+            ++RejectedLava;
+            break;
+        default:
+            ++RejectedBiome;
+            break;
+        }
+
+        RecordRejectedStartTile(TileIndex, GridWidth, Tile, Reason);
+    };
+
+    auto AcceptTile = [&](int32 TileIndex) -> int32
+    {
+        ++CandidateCount;
+        ++AcceptedCount;
+        LogStartPlacementFilters(CandidateCount, AcceptedCount, RejectedWater, RejectedLava, RejectedBiome);
+        return TileIndex;
+    };
 
     for (int32 Attempt = 0; Attempt < 30; Attempt++)
     {
         const int32 Idx = RNG->NextInt(UWorldForgeRNG::BRANCH_CIV_START, 0, Tiles.Num() - 1);
 
-        if (Used.Contains(Idx)) continue;
-        if (!Tiles[Idx].BiomeType.IsValid()) continue;
-        if (Tiles[Idx].Elevation < 0.1f) continue;
+        if (Used.Contains(Idx))
+        {
+            continue;
+        }
 
-        return Idx;
+        const FWorldTileData& Candidate = Tiles[Idx];
+        const EWorldPlacementRejectReason Reason = WorldForgePlacement::ClassifyMajorSettlementTile(Candidate);
+
+        if (Reason != EWorldPlacementRejectReason::None)
+        {
+            RecordLocalRejection(Idx, Candidate, Reason);
+            continue;
+        }
+
+        return AcceptTile(Idx);
     }
 
     for (int32 i = 0; i < Tiles.Num(); i++)
     {
-        if (!Used.Contains(i) && Tiles[i].Elevation >= 0.1f)
-            return i;
+        if (Used.Contains(i))
+        {
+            continue;
+        }
+
+        const FWorldTileData& Candidate = Tiles[i];
+        const EWorldPlacementRejectReason Reason = WorldForgePlacement::ClassifyMajorSettlementTile(Candidate);
+
+        if (Reason != EWorldPlacementRejectReason::None)
+        {
+            RecordLocalRejection(i, Candidate, Reason);
+            continue;
+        }
+
+        return AcceptTile(i);
     }
 
-    return 0;
+    LogStartPlacementFilters(CandidateCount, AcceptedCount, RejectedWater, RejectedLava, RejectedBiome);
+    UE_LOG(LogTemp, Warning, TEXT("[CivGen] WARNING: No valid start tile found after placement filters."));
+    return INDEX_NONE;
 }
 
 FGameplayTag UCivilizationGenerator::AssignRaceFromBiome(

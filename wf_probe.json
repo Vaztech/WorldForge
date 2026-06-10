@@ -1,0 +1,39 @@
+{
+  "TXT_TabWorld": {
+    "img_tex": "ok",
+    "img_slot": "ok",
+    "txt_text": "ok",
+    "txt_slot": "ok"
+  },
+  "TXT_TabColony": {
+    "img_tex": "ok",
+    "img_slot": "ok",
+    "txt_text": "ok",
+    "txt_slot": "ok"
+  },
+  "TXT_TabColonists": {
+    "img_tex": "ok",
+    "img_slot": "ok",
+    "txt_text": "ok",
+    "txt_slot": "ok"
+  },
+  "TXT_RandomizeSeed": {
+    "img_tex": "ok",
+    "img_slot": "ok",
+    "txt_text": "ok",
+    "txt_slot": "ok"
+  },
+  "TXT_Back": {
+    "img_tex": "ok",
+    "img_slot": "ok",
+    "txt_text": "ok",
+    "txt_slot": "ok"
+  },
+  "TXT_Continue": {
+    "img_tex": "ok",
+    "img_slot": "ok",
+    "txt_text": "ok",
+    "txt_slot": "ok"
+  },
+  "save": "ok"
+}

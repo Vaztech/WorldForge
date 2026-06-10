@@ -11,6 +11,36 @@ class UWorld;
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnSaveComplete, bool, bSuccess);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnLoadComplete, bool, bSuccess);
 
+USTRUCT(BlueprintType)
+struct WORLDFORGE_API FWorldForgeSaveSlotSummary
+{
+    GENERATED_BODY()
+
+    UPROPERTY(BlueprintReadOnly, Category = "WorldForge|Save")
+    int32 SlotIndex = 0;
+
+    UPROPERTY(BlueprintReadOnly, Category = "WorldForge|Save")
+    FString SaveSlotName;
+
+    UPROPERTY(BlueprintReadOnly, Category = "WorldForge|Save")
+    FString WorldName;
+
+    UPROPERTY(BlueprintReadOnly, Category = "WorldForge|Save")
+    FString ColonyName;
+
+    UPROPERTY(BlueprintReadOnly, Category = "WorldForge|Save")
+    FString LastPlayedText;
+
+    UPROPERTY(BlueprintReadOnly, Category = "WorldForge|Save")
+    FString DayYearText;
+
+    UPROPERTY(BlueprintReadOnly, Category = "WorldForge|Save")
+    FString SaveVersionText;
+
+    UPROPERTY(BlueprintReadOnly, Category = "WorldForge|Save")
+    bool bHasSave = false;
+};
+
 UCLASS(BlueprintType)
 class WORLDFORGE_API USaveSubsystem : public UGameInstanceSubsystem
 {
@@ -28,10 +58,13 @@ public:
     TArray<FString> GetSaveSlots() const;
 
     UFUNCTION(BlueprintCallable, Category = "WorldForge|Save")
+    TArray<FWorldForgeSaveSlotSummary> GetFixedSaveSlotSummaries(int32 MaxSlots = 8) const;
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Save")
     bool SaveSlotExists(const FString& SlotName) const;
 
     UFUNCTION(BlueprintCallable, Category = "WorldForge|Save")
-    void DeleteSaveSlot(const FString& SlotName);
+    bool DeleteSaveSlot(const FString& SaveSlotName, FString& OutReason);
 
     UPROPERTY(BlueprintAssignable, Category = "WorldForge|Save")
     FOnSaveComplete OnSaveComplete;

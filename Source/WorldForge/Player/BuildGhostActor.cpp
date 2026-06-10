@@ -156,6 +156,30 @@ bool ABuildGhostActor::SetPreviewMesh(UStaticMesh* PreviewMesh)
     }
 
     GhostMesh->SetStaticMesh(PreviewMesh);
+
+    // Re-apply the ghost material to every slot so the DataTable preview mesh
+    // renders translucent/ghost-colored instead of using its own opaque materials.
+    // SetStaticMesh resets all slots to the incoming mesh's defaults, so this
+    // must happen after the mesh swap, not before.
+    if (GhostMaterial)
+    {
+        const int32 NumMaterials = GhostMesh->GetNumMaterials();
+        for (int32 MatIdx = 0; MatIdx < NumMaterials; ++MatIdx)
+        {
+            GhostMesh->SetMaterial(MatIdx, GhostMaterial);
+        }
+        UE_LOG(LogTemp, Log,
+            TEXT("[BuildGhost] Ghost preview material applied: Mesh=%s Slots=%d"),
+            *PreviewMesh->GetName(),
+            NumMaterials);
+    }
+    else
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[BuildGhost] No ghost material available; preview mesh %s will render with its original materials."),
+            *PreviewMesh->GetName());
+    }
+
     GhostMesh->SetHiddenInGame(false);
     GhostMesh->SetVisibility(true, true);
     GhostMesh->SetRenderCustomDepth(true);
@@ -172,7 +196,7 @@ bool ABuildGhostActor::SetPreviewMesh(UStaticMesh* PreviewMesh)
         }
     }
 
-    UE_LOG(LogTemp, Log, TEXT("[BuildGhost] Preview mesh updated: %s"), *PreviewMesh->GetPathName());
+    UE_LOG(LogTemp, Log, TEXT("[BuildGhost] Preview ghost updated: %s"), *PreviewMesh->GetPathName());
     LogPreviewDiagnostics(TEXT("SetPreviewMesh"));
     return true;
 }

@@ -10,9 +10,37 @@
 #include "Engine/World.h"
 #include "Engine/DataTable.h"
 #include "Voxel/VoxelWorldManager.h"
+#include "World/WorldMapSubsystem.h"
 #include "Data/WorldForgeTags.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogGridOverlay, Log, All);
+
+namespace
+{
+	bool IsSurfaceMineSharedGridMode(EBuildToolMode Mode, bool bUseUndergroundWhiteGrid)
+	{
+		return Mode == EBuildToolMode::Mine && !bUseUndergroundWhiteGrid;
+	}
+
+	FGridOverlayStyle MakeMineSharedGridStyle(const FGridOverlayStyle& SourceStyle)
+	{
+		FGridOverlayStyle Style = SourceStyle;
+		Style.NeutralGridColor = FLinearColor(0.18f, 0.18f, 0.18f, 0.20f);
+		Style.TileColor = FLinearColor(0.18f, 0.18f, 0.18f, 0.55f);
+		Style.BorderColor = FLinearColor(0.70f, 0.70f, 0.70f, 1.00f);
+		Style.HoverColor = FLinearColor(0.35f, 0.35f, 0.35f, 0.60f);
+		Style.DragPreviewColor = FLinearColor(0.24f, 0.24f, 0.24f, 0.45f);
+
+		// Option D / Fix B: the overlay's CellSizeUU is the 1600uu MACRO size, so the icon
+		// (sized CellSizeUU * IconScale) was rendering as a ~640uu giant marker that dwarfed
+		// the 200uu terrain cubes. Keep the clean macro selection SQUARE, but shrink the MINE
+		// icon to a small badge (~240uu) by scaling it to ~one voxel of the 8-voxel macro span.
+		// 1/8 = 0.125 would be exactly one 200uu voxel; 0.15 reads as a deliberate badge.
+		Style.IconScale = 0.15f;
+		return Style;
+	}
+}
+
 
 // ─────────────────────────────────────────────────────────────
 // Construction
@@ -122,9 +150,22 @@ void ATileGridOverlayActor::BeginPlay()
 
 	// Keep the overlay close to the voxel surface now that rendering is verified.
 	// Tune these values if terrain z-fighting appears; avoid high floating overlays.
-	ZOffset = FMath::Max(ZOffset, 3.0f);
+	OverlayVisualZOffset = FMath::Max(OverlayVisualZOffset, 3.0f);
 	IconZOffset = FMath::Max(IconZOffset, 5.0f);
 	VisibleGridRadius = FMath::Max(VisibleGridRadius, 96);
+
+	// Cache the voxel world origin so all transform builders can apply the correct
+	// world-space offset without accessing the subsystem on every instance addition.
+	if (UVoxelWorldManager* VM = GetWorld() ? GetWorld()->GetSubsystem<UVoxelWorldManager>() : nullptr)
+	{
+		// GetVoxelWorldOrigin() is private on UVoxelWorldManager.
+		// Derive the corner origin from the public GridToWorld(0,0,0) center.
+		const float SafeSize = FMath::Max(1.0f, CellSizeUU);
+		const FVector VoxelZeroCenter = VM->GridToWorld(FIntPoint(0, 0), 0);
+		VoxelWorldOrigin = VoxelZeroCenter - FVector(SafeSize * 0.5f, SafeSize * 0.5f, SafeSize * 0.5f);
+	}
+	UE_LOG(LogGridOverlay, Log, TEXT("VoxelWorldOrigin=(%.1f,%.1f,%.1f)"),
+		VoxelWorldOrigin.X, VoxelWorldOrigin.Y, VoxelWorldOrigin.Z);
 
 	EnsurePlaneMesh();
 	EnsureMiningVolumeMesh();
@@ -255,9 +296,9 @@ void ATileGridOverlayActor::BeginPlay()
 	bOverlayVisible = false;
 
 	UE_LOG(LogGridOverlay, Log,
-		TEXT("TileGridOverlayActor ready. CellSize=%.0f ZOffset=%.1f VisibleGridRadius=%d"),
+		TEXT("TileGridOverlayActor ready. CellSize=%.0f OverlayVisualZOffset=%.1f VisibleGridRadius=%d"),
 		CellSizeUU,
-		ZOffset,
+		OverlayVisualZOffset,
 		VisibleGridRadius);
 }
 
@@ -311,6 +352,11 @@ void ATileGridOverlayActor::SetActiveMode(EBuildToolMode Mode)
 		ActiveStyle = FGridOverlayStyle();
 	}
 
+	if (Mode == EBuildToolMode::Mine)
+	{
+		ActiveStyle = MakeMineSharedGridStyle(ActiveStyle);
+	}
+
 	// Update hover material color
 	if (HoverMID)
 	{
@@ -323,12 +369,21 @@ void ATileGridOverlayActor::SetActiveMode(EBuildToolMode Mode)
 	// Recolor all existing instances
 	RebuildAllInstances();
 
+	if (Mode == EBuildToolMode::Mine)
+	{
+		UMaterialInterface* SharedGridMaterial = TileMeshHISM ? TileMeshHISM->GetMaterial(0) : nullptr;
+		UE_LOG(LogGridOverlay, Log,
+			TEXT("[CUBE-MINING-V2] MineCopiedBuildFarmMaterial=%s"),
+			SharedGridMaterial ? *SharedGridMaterial->GetName() : TEXT("None"));
+	}
+
 	UE_LOG(LogGridOverlay, Log, TEXT("Designation changed to %d. Selected=%d DragPreview=%d BaseGrid=%d"),
 		static_cast<int32>(ToolModeToDesignationType(Mode)),
 		SelectedCells.Num(),
 		DragCells.Num(),
 		BaseGridCells.Num());
 }
+
 
 void ATileGridOverlayActor::SetCellSizeUU(float InSize)
 {
@@ -351,6 +406,11 @@ void ATileGridOverlayActor::SetHoveredCell(const FIntVector& VoxelCoord, float T
 	const FTransform CellXform = MakeCellTransform(VoxelCoord, TerrainZ);
 	HoverMeshComp->SetWorldTransform(CellXform);
 	HoverMeshComp->SetVisibility(bOverlayVisible);
+
+	UE_LOG(LogGridOverlay, Verbose,
+		TEXT("[HoverTile] Voxel=(%d,%d,%d) TerrainZ=%.1f FinalHoverWorldZ=%.1f"),
+		VoxelCoord.X, VoxelCoord.Y, VoxelCoord.Z,
+		TerrainZ, CellXform.GetLocation().Z);
 }
 
 void ATileGridOverlayActor::ClearHover()
@@ -366,15 +426,17 @@ void ATileGridOverlayActor::ClearHover()
 
 void ATileGridOverlayActor::AddSelectedCell(const FIntVector& VoxelCoord, float TerrainZ)
 {
-	if (SelectedCells.Contains(VoxelCoord)) return;
+	const bool bDigSelection = (CurrentMode == EBuildToolMode::Dig);
 
-	const bool bMiningSelection = (CurrentMode == EBuildToolMode::Mine || CurrentMode == EBuildToolMode::Dig);
-
-	if (bMiningSelection)
+	if (SelectedCells.Contains(VoxelCoord))
 	{
-		// Mine mode uses the dedicated cap/outline preview in SetMiningVolumeCells().
-		// Do not add the normal flat selected-cell tile here; on smooth SDF terrain it reads
-		// as a grey/black clipped square and makes the selection look offset.
+		return;
+	}
+
+	// Mine now uses the same flat selected-tile layer as Build/Farm.
+	// Dig keeps the index-only path so underground volume visuals remain separate.
+	if (bDigSelection)
+	{
 		SelectedCells.Add(VoxelCoord, INDEX_NONE);
 	}
 	else
@@ -390,9 +452,10 @@ void ATileGridOverlayActor::AddSelectedCell(const FIntVector& VoxelCoord, float 
 		}
 	}
 
-	UE_LOG(LogGridOverlay, Verbose, TEXT("Selected cell (%d,%d,%d) — total=%d"),
+	UE_LOG(LogGridOverlay, Verbose, TEXT("Selected cell (%d,%d,%d) - total=%d"),
 		VoxelCoord.X, VoxelCoord.Y, VoxelCoord.Z, SelectedCells.Num());
 }
+
 
 void ATileGridOverlayActor::RemoveSelectedCell(const FIntVector& VoxelCoord)
 {
@@ -424,14 +487,14 @@ void ATileGridOverlayActor::SetSelectedCells(const TMap<FIntVector, float>& Cell
 	ClearHISMLayer(TileMeshHISM, SurfaceMiningMarkerCells);
 	ClearHISMLayer(IconMeshHISM, SelectedIcons);
 
-	const bool bMiningSelection = (CurrentMode == EBuildToolMode::Mine || CurrentMode == EBuildToolMode::Dig);
+	const bool bDigSelection = (CurrentMode == EBuildToolMode::Dig);
 
-	for (const auto& Pair : CellsWithTerrainZ)
+	// Mine now uses the same flat selected-tile layer as Build/Farm.
+	// Dig keeps the index-only path so underground volume visuals remain separate.
+	for (const TPair<FIntVector, float>& Pair : CellsWithTerrainZ)
 	{
-		if (bMiningSelection)
+		if (bDigSelection)
 		{
-			// Store logical selection only. The real mine visual is the dedicated
-			// MiningVolumeHISM cap plus the material-independent yellow outline/X lines.
 			SelectedCells.Add(Pair.Key, INDEX_NONE);
 			continue;
 		}
@@ -447,8 +510,20 @@ void ATileGridOverlayActor::SetSelectedCells(const TMap<FIntVector, float>& Cell
 		}
 	}
 
+	if (IsSurfaceMineSharedGridMode(CurrentMode, bUseUndergroundWhiteGrid) && bBaseGridBuilt && CellsWithTerrainZ.Num() > 0)
+	{
+		const FIntVector FirstCell = CellsWithTerrainZ.CreateConstIterator()->Key;
+		const bool bMatch = (BaseGridAnchorCoord.Z == FirstCell.Z);
+		UE_LOG(LogGridOverlay, Log,
+			TEXT("[CUBE-MINING-V2] SelectedVsBaseGrid BaseGridLayer=%d SelectedVisualLayer=%d Match=%s"),
+			BaseGridAnchorCoord.Z,
+			FirstCell.Z,
+			bMatch ? TEXT("YES") : TEXT("NO"));
+	}
+
 	UE_LOG(LogGridOverlay, Log, TEXT("Batch set %d selected cells."), SelectedCells.Num());
 }
+
 
 void ATileGridOverlayActor::ClearSelection()
 {
@@ -465,11 +540,8 @@ void ATileGridOverlayActor::SetMiningVolumeCells(const TArray<FIntVector>& Voxel
 		return;
 	}
 
-	// Mine selection has two different visual modes:
-	//   Surface:    flat marker tiles only, so the player marks terrain from above.
-	//   Underground: M_WF_MiningGhost cube instances, so the exact voxel for removal is clear.
 	ClearHISMLayer(MiningVolumeHISM, MiningVolumeCells);
-	ClearHISMLayer(TileMeshHISM, SurfaceMiningMarkerCells);
+	SurfaceMiningMarkerCells.Empty();
 
 	if (MiningDesignationLineBatch)
 	{
@@ -477,59 +549,213 @@ void ATileGridOverlayActor::SetMiningVolumeCells(const TArray<FIntVector>& Voxel
 		MiningDesignationLineBatch->SetVisibility(false, true);
 	}
 
-	const FLinearColor EffectiveColor = GetMiningDesignationColor();
+	auto HideVolumeChannel = [this]()
+		{
+			MiningVolumeHISM->SetVisibility(false, true);
+			MiningVolumeHISM->SetHiddenInGame(true);
+			MiningVolumeHISM->MarkRenderStateDirty();
+		};
+
+	if (TileMeshHISM)
+	{
+		TileMeshHISM->SetVisibility(bOverlayVisible, true);
+		TileMeshHISM->SetHiddenInGame(!bOverlayVisible);
+		TileMeshHISM->SetCullDistances(0, 0);
+		TileMeshHISM->MarkRenderStateDirty();
+	}
 
 	if (!bUseUndergroundWhiteGrid)
 	{
-		// Surface mine mode: no voxel cube, no yellow X-line clutter. Just a flat tile marker
-		// at the active terrain layer. Confirm/commit can still create deeper designations,
-		// but the surface interaction should read as a terrain marker.
-		for (const FIntVector& VoxelCoord : VoxelCoords)
-		{
-			if (SurfaceMiningMarkerCells.Contains(VoxelCoord))
-			{
-				continue;
-			}
-
-			// Surface marker should follow the actual terrain surface one-to-one.
-			const float MarkerWorldZ = SelfSampleTerrainZ(VoxelCoord);
-			AddCellToHISM(VoxelCoord, MarkerWorldZ, EffectiveColor, SurfaceMiningMarkerCells);
-		}
-
-		if (TileMeshHISM)
-		{
-			TileMeshHISM->SetVisibility(bOverlayVisible && SurfaceMiningMarkerCells.Num() > 0, true);
-			TileMeshHISM->SetHiddenInGame(!(bOverlayVisible && SurfaceMiningMarkerCells.Num() > 0));
-			TileMeshHISM->SetCullDistances(0, 0);
-			TileMeshHISM->MarkRenderStateDirty();
-		}
-
-		MiningVolumeHISM->SetVisibility(false, true);
-		MiningVolumeHISM->SetHiddenInGame(true);
-		MiningVolumeHISM->MarkRenderStateDirty();
-
-		UE_LOG(LogGridOverlay, Log, TEXT("Mining surface marker preview set. Tiles=%d"), SurfaceMiningMarkerCells.Num());
+		HideVolumeChannel();
+		UE_LOG(LogGridOverlay, Log,
+			TEXT("Mining surface flat selected-tile preview active. Requested=%d SelectedFootprint=%d"),
+			VoxelCoords.Num(),
+			SelectedCells.Num());
 		return;
 	}
 
-	// Underground mine mode: use the same ghost material/mesh style as BP_MiningGhostActor.
-	if (MiningVolumeMID)
+	// Underground Mine no longer uses voxel-volume cubes for selected/preview cells.
+	// The selected and drag-preview maps already contain true 200uu voxel coords and
+	// are rendered by the normal flat tile HISMs. This channel is only a fallback flat
+	// overlay when a caller supplies mine voxels before the selected/drag layer exists.
+	EnsurePlaneMesh();
+	if (!CellPlaneMesh || !TileMaterialBase)
 	{
-		MiningVolumeMID->SetVectorParameterValue(TEXT("GhostTint"), EffectiveColor);
-		MiningVolumeMID->SetScalarParameterValue(TEXT("GhostOpacity"), EffectiveColor.A);
+		HideVolumeChannel();
+		UE_LOG(LogGridOverlay, Warning,
+			TEXT("[MineUGFlatOverlayProof] SelectedVoxel=(%d,%d,%d) CellSizeUU=%.1f World=(0.0,0.0,0.0) VisualPath=FlatOverlayMissingAsset VolumeCube=false Requested=%d"),
+			VoxelCoords.Num() > 0 ? VoxelCoords[0].X : 0,
+			VoxelCoords.Num() > 0 ? VoxelCoords[0].Y : 0,
+			VoxelCoords.Num() > 0 ? VoxelCoords[0].Z : 0,
+			CellSizeUU,
+			VoxelCoords.Num());
+		return;
 	}
 
+	MiningVolumeHISM->SetStaticMesh(CellPlaneMesh);
+	MiningVolumeHISM->SetMaterial(0, TileMaterialBase);
+	MiningVolumeHISM->NumCustomDataFloats = FMath::Max(MiningVolumeHISM->NumCustomDataFloats, 5);
+
+	auto MakeFlatOverlayTransform = [this](const FIntVector& VoxelCoord) -> FTransform
+		{
+			const float WorldX = VoxelWorldOrigin.X + (static_cast<float>(VoxelCoord.X) + 0.5f) * CellSizeUU;
+			const float WorldY = VoxelWorldOrigin.Y + (static_cast<float>(VoxelCoord.Y) + 0.5f) * CellSizeUU;
+			const float WorldZ = VoxelWorldOrigin.Z + (static_cast<float>(VoxelCoord.Z) + 1.0f) * CellSizeUU + OverlayVisualZOffset;
+			const float MeshScale = CellSizeUU / 100.0f;
+
+			return FTransform(
+				FRotator::ZeroRotator,
+				FVector(WorldX, WorldY, WorldZ),
+				FVector(MeshScale, MeshScale, 1.0f));
+		};
+
+	FIntVector ProofCoord = VoxelCoords.Num() > 0
+		? VoxelCoords[0]
+		: (SelectedCells.Num() > 0 ? SelectedCells.CreateConstIterator()->Key : FIntVector::ZeroValue);
+	FVector ProofWorld = MakeFlatOverlayTransform(ProofCoord).GetLocation();
+
+	if (const int32* SelectedIdx = SelectedCells.Find(ProofCoord))
+	{
+		FTransform SelectedXform;
+		if (TileMeshHISM && TileMeshHISM->GetInstanceTransform(*SelectedIdx, SelectedXform, true))
+		{
+			ProofWorld = SelectedXform.GetLocation();
+		}
+	}
+	else if (const int32* DragIdx = DragCells.Find(ProofCoord))
+	{
+		FTransform DragXform;
+		if (DragPreviewMeshHISM && DragPreviewMeshHISM->GetInstanceTransform(*DragIdx, DragXform, true))
+		{
+			ProofWorld = DragXform.GetLocation();
+		}
+	}
+
+	int32 AddedFallbackFlat = 0;
 	for (const FIntVector& VoxelCoord : VoxelCoords)
 	{
-		if (MiningVolumeCells.Contains(VoxelCoord))
+		if (SelectedCells.Contains(VoxelCoord) || DragCells.Contains(VoxelCoord) || MiningVolumeCells.Contains(VoxelCoord))
 		{
 			continue;
 		}
 
-		const int32 Idx = MiningVolumeHISM->AddInstance(MakeMiningVolumeTransform(VoxelCoord), true);
-		SetInstanceColor(MiningVolumeHISM, Idx, EffectiveColor);
-		MiningVolumeHISM->SetCustomDataValue(Idx, 4, EffectiveColor.A, true);
+		const FTransform FlatXform = MakeFlatOverlayTransform(VoxelCoord);
+		const int32 Idx = MiningVolumeHISM->AddInstance(FlatXform, true);
+
+		FLinearColor FlatColor = ActiveStyle.TileColor;
+		FlatColor.A = FMath::Clamp(FlatColor.A, 0.20f, 0.55f);
+		SetInstanceColor(MiningVolumeHISM, Idx, FlatColor);
+		MiningVolumeHISM->SetCustomDataValue(Idx, 4, FMath::Max(ActiveStyle.BorderColor.A, 0.65f), true);
 		MiningVolumeCells.Add(VoxelCoord, Idx);
+
+		if (AddedFallbackFlat == 0 && !SelectedCells.Contains(ProofCoord) && !DragCells.Contains(ProofCoord))
+		{
+			ProofCoord = VoxelCoord;
+			ProofWorld = FlatXform.GetLocation();
+		}
+		++AddedFallbackFlat;
+	}
+
+	const bool bHasFallbackFlat = MiningVolumeCells.Num() > 0;
+	MiningVolumeHISM->SetVisibility(bOverlayVisible && bHasFallbackFlat, true);
+	MiningVolumeHISM->SetHiddenInGame(!(bOverlayVisible && bHasFallbackFlat));
+	MiningVolumeHISM->SetCullDistances(0, 0);
+	MiningVolumeHISM->MarkRenderStateDirty();
+
+	UE_LOG(LogGridOverlay, Log,
+		TEXT("[MineUGFlatOverlayProof] SelectedVoxel=(%d,%d,%d) CellSizeUU=%.1f World=(%.1f,%.1f,%.1f) VisualPath=FlatOverlay VolumeCube=false Requested=%d ExistingFlat=%d FallbackFlat=%d"),
+		ProofCoord.X, ProofCoord.Y, ProofCoord.Z,
+		CellSizeUU,
+		ProofWorld.X, ProofWorld.Y, ProofWorld.Z,
+		VoxelCoords.Num(),
+		VoxelCoords.Num() - AddedFallbackFlat,
+		AddedFallbackFlat);
+}
+
+void ATileGridOverlayActor::SetMiningVolumeCellsTinted(const TArray<FIntVector>& VoxelCoords, const TArray<FLinearColor>& Tints)
+{
+	if (!MiningVolumeHISM)
+	{
+		return;
+	}
+
+	ClearHISMLayer(MiningVolumeHISM, MiningVolumeCells);
+	SurfaceMiningMarkerCells.Empty();
+
+	if (MiningDesignationLineBatch)
+	{
+		MiningDesignationLineBatch->Flush();
+		MiningDesignationLineBatch->SetVisibility(false, true);
+	}
+
+	auto HideVolumeChannel = [this]()
+		{
+			MiningVolumeHISM->SetVisibility(false, true);
+			MiningVolumeHISM->SetHiddenInGame(true);
+			MiningVolumeHISM->MarkRenderStateDirty();
+		};
+
+	if (!bUseUndergroundWhiteGrid)
+	{
+		HideVolumeChannel();
+		return;
+	}
+
+	EnsurePlaneMesh();
+	if (!CellPlaneMesh || !TileMaterialBase)
+	{
+		HideVolumeChannel();
+		return;
+	}
+
+	MiningVolumeHISM->SetStaticMesh(CellPlaneMesh);
+	MiningVolumeHISM->SetMaterial(0, TileMaterialBase);
+	MiningVolumeHISM->NumCustomDataFloats = FMath::Max(MiningVolumeHISM->NumCustomDataFloats, 5);
+
+	auto MakeFlatOverlayTransform = [this](const FIntVector& VoxelCoord) -> FTransform
+		{
+			const float WorldX = VoxelWorldOrigin.X + (static_cast<float>(VoxelCoord.X) + 0.5f) * CellSizeUU;
+			const float WorldY = VoxelWorldOrigin.Y + (static_cast<float>(VoxelCoord.Y) + 0.5f) * CellSizeUU;
+			const float WorldZ = VoxelWorldOrigin.Z + (static_cast<float>(VoxelCoord.Z) + 1.0f) * CellSizeUU + OverlayVisualZOffset;
+			const float MeshScale = CellSizeUU / 100.0f;
+
+			return FTransform(
+				FRotator::ZeroRotator,
+				FVector(WorldX, WorldY, WorldZ),
+				FVector(MeshScale, MeshScale, 1.0f));
+		};
+
+	FIntVector ProofCoord = VoxelCoords.Num() > 0 ? VoxelCoords[0] : FIntVector::ZeroValue;
+	FVector ProofWorld = MakeFlatOverlayTransform(ProofCoord).GetLocation();
+	int32 AddedFlat = 0;
+
+	for (int32 i = 0; i < VoxelCoords.Num(); ++i)
+	{
+		const FIntVector& VoxelCoord = VoxelCoords[i];
+		if (SelectedCells.Contains(VoxelCoord) || DragCells.Contains(VoxelCoord) || MiningVolumeCells.Contains(VoxelCoord))
+		{
+			continue;
+		}
+
+		const FTransform FlatXform = MakeFlatOverlayTransform(VoxelCoord);
+		const int32 Idx = MiningVolumeHISM->AddInstance(FlatXform, true);
+
+		FLinearColor CellColor = ActiveStyle.DragPreviewColor;
+		if (Tints.IsValidIndex(i))
+		{
+			CellColor.A = FMath::Clamp(Tints[i].A, 0.05f, FMath::Max(0.05f, ActiveStyle.DragPreviewColor.A));
+		}
+
+		SetInstanceColor(MiningVolumeHISM, Idx, CellColor);
+		MiningVolumeHISM->SetCustomDataValue(Idx, 4, FMath::Max(ActiveStyle.BorderColor.A, 0.45f), true);
+		MiningVolumeCells.Add(VoxelCoord, Idx);
+
+		if (AddedFlat == 0)
+		{
+			ProofCoord = VoxelCoord;
+			ProofWorld = FlatXform.GetLocation();
+		}
+		++AddedFlat;
 	}
 
 	MiningVolumeHISM->SetVisibility(bOverlayVisible && MiningVolumeCells.Num() > 0, true);
@@ -537,21 +763,23 @@ void ATileGridOverlayActor::SetMiningVolumeCells(const TArray<FIntVector>& Voxel
 	MiningVolumeHISM->SetCullDistances(0, 0);
 	MiningVolumeHISM->MarkRenderStateDirty();
 
-	// No additional line/X overlay underground: the ghost cube itself is the voxel removal marker.
-	UE_LOG(LogGridOverlay, Log, TEXT("Mining underground ghost preview set. Voxels=%d"), MiningVolumeCells.Num());
+	UE_LOG(LogGridOverlay, Log,
+		TEXT("[MineUGFlatOverlayProof] SelectedVoxel=(%d,%d,%d) CellSizeUU=%.1f World=(%.1f,%.1f,%.1f) VisualPath=FlatOverlay VolumeCube=false TintedPreview=%d FlatCells=%d"),
+		ProofCoord.X, ProofCoord.Y, ProofCoord.Z,
+		CellSizeUU,
+		ProofWorld.X, ProofWorld.Y, ProofWorld.Z,
+		VoxelCoords.Num(),
+		AddedFlat);
 }
 
 void ATileGridOverlayActor::ClearMiningVolumeCells()
 {
 	ClearHISMLayer(MiningVolumeHISM, MiningVolumeCells);
-	ClearHISMLayer(TileMeshHISM, SurfaceMiningMarkerCells);
+	SurfaceMiningMarkerCells.Empty();
 	if (MiningVolumeHISM)
 	{
 		MiningVolumeHISM->SetVisibility(false, true);
-	}
-	if (TileMeshHISM)
-	{
-		TileMeshHISM->SetVisibility(false, true);
+		MiningVolumeHISM->SetHiddenInGame(true);
 	}
 	if (MiningDesignationLineBatch)
 	{
@@ -571,7 +799,7 @@ void ATileGridOverlayActor::GetSelectedCoords(TArray<FIntVector>& OutCoords) con
 
 void ATileGridOverlayActor::SetDragPreviewCells(const TMap<FIntVector, float>& CellsWithTerrainZ)
 {
-	// Remove old drag instances that are NOT in the new set
+	// Remove old drag instances that are NOT in the new set.
 	TArray<FIntVector> ToRemove;
 	for (const auto& Pair : DragCells)
 	{
@@ -585,7 +813,7 @@ void ATileGridOverlayActor::SetDragPreviewCells(const TMap<FIntVector, float>& C
 		RemoveCellFromHISM(Coord, DragCells);
 	}
 
-	// Add new drag cells not already present
+	// Add new drag cells not already present. Mine shares this exact Build/Farm path.
 	for (const auto& Pair : CellsWithTerrainZ)
 	{
 		if (!DragCells.Contains(Pair.Key) && !SelectedCells.Contains(Pair.Key))
@@ -593,7 +821,75 @@ void ATileGridOverlayActor::SetDragPreviewCells(const TMap<FIntVector, float>& C
 			AddCellToHISM(Pair.Key, Pair.Value, ActiveStyle.DragPreviewColor, DragCells);
 		}
 	}
+
+	if (IsSurfaceMineSharedGridMode(CurrentMode, bUseUndergroundWhiteGrid))
+	{
+		UE_LOG(LogGridOverlay, Log,
+			TEXT("[CUBE-MINING-V2] MineCopiedBuildFarmPreview Count=%d"),
+			DragCells.Num());
+
+		if (bBaseGridBuilt && CellsWithTerrainZ.Num() > 0)
+		{
+			const FIntVector FirstCell = CellsWithTerrainZ.CreateConstIterator()->Key;
+			const bool bMatch = (BaseGridAnchorCoord.Z == FirstCell.Z);
+			UE_LOG(LogGridOverlay, Log,
+				TEXT("[CUBE-MINING-V2] DragVsBaseGrid BaseGridLayer=%d DragVisualLayer=%d Match=%s"),
+				BaseGridAnchorCoord.Z,
+				FirstCell.Z,
+				bMatch ? TEXT("YES") : TEXT("NO"));
+		}
+	}
 }
+
+
+void ATileGridOverlayActor::SetDragPreviewCellsTinted(
+	const TMap<FIntVector, float>& MacroCells,
+	const TMap<FIntVector, FLinearColor>& MacroTints)
+{
+	// Option D: drag preview with per-macro validity tint (AllValid=blue, Partial=amber,
+	// NoneValid=red). Same placement as SetDragPreviewCells; only the color differs per cell.
+	TArray<FIntVector> ToRemove;
+	for (const auto& Pair : DragCells)
+	{
+		if (!MacroCells.Contains(Pair.Key))
+		{
+			ToRemove.Add(Pair.Key);
+		}
+	}
+	for (const FIntVector& Coord : ToRemove)
+	{
+		RemoveCellFromHISM(Coord, DragCells);
+	}
+
+	for (const auto& Pair : MacroCells)
+	{
+		const FIntVector& MacroKey = Pair.Key;
+		const float TerrainZ = Pair.Value;
+
+		if (SelectedCells.Contains(MacroKey))
+		{
+			continue;
+		}
+
+		const FLinearColor* Found = MacroTints.Find(MacroKey);
+		const FLinearColor Tint = Found ? *Found : ActiveStyle.DragPreviewColor;
+
+		if (DragCells.Contains(MacroKey))
+		{
+			RemoveCellFromHISM(MacroKey, DragCells);
+		}
+
+		AddCellToHISM(MacroKey, TerrainZ, Tint, DragCells);
+	}
+
+	if (IsSurfaceMineSharedGridMode(CurrentMode, bUseUndergroundWhiteGrid))
+	{
+		UE_LOG(LogGridOverlay, Log,
+			TEXT("[CUBE-MINING-MACRO] TintedPreview Count=%d Tints=%d"),
+			DragCells.Num(), MacroTints.Num());
+	}
+}
+
 
 void ATileGridOverlayActor::ClearDragPreview()
 {
@@ -886,7 +1182,7 @@ void ATileGridOverlayActor::CommitSelectedCellsAsConfirmed(EGridDesignationType 
 
 	for (const TPair<FIntVector, int32>& Pair : SelectedCells)
 	{
-		// Mine mode stores INDEX_NONE (no flat tile instance). Use voxel top face Z.
+		// Dig/legacy index-only selections store INDEX_NONE. Use voxel top face Z.
 		if (Pair.Value == INDEX_NONE)
 		{
 			Snapshot.Add(Pair.Key, static_cast<float>(Pair.Key.Z + 1) * CellSizeUU);
@@ -895,7 +1191,7 @@ void ATileGridOverlayActor::CommitSelectedCellsAsConfirmed(EGridDesignationType 
 		FTransform Xform;
 		if (TileMeshHISM && TileMeshHISM->GetInstanceTransform(Pair.Value, Xform, true))
 		{
-			Snapshot.Add(Pair.Key, Xform.GetLocation().Z - ZOffset);
+			Snapshot.Add(Pair.Key, Xform.GetLocation().Z - OverlayVisualZOffset);
 		}
 		else
 		{
@@ -939,6 +1235,109 @@ void ATileGridOverlayActor::ClearAllConfirmedDesignationCells()
 	RebuildAllInstances();
 }
 
+bool ATileGridOverlayActor::RemoveConfirmedDesignationCell(const FIntVector& VoxelCoord, EGridDesignationType DesignationType)
+{
+	if (DesignationType == EGridDesignationType::None)
+	{
+		UE_LOG(LogGridOverlay, Warning,
+			TEXT("[GridOverlay] RemoveConfirmedDesignationCell: Called with DesignationType::None — ignored. Cell=(%d,%d,%d)"),
+			VoxelCoord.X, VoxelCoord.Y, VoxelCoord.Z);
+		return false;
+	}
+
+	// Verify the cell exists and belongs to the requested designation type.
+	const FGridDesignationCellVisual* CellVisual = ConfirmedDesignationCells.Find(VoxelCoord);
+	if (!CellVisual || CellVisual->DesignationType != DesignationType)
+	{
+		UE_LOG(LogGridOverlay, Log,
+			TEXT("[GridOverlay] RemoveConfirmedDesignationCell: (%d,%d,%d) Type=%d — not found or type mismatch. Nothing removed."),
+			VoxelCoord.X, VoxelCoord.Y, VoxelCoord.Z, static_cast<int32>(DesignationType));
+		return false;
+	}
+
+	UE_LOG(LogGridOverlay, Log,
+		TEXT("[GridOverlay] RemoveConfirmedDesignationCell: Removing (%d,%d,%d) Type=%d. ConfirmedBefore=%d"),
+		VoxelCoord.X, VoxelCoord.Y, VoxelCoord.Z,
+		static_cast<int32>(DesignationType),
+		ConfirmedDesignationCells.Num());
+
+	// ── Step 1: Remove tile instance from ConfirmedTileMeshHISM ───────────
+	const bool bTileRemoved = ConfirmedTileInstances.Contains(VoxelCoord);
+	if (bTileRemoved)
+	{
+		// RemoveCellFromHISM now routes ConfirmedTileInstances → ConfirmedTileMeshHISM.
+		RemoveCellFromHISM(VoxelCoord, ConfirmedTileInstances);
+	}
+
+	UE_LOG(LogGridOverlay, Log,
+		TEXT("[GridOverlay] RemoveConfirmedDesignationCell: Tile instance removed=%s. Cell=(%d,%d,%d)"),
+		bTileRemoved ? TEXT("yes") : TEXT("no"),
+		VoxelCoord.X, VoxelCoord.Y, VoxelCoord.Z);
+
+	// ── Step 2: Remove from state maps ────────────────────────────────────
+	ConfirmedDesignationCells.Remove(VoxelCoord);
+	ConfirmedCellTerrainZ.Remove(VoxelCoord);
+
+	// ── Step 3: Rebuild the icon HISM for this designation type only ──────
+	// Icons are added to IconHISMsByDesignation but are NOT tracked per-cell
+	// (no coord→index map), so we clear the entire per-type icon HISM and
+	// re-add icons only for the remaining confirmed cells of this type.
+	// This avoids a full RebuildAllInstances() and does not disturb other types.
+	bool bIconRebuilt = false;
+	if (UHierarchicalInstancedStaticMeshComponent* IconHISM = IconHISMsByDesignation.FindRef(DesignationType))
+	{
+		IconHISM->ClearInstances();
+		const FGridOverlayStyle Style = GetStyleForDesignation(DesignationType);
+
+		if (Style.IconTexture && IconMaterialBase)
+		{
+			for (const TPair<FIntVector, FGridDesignationCellVisual>& Pair : ConfirmedDesignationCells)
+			{
+				if (Pair.Value.DesignationType != DesignationType)
+				{
+					continue;
+				}
+
+				const float WorldX = (static_cast<float>(Pair.Key.X) + 0.5f) * CellSizeUU;
+				const float WorldY = (static_cast<float>(Pair.Key.Y) + 0.5f) * CellSizeUU;
+				const float WorldZ = Pair.Value.TerrainZ + OverlayVisualZOffset + IconZOffset;
+				const float IconSize = CellSizeUU * FMath::Clamp(Style.IconScale, 0.05f, 1.0f);
+				const float MeshScale = IconSize / 100.0f;
+
+				const FTransform IconXform(
+					FRotator::ZeroRotator,
+					FVector(WorldX, WorldY, WorldZ),
+					FVector(MeshScale, MeshScale, 1.0f));
+
+				const int32 IconIdx = IconHISM->AddInstance(IconXform, true);
+				SetInstanceColor(IconHISM, IconIdx, Style.IconTint);
+			}
+		}
+		bIconRebuilt = true;
+	}
+
+	UE_LOG(LogGridOverlay, Log,
+		TEXT("[GridOverlay] RemoveConfirmedDesignationCell: Icon HISM rebuilt=%s. Type=%d"),
+		bIconRebuilt ? TEXT("yes") : TEXT("no"),
+		static_cast<int32>(DesignationType));
+
+	// ── Step 4: Auto-hide if no confirmed cells remain ────────────────────
+	if (ConfirmedDesignationCells.Num() == 0)
+	{
+		HideOverlay();
+	}
+
+	UE_LOG(LogGridOverlay, Log,
+		TEXT("[GridOverlay] RemoveConfirmedDesignationCell: Done. (%d,%d,%d) Type=%d TileRemoved=%s IconRebuilt=%s RemainingConfirmed=%d"),
+		VoxelCoord.X, VoxelCoord.Y, VoxelCoord.Z,
+		static_cast<int32>(DesignationType),
+		bTileRemoved ? TEXT("yes") : TEXT("no"),
+		bIconRebuilt ? TEXT("yes") : TEXT("no"),
+		ConfirmedDesignationCells.Num());
+
+	return true;
+}
+
 void ATileGridOverlayActor::AddConfirmedVisualInstance(const FGridDesignationCellVisual& CellVisual)
 {
 	if (!ConfirmedTileMeshHISM || !CellPlaneMesh)
@@ -966,9 +1365,9 @@ void ATileGridOverlayActor::AddConfirmedVisualInstance(const FGridDesignationCel
 	{
 		if (UHierarchicalInstancedStaticMeshComponent* IconHISM = GetOrCreateIconHISM(CellVisual.DesignationType, Style))
 		{
-			const float WorldX = (static_cast<float>(CellVisual.VoxelCoord.X) + 0.5f) * CellSizeUU;
-			const float WorldY = (static_cast<float>(CellVisual.VoxelCoord.Y) + 0.5f) * CellSizeUU;
-			const float WorldZ = CellVisual.TerrainZ + ZOffset + IconZOffset;
+			const float WorldX = VoxelWorldOrigin.X + (static_cast<float>(CellVisual.VoxelCoord.X) + 0.5f) * CellSizeUU;
+			const float WorldY = VoxelWorldOrigin.Y + (static_cast<float>(CellVisual.VoxelCoord.Y) + 0.5f) * CellSizeUU;
+			const float WorldZ = CellVisual.TerrainZ + OverlayVisualZOffset + IconZOffset;
 			const float IconWorldSize = CellSizeUU * FMath::Clamp(Style.IconScale, 0.05f, 1.0f);
 			const float MeshScale = IconWorldSize / 100.0f;
 
@@ -1127,7 +1526,7 @@ void ATileGridOverlayActor::RebuildBaseGridLines(const TMap<FIntVector, float>& 
 
 	const float ThicknessUU = bUndergroundWhite ? 3.0f : 3.0f;
 	const float HeightUU = bUndergroundWhite ? 2.0f : 2.0f;
-	const float LineZOffset = bUndergroundWhite ? 8.0f : 5.0f;
+	const float LineZOffset = bUndergroundWhite ? OverlayVisualZOffset + 3.0f : OverlayVisualZOffset;
 
 	const float LengthScale = CellSizeUU / 100.0f;
 	const float ThicknessScale = ThicknessUU / 100.0f;
@@ -1145,10 +1544,10 @@ void ATileGridOverlayActor::RebuildBaseGridLines(const TMap<FIntVector, float>& 
 		const FIntVector& VoxelCoord = Pair.Key;
 		const float Z = Pair.Value + LineZOffset;
 
-		const float MinX = static_cast<float>(VoxelCoord.X) * CellSizeUU;
-		const float MaxX = static_cast<float>(VoxelCoord.X + 1) * CellSizeUU;
-		const float MinY = static_cast<float>(VoxelCoord.Y) * CellSizeUU;
-		const float MaxY = static_cast<float>(VoxelCoord.Y + 1) * CellSizeUU;
+		const float MinX = VoxelWorldOrigin.X + static_cast<float>(VoxelCoord.X) * CellSizeUU;
+		const float MaxX = VoxelWorldOrigin.X + static_cast<float>(VoxelCoord.X + 1) * CellSizeUU;
+		const float MinY = VoxelWorldOrigin.Y + static_cast<float>(VoxelCoord.Y) * CellSizeUU;
+		const float MaxY = VoxelWorldOrigin.Y + static_cast<float>(VoxelCoord.Y + 1) * CellSizeUU;
 		const float CenterX = (MinX + MaxX) * 0.5f;
 		const float CenterY = (MinY + MaxY) * 0.5f;
 
@@ -1262,8 +1661,8 @@ void ATileGridOverlayActor::SetUndergroundFloorBlocks(const FIntVector& CenterVo
 			++SolidCount;
 			++LayerCounts[MaterialLayer];
 
-			const float WorldX = (static_cast<float>(X) + 0.5f) * CellSizeUU;
-			const float WorldY = (static_cast<float>(Y) + 0.5f) * CellSizeUU;
+			const float WorldX = VoxelWorldOrigin.X + (static_cast<float>(X) + 0.5f) * CellSizeUU;
+			const float WorldY = VoxelWorldOrigin.Y + (static_cast<float>(Y) + 0.5f) * CellSizeUU;
 
 			const FTransform BlockXform(
 				FRotator::ZeroRotator,
@@ -1408,8 +1807,8 @@ void ATileGridOverlayActor::RebuildDepthReferenceGrids(const TMap<FIntVector, fl
 
 		for (const TPair<FIntPoint, FIntPoint>& Edge : UniqueEdges)
 		{
-			const FVector P0(static_cast<float>(Edge.Key.X) * CellSizeUU, static_cast<float>(Edge.Key.Y) * CellSizeUU, LayerZ);
-			const FVector P1(static_cast<float>(Edge.Value.X) * CellSizeUU, static_cast<float>(Edge.Value.Y) * CellSizeUU, LayerZ);
+			const FVector P0(VoxelWorldOrigin.X + static_cast<float>(Edge.Key.X) * CellSizeUU, VoxelWorldOrigin.Y + static_cast<float>(Edge.Key.Y) * CellSizeUU, LayerZ);
+			const FVector P1(VoxelWorldOrigin.X + static_cast<float>(Edge.Value.X) * CellSizeUU, VoxelWorldOrigin.Y + static_cast<float>(Edge.Value.Y) * CellSizeUU, LayerZ);
 			DepthReferenceLineBatch->DrawLine(P0, P1, LineColor, DepthPriority, Thickness, LifeTime);
 			++TotalLines;
 		}
@@ -1450,9 +1849,8 @@ void ATileGridOverlayActor::RebuildBaseGridLineBatch(const TMap<FIntVector, floa
 
 	LineColor.A = bUndergroundWhite ? 0.78f : FMath::Clamp(LineColor.A, bMiningLayer ? 0.85f : 0.55f, 1.0f);
 
-	// Underground slice blocks are lifted above the cut plane. Put the grid lines
-	// above those caps too, otherwise the colored helper blocks can depth-occlude them.
-	const float LineZOffset = bUndergroundWhite ? 3.0f : 1.5f;
+	// Use the same visual lift as tile overlays so terrain-contoured lines do not clip into SDF terrain.
+	const float LineZOffset = OverlayVisualZOffset;
 	const float Thickness = bUndergroundWhite ? 3.0f : (bMiningLayer ? 3.0f : 1.25f);
 	const float LifeTime = 0.0f; // persistent until Flush()
 	const uint8 DepthPriority = 0;
@@ -1502,8 +1900,8 @@ void ATileGridOverlayActor::RebuildBaseGridLineBatch(const TMap<FIntVector, floa
 	auto MakeCornerPoint = [&](const FIntPoint& Corner) -> FVector
 		{
 			return FVector(
-				static_cast<float>(Corner.X) * CellSizeUU,
-				static_cast<float>(Corner.Y) * CellSizeUU,
+				VoxelWorldOrigin.X + static_cast<float>(Corner.X) * CellSizeUU,
+				VoxelWorldOrigin.Y + static_cast<float>(Corner.Y) * CellSizeUU,
 				GetCornerZ(Corner) + LineZOffset);
 		};
 
@@ -1560,9 +1958,9 @@ void ATileGridOverlayActor::RebuildBaseGridLineBatch(const TMap<FIntVector, floa
 FVector ATileGridOverlayActor::MakeGridLinePoint(const FIntVector& VoxelCoord, float TerrainZ, float ExtraZOffset) const
 {
 	return FVector(
-		(static_cast<float>(VoxelCoord.X) + 0.5f) * CellSizeUU,
-		(static_cast<float>(VoxelCoord.Y) + 0.5f) * CellSizeUU,
-		TerrainZ + ExtraZOffset);
+		VoxelWorldOrigin.X + (static_cast<float>(VoxelCoord.X) + 0.5f) * CellSizeUU,
+		VoxelWorldOrigin.Y + (static_cast<float>(VoxelCoord.Y) + 0.5f) * CellSizeUU,
+		TerrainZ + OverlayVisualZOffset + ExtraZOffset);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1571,10 +1969,12 @@ FVector ATileGridOverlayActor::MakeGridLinePoint(const FIntVector& VoxelCoord, f
 
 FTransform ATileGridOverlayActor::MakeCellTransform(const FIntVector& VoxelCoord, float TerrainZ) const
 {
-	// Voxel coord → world position (cell center)
-	const float WorldX = (static_cast<float>(VoxelCoord.X) + 0.5f) * CellSizeUU;
-	const float WorldY = (static_cast<float>(VoxelCoord.Y) + 0.5f) * CellSizeUU;
-	const float WorldZ = TerrainZ + ZOffset;
+	// Voxel coord → world position (cell center).
+	// VoxelWorldOrigin is the VoxelWorldActor location (cached in BeginPlay).
+	// Without this offset the grid only aligns correctly when the voxel world origin is (0,0,0).
+	const float WorldX = VoxelWorldOrigin.X + (static_cast<float>(VoxelCoord.X) + 0.5f) * CellSizeUU;
+	const float WorldY = VoxelWorldOrigin.Y + (static_cast<float>(VoxelCoord.Y) + 0.5f) * CellSizeUU;
+	const float WorldZ = TerrainZ + OverlayVisualZOffset;
 
 	// Scale the unit plane (assumed 100×100 base) to match CellSizeUU
 	const float MeshScale = CellSizeUU / 100.0f;
@@ -1588,9 +1988,9 @@ FTransform ATileGridOverlayActor::MakeCellTransform(const FIntVector& VoxelCoord
 
 FTransform ATileGridOverlayActor::MakeIconTransform(const FIntVector& VoxelCoord, float TerrainZ) const
 {
-	const float WorldX = (static_cast<float>(VoxelCoord.X) + 0.5f) * CellSizeUU;
-	const float WorldY = (static_cast<float>(VoxelCoord.Y) + 0.5f) * CellSizeUU;
-	const float WorldZ = TerrainZ + ZOffset + IconZOffset;
+	const float WorldX = VoxelWorldOrigin.X + (static_cast<float>(VoxelCoord.X) + 0.5f) * CellSizeUU;
+	const float WorldY = VoxelWorldOrigin.Y + (static_cast<float>(VoxelCoord.Y) + 0.5f) * CellSizeUU;
+	const float WorldZ = TerrainZ + OverlayVisualZOffset + IconZOffset;
 
 	// Icons are scaled smaller than the full cell
 	const float IconWorldSize = CellSizeUU * ActiveStyle.IconScale;
@@ -1603,6 +2003,65 @@ FTransform ATileGridOverlayActor::MakeIconTransform(const FIntVector& VoxelCoord
 	);
 }
 
+FVector ATileGridOverlayActor::MakeTerrainCellWorldLocation(const FIntVector& VoxelCoord, float WorldZ) const
+{
+	const FIntPoint TerrainCell(VoxelCoord.X, VoxelCoord.Y);
+	const UWorld* World = GetWorld();
+	const UVoxelWorldManager* VM = World ? World->GetSubsystem<UVoxelWorldManager>() : nullptr;
+
+	if (VM)
+	{
+		const FVector ManagerWorld = VM->TerrainCellToWorld(TerrainCell, WorldZ, /*bCenterInCell=*/true);
+
+		// WorldPositionToTileXY uses WorldMapSubsystem dimensions with the VM terrain
+		// origin/cell size. Prefer TerrainCellToWorld when its cached dimensions agree;
+		// otherwise use the same inverse map-space conversion as the selection raycast.
+		if (const UWorldMapSubsystem* WorldMap = World ? World->GetSubsystem<UWorldMapSubsystem>() : nullptr)
+		{
+			if (!WorldMap->IsInitialized())
+			{
+				return ManagerWorld;
+			}
+
+			const int32 GridWidth = WorldMap->GetGridWidth();
+			const int32 GridHeight = WorldMap->GetGridHeight();
+			const float TerrainCellSize = VM->GetTerrainCellSize();
+
+			if (GridWidth > 0 && GridHeight > 0 && TerrainCellSize > KINDA_SMALL_NUMBER)
+			{
+				const FVector TerrainOrigin = VM->GetTerrainWorldOrigin();
+				const FVector MapWorld(
+					TerrainOrigin.X + (static_cast<float>(TerrainCell.X) - static_cast<float>(GridWidth) * 0.5f + 0.5f) * TerrainCellSize,
+					TerrainOrigin.Y + (static_cast<float>(TerrainCell.Y) - static_cast<float>(GridHeight) * 0.5f + 0.5f) * TerrainCellSize,
+					WorldZ);
+
+				const float XYDeltaSq = FMath::Square(ManagerWorld.X - MapWorld.X) + FMath::Square(ManagerWorld.Y - MapWorld.Y);
+				const float Tolerance = FMath::Max(1.0f, TerrainCellSize * 0.25f);
+				if (XYDeltaSq > FMath::Square(Tolerance))
+				{
+					return MapWorld;
+				}
+			}
+		}
+
+		return ManagerWorld;
+	}
+
+	return FVector(
+		VoxelWorldOrigin.X + (static_cast<float>(VoxelCoord.X) + 0.5f) * CellSizeUU,
+		VoxelWorldOrigin.Y + (static_cast<float>(VoxelCoord.Y) + 0.5f) * CellSizeUU,
+		WorldZ);
+}
+
+FTransform ATileGridOverlayActor::MakeSurfaceMineIconTransform(const FIntVector& VoxelCoord, float TerrainZ) const
+{
+	FTransform IconXform = MakeIconTransform(VoxelCoord, TerrainZ);
+	const float IconWorldZ = TerrainZ + FMath::Max(OverlayVisualZOffset, MiningCapZOffsetUU) + IconZOffset;
+	IconXform.SetLocation(MakeTerrainCellWorldLocation(VoxelCoord, IconWorldZ));
+	return IconXform;
+}
+
+
 FLinearColor ATileGridOverlayActor::GetMiningDesignationColor() const
 {
 	return bUseUndergroundWhiteGrid ? UndergroundMiningCapColor : SurfaceMiningCapColor;
@@ -1610,24 +2069,24 @@ FLinearColor ATileGridOverlayActor::GetMiningDesignationColor() const
 
 void ATileGridOverlayActor::RebuildMiningDesignationLines(const TArray<FIntVector>& VoxelCoords)
 {
-    // Disabled by design: underground mining uses M_WF_MiningGhost cube markers.
-    // The old line/X batch made the slice visually noisy and confused the selected voxel.
-    if (MiningDesignationLineBatch)
-    {
-        MiningDesignationLineBatch->Flush();
-        MiningDesignationLineBatch->SetVisibility(false, true);
-        MiningDesignationLineBatch->SetHiddenInGame(true);
-        MiningDesignationLineBatch->MarkRenderStateDirty();
-    }
+	// Disabled by design: underground mining uses M_WF_MiningGhost cube markers.
+	// The old line/X batch made the slice visually noisy and confused the selected voxel.
+	if (MiningDesignationLineBatch)
+	{
+		MiningDesignationLineBatch->Flush();
+		MiningDesignationLineBatch->SetVisibility(false, true);
+		MiningDesignationLineBatch->SetHiddenInGame(true);
+		MiningDesignationLineBatch->MarkRenderStateDirty();
+	}
 }
 
 FTransform ATileGridOverlayActor::MakeMiningVolumeTransform(const FIntVector& VoxelCoord) const
 {
 	// Match AMiningGhostActor::VoxelToWorldCenter(): integer voxel coord -> centre of cell.
 	// The grid is edge-aligned; the cube is centred inside those edges.
-	const float WorldX = (static_cast<float>(VoxelCoord.X) + 0.5f) * CellSizeUU;
-	const float WorldY = (static_cast<float>(VoxelCoord.Y) + 0.5f) * CellSizeUU;
-	const float WorldZ = (static_cast<float>(VoxelCoord.Z) + 0.5f) * CellSizeUU;
+	const float WorldX = VoxelWorldOrigin.X + (static_cast<float>(VoxelCoord.X) + 0.5f) * CellSizeUU;
+	const float WorldY = VoxelWorldOrigin.Y + (static_cast<float>(VoxelCoord.Y) + 0.5f) * CellSizeUU;
+	const float WorldZ = VoxelWorldOrigin.Z + (static_cast<float>(VoxelCoord.Z) + 0.5f) * CellSizeUU;
 
 	const float Scale = (CellSizeUU / 100.0f) * FMath::Clamp(MiningVolumeScale, 0.1f, 1.0f);
 
@@ -1675,11 +2134,42 @@ int32 ATileGridOverlayActor::AddCellToHISM(
 		return INDEX_NONE;
 	}
 
+	// Surface Mine uses the exact same Build/Farm transform path: MakeCellTransform(VoxelCoord, TerrainZ).
+	// No Mine-specific Z override, no voxel-space fallback.
 	const FTransform CellXform = MakeCellTransform(VoxelCoord, TerrainZ);
+
+	if (CurrentMode == EBuildToolMode::Mine &&
+		(&TrackingMap == &SelectedCells || &TrackingMap == &DragCells))
+	{
+		if (bUseUndergroundWhiteGrid)
+		{
+			UE_LOG(LogGridOverlay, Log,
+				TEXT("[MineUGFlatOverlayProof] SelectedVoxel=(%d,%d,%d) CellSizeUU=%.1f World=(%.1f,%.1f,%.1f) VisualPath=FlatOverlay VolumeCube=false Layer=%s"),
+				VoxelCoord.X, VoxelCoord.Y, VoxelCoord.Z,
+				CellSizeUU,
+				CellXform.GetLocation().X, CellXform.GetLocation().Y, CellXform.GetLocation().Z,
+				(&TrackingMap == &DragCells) ? TEXT("DragPreview") : TEXT("Selected"));
+		}
+		else
+		{
+			UE_LOG(LogGridOverlay, Log,
+				TEXT("[CUBE-MINING-V2] MineCopiedBuildFarmTransform Cell=(%d,%d,%d) World=(%.1f,%.1f,%.1f)"),
+				VoxelCoord.X, VoxelCoord.Y, VoxelCoord.Z,
+				CellXform.GetLocation().X, CellXform.GetLocation().Y, CellXform.GetLocation().Z);
+		}
+	}
+
 	const int32 Idx = TargetHISM->AddInstance(CellXform, /*bWorldSpace=*/true);
+
+	UE_LOG(LogGridOverlay, Verbose,
+		TEXT("[TileInstance] Voxel=(%d,%d,%d) TerrainZ=%.1f FinalTileWorldZ=%.1f HISM=%s"),
+		VoxelCoord.X, VoxelCoord.Y, VoxelCoord.Z,
+		TerrainZ, CellXform.GetLocation().Z,
+		TargetHISM == DragPreviewMeshHISM ? TEXT("DragPreview") : TEXT("Tile"));
+
 	SetInstanceColor(TargetHISM, Idx, Color);
 	const bool bMiningSelection = (CurrentMode == EBuildToolMode::Mine || CurrentMode == EBuildToolMode::Dig);
-	const float EffectiveBorderAlpha = bMiningSelection && (&TrackingMap == &SelectedCells)
+	const float EffectiveBorderAlpha = (bMiningSelection && &TrackingMap == &SelectedCells)
 		? 1.0f
 		: ActiveStyle.BorderColor.A;
 	TargetHISM->SetCustomDataValue(Idx, 4, EffectiveBorderAlpha, true);
@@ -1687,6 +2177,7 @@ int32 ATileGridOverlayActor::AddCellToHISM(
 	TrackingMap.Add(VoxelCoord, Idx);
 	return Idx;
 }
+
 
 void ATileGridOverlayActor::RemoveCellFromHISM(const FIntVector& VoxelCoord, TMap<FIntVector, int32>& TrackingMap)
 {
@@ -1713,6 +2204,10 @@ void ATileGridOverlayActor::RemoveCellFromHISM(const FIntVector& VoxelCoord, TMa
 	else if (&TrackingMap == &MiningVolumeCells)
 	{
 		TargetHISM = MiningVolumeHISM;
+	}
+	else if (&TrackingMap == &ConfirmedTileInstances)
+	{
+		TargetHISM = ConfirmedTileMeshHISM;
 	}
 
 	if (!TargetHISM)
@@ -1789,7 +2284,7 @@ void ATileGridOverlayActor::LoadDesignationStylesFromDataTable()
 			RegisteredStyles.Add(EBuildToolMode::Place, Style);
 			break;
 		case EGridDesignationType::Mine:
-			RegisteredStyles.Add(EBuildToolMode::Mine, Style);
+			RegisteredStyles.Add(EBuildToolMode::Mine, MakeMineSharedGridStyle(Style));
 			RegisteredStyles.Add(EBuildToolMode::Dig, Style);
 			break;
 		case EGridDesignationType::Farm:
@@ -1817,6 +2312,7 @@ void ATileGridOverlayActor::LoadDesignationStylesFromDataTable()
 			bFarmStyleFound ? TEXT("OK") : TEXT("NULL — using hardcoded fallback green"));
 	}
 }
+
 
 void ATileGridOverlayActor::RebuildBaseGridAround(const FIntVector& CenterCoord, float TerrainZ)
 {
@@ -1889,6 +2385,8 @@ void ATileGridOverlayActor::RebuildConfirmedDesignationVisuals()
 
 void ATileGridOverlayActor::RebuildAllInstances()
 {
+	const float TransientTileZOffset = OverlayVisualZOffset;
+
 	// Snapshot current coords + Z before clearing selected/drag preview.
 	TMap<FIntVector, float> SelectedSnapshot;
 	for (const TPair<FIntVector, int32>& Pair : SelectedCells)
@@ -1896,7 +2394,7 @@ void ATileGridOverlayActor::RebuildAllInstances()
 		FTransform Xform;
 		if (TileMeshHISM && TileMeshHISM->GetInstanceTransform(Pair.Value, Xform, true))
 		{
-			SelectedSnapshot.Add(Pair.Key, Xform.GetLocation().Z - ZOffset);
+			SelectedSnapshot.Add(Pair.Key, Xform.GetLocation().Z - TransientTileZOffset);
 		}
 	}
 
@@ -1906,7 +2404,7 @@ void ATileGridOverlayActor::RebuildAllInstances()
 		FTransform Xform;
 		if (DragPreviewMeshHISM && DragPreviewMeshHISM->GetInstanceTransform(Pair.Value, Xform, true))
 		{
-			DragSnapshot.Add(Pair.Key, Xform.GetLocation().Z - ZOffset);
+			DragSnapshot.Add(Pair.Key, Xform.GetLocation().Z - TransientTileZOffset);
 		}
 	}
 
@@ -1921,12 +2419,7 @@ void ATileGridOverlayActor::RebuildAllInstances()
 	// Re-add transient selected cells with current active style.
 	for (const TPair<FIntVector, float>& Pair : SelectedSnapshot)
 	{
-		const bool bMiningSelection = (CurrentMode == EBuildToolMode::Mine || CurrentMode == EBuildToolMode::Dig);
-		const FLinearColor SelectionColor = bMiningSelection
-			? FLinearColor(1.0f, 0.78f, 0.05f, 0.85f)
-			: ActiveStyle.TileColor;
-
-		AddCellToHISM(Pair.Key, Pair.Value, SelectionColor, SelectedCells);
+		AddCellToHISM(Pair.Key, Pair.Value, ActiveStyle.TileColor, SelectedCells);
 
 		if (ActiveStyle.IconTexture)
 		{
@@ -1945,6 +2438,7 @@ void ATileGridOverlayActor::RebuildAllInstances()
 		}
 	}
 }
+
 
 // ─────────────────────────────────────────────────────────────
 // Internal: Icon texture swap

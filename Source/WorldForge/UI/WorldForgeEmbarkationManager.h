@@ -28,13 +28,16 @@ struct WORLDFORGE_API FWorldForgeEmbarkColonist
 	int32 Age = 20;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Embark", meta = (MultiLine = true))
-	FText Backstory;
+	FString Backstory;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Embark")
 	FName RoleId = NAME_None;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Embark")
 	TMap<FName, int32> Skills;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Embark")
+	TArray<FString> Traits;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Embark")
 	TArray<FGameplayTag> TraitTags;
@@ -108,6 +111,15 @@ struct WORLDFORGE_API FWorldForgeEmbarkConfig
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Embark|Loadout")
 	TArray<FEmbarkSelectedItem> SelectedLoadoutItems;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Embark|World")
+	int32 SelectedEmbarkTileX = -1;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Embark|World")
+	int32 SelectedEmbarkTileY = -1;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Embark|World")
+	int32 SelectedEmbarkTileIndex = -1;
 };
 
 USTRUCT(BlueprintType)
@@ -183,6 +195,21 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "WorldForge|Embark")
 	void ResetEmbarkConfigToDefaults();
+
+	UFUNCTION(BlueprintCallable, Category = "WorldForge|Embark|Colonists")
+	void GenerateStartingColonists();
+
+	UFUNCTION(BlueprintCallable, Category = "WorldForge|Embark|Colonists")
+	bool EnsureStartingColonistsGenerated();
+
+	UFUNCTION(BlueprintCallable, Category = "WorldForge|Embark|Colonists")
+	bool RerollStartingColonist(int32 ColonistIndex);
+
+	UFUNCTION(BlueprintPure, Category = "WorldForge|Embark|Colonists")
+	TArray<FWorldForgeEmbarkColonist> GetStartingColonists() const;
+
+	UFUNCTION(BlueprintPure, Category = "WorldForge|Embark|Colonists")
+	bool GetStartingColonist(int32 ColonistIndex, FWorldForgeEmbarkColonist& OutColonist) const;
 
 	UFUNCTION(BlueprintCallable, Category = "WorldForge|Embark|Colonists")
 	void AddColonist(const FWorldForgeEmbarkColonist& InColonist);
@@ -277,6 +304,15 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "WorldForge|Embark|Loadout")
 	bool LogEmbarkLoadoutContinue() const;
 
+	UFUNCTION(BlueprintCallable, Category = "WorldForge|Embark|World")
+	void SetSelectedEmbarkTile(int32 InTileX, int32 InTileY, int32 InTileIndex);
+
+	UFUNCTION(BlueprintPure, Category = "WorldForge|Embark|World")
+	bool GetSelectedEmbarkTile(int32& OutTileX, int32& OutTileY, int32& OutTileIndex) const;
+
+	UFUNCTION(BlueprintPure, Category = "WorldForge|Embark|World")
+	bool HasSelectedEmbarkTile() const;
+
 private:
 	UPROPERTY()
 	FWorldForgeEmbarkConfig EmbarkConfig;
@@ -284,12 +320,22 @@ private:
 	UPROPERTY()
 	TMap<FName, FWorldForgeSimpleEmbarkLoadoutOption> DynamicSeedLoadoutOptions;
 
+	UPROPERTY()
+	TMap<int32, int32> StartingColonistRerollCounts;
+
 	// Prevents direct WorldGenTest launches from accidentally using default frontend config.
 	UPROPERTY()
 	bool bHasUserEmbarkConfig = false;
 
 	static FString MakeSafeSaveSlotName(const FString& InWorldName);
 	static int32 ResolveSeedString(const FString& InSeedString);
+
+	FWorldForgeEmbarkColonist GenerateStartingColonistProfile(int32 ColonistIndex, int32 RerollSalt) const;
+	TArray<FGameplayTag> GetAllowedPlayableRaceTagsForGeneration() const;
+	FGameplayTag ResolveGeneratedColonistRace(FRandomStream& RandomStream) const;
+	FGameplayTag ResolveFallbackPlayableRaceTag() const;
+	FGameplayTag ResolveStartingRaceForIndex(int32 Index) const;
+	bool IsPlayableRaceTag(FGameplayTag RaceTag) const;
 
 	const FWorldForgeSimpleEmbarkLoadoutOption* FindStarterEmbarkLoadoutOption(FName ItemId) const;
 	FWorldForgeSimpleEmbarkLoadoutOption MakeDynamicSeedOption(FName ItemId) const;

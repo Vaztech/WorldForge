@@ -12,6 +12,7 @@
 #include "Player/WorldForgeCamera.h"
 #include "WorldMapSubsystem.h"
 #include "Embark/EmbarkLoadoutSubsystem.h"
+#include "Farming/FarmingSubsystem.h"
 #include "UI/WorldForgeEmbarkationManager.h"
 
 #include "Engine/GameInstance.h"
@@ -27,46 +28,46 @@
 
 namespace
 {
-FString WF_HumanizeSeedIdentifier(const FString& Identifier)
-{
-    FString Result;
-    Result.Reserve(Identifier.Len() + 4);
-
-    for (int32 Index = 0; Index < Identifier.Len(); ++Index)
+    FString WF_HumanizeSeedIdentifier(const FString& Identifier)
     {
-        const TCHAR Character = Identifier[Index];
-        const TCHAR PreviousCharacter = Index > 0 ? Identifier[Index - 1] : 0;
-        if (Index > 0 && FChar::IsUpper(Character) && (FChar::IsLower(PreviousCharacter) || FChar::IsDigit(PreviousCharacter)))
+        FString Result;
+        Result.Reserve(Identifier.Len() + 4);
+
+        for (int32 Index = 0; Index < Identifier.Len(); ++Index)
         {
-            Result.AppendChar(TCHAR(' '));
+            const TCHAR Character = Identifier[Index];
+            const TCHAR PreviousCharacter = Index > 0 ? Identifier[Index - 1] : 0;
+            if (Index > 0 && FChar::IsUpper(Character) && (FChar::IsLower(PreviousCharacter) || FChar::IsDigit(PreviousCharacter)))
+            {
+                Result.AppendChar(TCHAR(' '));
+            }
+            Result.AppendChar(Character);
         }
-        Result.AppendChar(Character);
+
+        return Result;
     }
 
-    return Result;
-}
-
-bool WF_TryResolveSeedLoadoutItem(FName ItemId, FName& OutCropRowName, FString& OutSeedIdentifier, FString& OutDisplayName)
-{
-    const FString ItemIdString = ItemId.ToString();
-    FString Prefix;
-    FString SeedIdentifier;
-    if (!ItemIdString.Split(TEXT("."), &Prefix, &SeedIdentifier) || !Prefix.Equals(TEXT("Seed"), ESearchCase::CaseSensitive))
+    bool WF_TryResolveSeedLoadoutItem(FName ItemId, FName& OutCropRowName, FString& OutSeedIdentifier, FString& OutDisplayName)
     {
-        return false;
-    }
+        const FString ItemIdString = ItemId.ToString();
+        FString Prefix;
+        FString SeedIdentifier;
+        if (!ItemIdString.Split(TEXT("."), &Prefix, &SeedIdentifier) || !Prefix.Equals(TEXT("Seed"), ESearchCase::CaseSensitive))
+        {
+            return false;
+        }
 
-    SeedIdentifier.TrimStartAndEndInline();
-    if (SeedIdentifier.IsEmpty())
-    {
-        return false;
-    }
+        SeedIdentifier.TrimStartAndEndInline();
+        if (SeedIdentifier.IsEmpty())
+        {
+            return false;
+        }
 
-    OutSeedIdentifier = SeedIdentifier;
-    OutCropRowName = FName(*FString::Printf(TEXT("LP_%s"), *SeedIdentifier));
-    OutDisplayName = WF_HumanizeSeedIdentifier(SeedIdentifier);
-    return true;
-}
+        OutSeedIdentifier = SeedIdentifier;
+        OutCropRowName = FName(*FString::Printf(TEXT("LP_%s"), *SeedIdentifier));
+        OutDisplayName = WF_HumanizeSeedIdentifier(SeedIdentifier);
+        return true;
+    }
 }
 
 AColonyManager::AColonyManager()
@@ -147,6 +148,7 @@ void AColonyManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
     if (UWorld* World = GetWorld())
     {
         World->GetTimerManager().ClearTimer(BootstrapTimerHandle);
+        World->GetTimerManager().ClearTimer(CameraWarmupTimerHandle);
     }
 
     if (VoxelWorldMgr && bBoundToTerrainReadyEvent)
@@ -451,6 +453,14 @@ void AColonyManager::InitializeSettlement()
 
     SettlementID = SettlementMgr->CreateSettlement(SettlementName, SettlementWorldTileID);
     ProcessorMgr->RegisterSettlement(SettlementID);
+    const int32 ActiveSettlementCount = SettlementMgr ? SettlementMgr->GetAllSettlementIDs().Num() : -1;
+    UE_LOG(
+        LogTemp,
+        Log,
+        TEXT("[ColonyManager] Registered player SettlementID=%d ActiveSettlementCount=%d"),
+        SettlementID,
+        ActiveSettlementCount
+    );
     SettlementMgr->SetPlayerCurrency(SettlementID, TAG_Currency_Barter);
     SettlementMgr->SetPlayerSettlementID(SettlementID);
 
@@ -521,6 +531,69 @@ void AColonyManager::InitializeSettlement()
         ClaimedWorldTileCount
     );
 
+    FIntPoint ClaimMin(MAX_int32, MAX_int32);
+    FIntPoint ClaimMax(MIN_int32, MIN_int32);
+    bool bHasClaimBounds = false;
+
+    if (ClaimedWorldTileIDs)
+    {
+        if (const UWorld* World = GetWorld())
+        {
+            if (const UWorldMapSubsystem* WorldMapSubsystem = World->GetSubsystem<UWorldMapSubsystem>())
+            {
+                for (const int32 ClaimedWorldTileID : *ClaimedWorldTileIDs)
+                {
+                    int32 ClaimTileX = INDEX_NONE;
+                    int32 ClaimTileY = INDEX_NONE;
+                    if (!WorldMapSubsystem->TileIndexToXY(ClaimedWorldTileID, ClaimTileX, ClaimTileY))
+                    {
+                        continue;
+                    }
+
+                    ClaimMin.X = FMath::Min(ClaimMin.X, ClaimTileX);
+                    ClaimMin.Y = FMath::Min(ClaimMin.Y, ClaimTileY);
+                    ClaimMax.X = FMath::Max(ClaimMax.X, ClaimTileX);
+                    ClaimMax.Y = FMath::Max(ClaimMax.Y, ClaimTileY);
+                    bHasClaimBounds = true;
+                }
+            }
+        }
+    }
+
+    if (bHasClaimBounds)
+    {
+        UE_LOG(LogTemp, Log,
+            TEXT("[CubeSelectionClaimAudit] PlayerClaimSummary SettlementID=%d ClaimedCount=%d SpawnGridCenter=(%d,%d) SettlementOrigin=(%d,%d) ClaimMin=(%d,%d) ClaimMax=(%d,%d)"),
+            SettlementID,
+            ClaimedWorldTileCount,
+            SpawnGridCenter.X,
+            SpawnGridCenter.Y,
+            SettlementWorldOrigin.X,
+            SettlementWorldOrigin.Y,
+            ClaimMin.X,
+            ClaimMin.Y,
+            ClaimMax.X,
+            ClaimMax.Y);
+    }
+    else
+    {
+        const int32 TileID0 = (ClaimedWorldTileIDs && ClaimedWorldTileIDs->IsValidIndex(0)) ? (*ClaimedWorldTileIDs)[0] : INDEX_NONE;
+        const int32 TileID1 = (ClaimedWorldTileIDs && ClaimedWorldTileIDs->IsValidIndex(1)) ? (*ClaimedWorldTileIDs)[1] : INDEX_NONE;
+        const int32 TileID2 = (ClaimedWorldTileIDs && ClaimedWorldTileIDs->IsValidIndex(2)) ? (*ClaimedWorldTileIDs)[2] : INDEX_NONE;
+        const int32 TileID3 = (ClaimedWorldTileIDs && ClaimedWorldTileIDs->IsValidIndex(3)) ? (*ClaimedWorldTileIDs)[3] : INDEX_NONE;
+        const int32 TileID4 = (ClaimedWorldTileIDs && ClaimedWorldTileIDs->IsValidIndex(4)) ? (*ClaimedWorldTileIDs)[4] : INDEX_NONE;
+
+        UE_LOG(LogTemp, Log,
+            TEXT("[CubeSelectionClaimAudit] PlayerClaimSample SettlementID=%d ClaimedCount=%d TileID0=%d TileID1=%d TileID2=%d TileID3=%d TileID4=%d"),
+            SettlementID,
+            ClaimedWorldTileCount,
+            TileID0,
+            TileID1,
+            TileID2,
+            TileID3,
+            TileID4);
+    }
+
     UE_LOG(
         LogTemp,
         Log,
@@ -534,6 +607,28 @@ void AColonyManager::InitializeSettlement()
         SpawnGridCenter.Y,
         ClaimedWorldTileCount
     );
+
+    {
+        int32 SettlementTileX = -1;
+        int32 SettlementTileY = -1;
+        if (const UWorld* SyncWorld = GetWorld())
+        {
+            if (const UWorldMapSubsystem* SyncMapSub = SyncWorld->GetSubsystem<UWorldMapSubsystem>())
+            {
+                SyncMapSub->TileIndexToXY(SettlementWorldTileID, SettlementTileX, SettlementTileY);
+            }
+        }
+        UE_LOG(LogTemp, Log,
+            TEXT("[SpawnSync] SelectedTile=(%d,%d) ClaimTile=(%d,%d) SettlementTile=(%d,%d)"),
+            SelectedStartTileX, SelectedStartTileY,
+            SpawnGridCenter.X, SpawnGridCenter.Y,
+            SettlementTileX, SettlementTileY);
+        if (SelectedStartTileIndex >= 0 && SettlementWorldTileID != SelectedStartTileIndex)
+        {
+            UE_LOG(LogTemp, Warning,
+                TEXT("[SpawnSync] WARNING: Player settlement not using selected tile."));
+        }
+    }
 }
 
 void AColonyManager::InitializeNavigation()
@@ -545,6 +640,98 @@ void AColonyManager::InitializeNavigation()
     }
 
     NavContext->InitializeGrid(SettlementID, NavigationGridWidth, NavigationGridHeight);
+
+    // CUBE-TERRAIN-04U-STEP1: stamp initial walkability onto the nav grid from
+    // the current terrain (CubePrototype-aware). Does NOT change movement, pathfinding,
+    // colonist spawn, or terrain generation. JobProcessor still bypasses FindPath.
+    if (!VoxelWorldMgr)
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[CubeTerrainNavBuild] SettlementID=%d skipped (VoxelWorldMgr null)."),
+            SettlementID);
+        return;
+    }
+
+    const int32 TotalCells = NavigationGridWidth * NavigationGridHeight;
+    int32 Walkable = 0;
+    int32 Blocked = 0;
+    int32 BlockedWater = 0;
+    int32 BlockedLava = 0;
+    int32 BlockedAir = 0;
+    int32 BlockedNoSurface = 0;
+    int32 BlockedOther = 0;
+
+    constexpr int32 MaxDetailLogs = 16;
+    int32 EmittedDetailLogs = 0;
+
+    for (int32 Y = 0; Y < NavigationGridHeight; ++Y)
+    {
+        for (int32 X = 0; X < NavigationGridWidth; ++X)
+        {
+            const FIntPoint LocalCell(X, Y);
+            const FIntPoint WorldCell = SettlementWorldOrigin + LocalCell;
+
+            FString Reason;
+            int32 SurfaceZ = 0;
+            const bool bWalkable =
+                VoxelWorldMgr->IsTerrainCellWalkableForNavigation(WorldCell, &Reason, &SurfaceZ);
+
+            NavContext->SetCellWalkable(SettlementID, LocalCell, bWalkable);
+
+            if (bWalkable)
+            {
+                ++Walkable;
+            }
+            else
+            {
+                ++Blocked;
+                if      (Reason == TEXT("Water"))     { ++BlockedWater; }
+                else if (Reason == TEXT("Lava"))      { ++BlockedLava; }
+                else if (Reason == TEXT("Air"))       { ++BlockedAir; }
+                else if (Reason == TEXT("NoSurface")) { ++BlockedNoSurface; }
+                else                                   { ++BlockedOther; }
+
+                if (EmittedDetailLogs < MaxDetailLogs)
+                {
+                    UE_LOG(LogTemp, Log,
+                        TEXT("[CubeTerrainNavBlocked] WorldCell=(%d,%d) LocalCell=(%d,%d) Reason=%s SurfaceZ=%d"),
+                        WorldCell.X, WorldCell.Y,
+                        LocalCell.X, LocalCell.Y,
+                        *Reason, SurfaceZ);
+                    ++EmittedDetailLogs;
+                }
+            }
+        }
+    }
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[CubeTerrainNavBuild] SettlementID=%d Origin=(%d,%d) Cells=%d Walkable=%d Blocked=%d BlockedWater=%d BlockedLava=%d BlockedAir=%d BlockedNoSurface=%d BlockedOther=%d"),
+        SettlementID,
+        SettlementWorldOrigin.X, SettlementWorldOrigin.Y,
+        TotalCells, Walkable, Blocked,
+        BlockedWater, BlockedLava, BlockedAir, BlockedNoSurface, BlockedOther);
+
+    // CUBE-TERRAIN-04U-STEP3: diagnostic — log all active agent settlements vs nav grids.
+    if (ProcessorMgr)
+    {
+        TMap<int32, int32> AgentCountBySettlement;
+        for (const FAgentData& Agent : ProcessorMgr->GetAllAgents())
+        {
+            AgentCountBySettlement.FindOrAdd(Agent.SettlementID)++;
+        }
+
+        const TArray<int32> NavGridSettlements = NavContext->GetRegisteredSettlementIDs();
+
+        for (const TPair<int32, int32>& Pair : AgentCountBySettlement)
+        {
+            const bool bHasNavGrid = NavGridSettlements.Contains(Pair.Key);
+            UE_LOG(LogTemp, Log,
+                TEXT("[CubeTerrainNavSettlement] ActiveSettlementID=%d Agents=%d HasNavGrid=%s"),
+                Pair.Key,
+                Pair.Value,
+                bHasNavGrid ? TEXT("true") : TEXT("false"));
+        }
+    }
 }
 
 void AColonyManager::SetupAgents()
@@ -556,16 +743,53 @@ void AColonyManager::SetupAgents()
     }
 
     const int32 StartingAgentID = GetNextAgentID();
+    const int32 GridSize = FMath::Max(1, FMath::CeilToInt(FMath::Sqrt(static_cast<float>(InitialAgentCount))));
+    const int32 RowCount = FMath::Max(1, FMath::CeilToInt(static_cast<float>(InitialAgentCount) / static_cast<float>(GridSize)));
+    const FIntPoint FormationCenterOffset((GridSize - 1) / 2, (RowCount - 1) / 2);
     TSet<FIntPoint> ClaimedWorldCells;
+
+    UE_LOG(
+        LogTemp,
+        Log,
+        TEXT("[SpawnSync] SetupAgents starting. SpawnGridCenter=(%d,%d) Origin=(%d,%d) GridSize=%d Rows=%d FormationCenterOffset=(%d,%d)"),
+        SpawnGridCenter.X,
+        SpawnGridCenter.Y,
+        SettlementWorldOrigin.X,
+        SettlementWorldOrigin.Y,
+        GridSize,
+        RowCount,
+        FormationCenterOffset.X,
+        FormationCenterOffset.Y
+    );
 
     for (int32 i = 0; i < InitialAgentCount; ++i)
     {
         const int32 AgentID = StartingAgentID + i;
 
         const FIntPoint DesiredLocalCell = ComputeInitialSpawnCell(i);
-        const FIntPoint DesiredWorldCell = SettlementWorldOrigin + DesiredLocalCell;
+        const FIntPoint FormationOffset = DesiredLocalCell - FormationCenterOffset;
+        const FIntPoint DesiredWorldCell = SpawnGridCenter + FormationOffset;
         const FIntPoint ValidWorldCell = ResolveUniqueValidSpawnCell(DesiredWorldCell, ClaimedWorldCells);
         const FIntPoint SpawnLocalCell = WorldCellToSettlementLocalCell(ValidWorldCell);
+
+        UE_LOG(
+            LogTemp,
+            Log,
+            TEXT("[SpawnSync] InitialAgentSpawn AgentID=%d SpawnCenter=(%d,%d) Origin=(%d,%d) FormationOffset=(%d,%d) DesiredWorldCell=(%d,%d) ValidWorldCell=(%d,%d) SpawnLocalCell=(%d,%d)"),
+            AgentID,
+            SpawnGridCenter.X,
+            SpawnGridCenter.Y,
+            SettlementWorldOrigin.X,
+            SettlementWorldOrigin.Y,
+            FormationOffset.X,
+            FormationOffset.Y,
+            DesiredWorldCell.X,
+            DesiredWorldCell.Y,
+            ValidWorldCell.X,
+            ValidWorldCell.Y,
+            SpawnLocalCell.X,
+            SpawnLocalCell.Y
+        );
 
         ClaimedWorldCells.Add(ValidWorldCell);
 
@@ -625,6 +849,30 @@ void AColonyManager::SetupAgents()
             ValidWorldCell.X,
             ValidWorldCell.Y
         );
+    }
+
+    TMap<int32, int32> AgentCountBySettlement;
+    for (const FAgentData& Agent : ProcessorMgr->GetAllAgents())
+    {
+        AgentCountBySettlement.FindOrAdd(Agent.SettlementID)++;
+    }
+    AgentCountBySettlement.FindOrAdd(SettlementID);
+
+    const int32 AgentsRegistered = AgentCountBySettlement.FindRef(SettlementID);
+    UE_LOG(LogTemp, Log,
+        TEXT("[ColonyManager] SetupAgents complete. SettlementID=%d AgentsRegistered=%d"),
+        SettlementID,
+        AgentsRegistered);
+
+    const TArray<int32> NavGridSettlements = NavContext ? NavContext->GetRegisteredSettlementIDs() : TArray<int32>();
+    for (const TPair<int32, int32>& Pair : AgentCountBySettlement)
+    {
+        const bool bHasNavGrid = NavGridSettlements.Contains(Pair.Key);
+        UE_LOG(LogTemp, Log,
+            TEXT("[CubeTerrainNavSettlement] Final ActiveSettlementID=%d Agents=%d HasNavGrid=%s"),
+            Pair.Key,
+            Pair.Value,
+            bHasNavGrid ? TEXT("true") : TEXT("false"));
     }
 }
 
@@ -740,6 +988,10 @@ void AColonyManager::SetupInitialResources()
 {
     if (!SettlementMgr || SettlementID == INDEX_NONE)
     {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[PlayerStarterFarm] Failed to create starter farm zone. SettlementID=%d Reason=%s"),
+            SettlementID,
+            TEXT("Settlement manager missing or invalid settlement"));
         return;
     }
 
@@ -754,6 +1006,10 @@ void AColonyManager::SetupInitialResources()
     if (!World)
     {
         UE_LOG(LogTemp, Warning, TEXT("[ColonyManager] Embark loadout skipped: World is null."));
+        UE_LOG(LogTemp, Warning,
+            TEXT("[PlayerStarterFarm] Failed to create starter farm zone. SettlementID=%d Reason=%s"),
+            SettlementID,
+            TEXT("World is null"));
         return;
     }
 
@@ -761,18 +1017,92 @@ void AColonyManager::SetupInitialResources()
     if (!EmbarkLoadout)
     {
         UE_LOG(LogTemp, Warning, TEXT("[ColonyManager] Embark loadout skipped: UEmbarkLoadoutSubsystem missing."));
+    }
+    else
+    {
+        const bool bApplied = EmbarkLoadout->ApplyDebugStarterLoadout(SettlementID);
+
+        UE_LOG(
+            LogTemp,
+            Log,
+            TEXT("[ColonyManager] Embark starter loadout applied=%s SettlementID=%d"),
+            bApplied ? TEXT("true") : TEXT("false"),
+            SettlementID
+        );
+    }
+
+    UFarmingSubsystem* FarmingSubsystem = World->GetSubsystem<UFarmingSubsystem>();
+    if (!FarmingSubsystem)
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[PlayerStarterFarm] Failed to create starter farm zone. SettlementID=%d Reason=%s"),
+            SettlementID,
+            TEXT("FarmingSubsystem missing"));
         return;
     }
 
-    const bool bApplied = EmbarkLoadout->ApplyDebugStarterLoadout(SettlementID);
+    constexpr int32 StarterFarmSizeX = 3;
+    constexpr int32 StarterFarmSizeY = 3;
 
-    UE_LOG(
-        LogTemp,
-        Log,
-        TEXT("[ColonyManager] Embark starter loadout applied=%s SettlementID=%d"),
-        bApplied ? TEXT("true") : TEXT("false"),
-        SettlementID
-    );
+    if (NavigationGridWidth < StarterFarmSizeX || NavigationGridHeight < StarterFarmSizeY)
+    {
+        const FString Reason = FString::Printf(
+            TEXT("Navigation grid too small for %dx%d farm"),
+            StarterFarmSizeX,
+            StarterFarmSizeY);
+        UE_LOG(LogTemp, Warning,
+            TEXT("[PlayerStarterFarm] Failed to create starter farm zone. SettlementID=%d Reason=%s"),
+            SettlementID,
+            *Reason);
+        return;
+    }
+
+    ECropCategory StarterFarmCategory = ECropCategory::Grains;
+    const FName StarterFarmCropRow = FarmingSubsystem->ResolveDefaultPlayerFarmCropRow(
+        SettlementID,
+        StarterFarmCategory);
+
+    if (StarterFarmCropRow.IsNone())
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[PlayerStarterFarm] Failed to create starter farm zone. SettlementID=%d Reason=%s"),
+            SettlementID,
+            TEXT("No valid starter crop row"));
+        return;
+    }
+
+    const FIntPoint DesiredFarmWorldOrigin = SpawnGridCenter + FIntPoint(5, 0);
+    FIntPoint StarterFarmOrigin = WorldCellToSettlementLocalCell(DesiredFarmWorldOrigin);
+    StarterFarmOrigin.X = FMath::Clamp(StarterFarmOrigin.X, 0, NavigationGridWidth - StarterFarmSizeX);
+    StarterFarmOrigin.Y = FMath::Clamp(StarterFarmOrigin.Y, 0, NavigationGridHeight - StarterFarmSizeY);
+
+    const int32 ZoneID = FarmingSubsystem->CreateFarmZone(
+        SettlementID,
+        StarterFarmOrigin,
+        StarterFarmSizeX,
+        StarterFarmSizeY,
+        StarterFarmCategory,
+        StarterFarmCropRow,
+        true);
+
+    if (ZoneID == INDEX_NONE)
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[PlayerStarterFarm] Failed to create starter farm zone. SettlementID=%d Reason=%s"),
+            SettlementID,
+            TEXT("CreateFarmZone returned INDEX_NONE"));
+        return;
+    }
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[PlayerStarterFarm] Created starter farm zone. SettlementID=%d ZoneID=%d Origin=(%d,%d) Size=%dx%d CropRow=%s"),
+        SettlementID,
+        ZoneID,
+        StarterFarmOrigin.X,
+        StarterFarmOrigin.Y,
+        StarterFarmSizeX,
+        StarterFarmSizeY,
+        *StarterFarmCropRow.ToString());
 }
 
 
@@ -1002,12 +1332,24 @@ FIntPoint AColonyManager::ComputeSettlementOriginFromSpawnCenter(const FIntPoint
     return Origin;
 }
 
-void AColonyManager::PositionPlayerCameraOverSettlement() const
+void AColonyManager::PositionPlayerCameraOverSettlement()
 {
     UWorld* World = GetWorld();
     if (!World)
     {
         return;
+    }
+
+    for (TActorIterator<AWorldGenBootstrapActor> It(World); It; ++It)
+    {
+        AWorldGenBootstrapActor* BootstrapActor = *It;
+        if (IsValid(BootstrapActor) &&
+            !BootstrapActor->IsActorBeingDestroyed() &&
+            BootstrapActor->IsPrePlayBlocking())
+        {
+            UE_LOG(LogTemp, Log, TEXT("[TerrainVisibility] ColonyManager camera snap deferred; Bootstrap pre-play block active."));
+            return;
+        }
     }
 
     APlayerController* PC = UGameplayStatics::GetPlayerController(World, 0);
@@ -1034,13 +1376,9 @@ void AColonyManager::PositionPlayerCameraOverSettlement() const
         return;
     }
 
-    if (PC->GetPawn() != CameraPawn)
-    {
-        PC->Possess(CameraPawn);
-        UE_LOG(LogTemp, Log, TEXT("[ColonyManager] Possessed camera pawn: %s"), *CameraPawn->GetName());
-    }
-
     FVector CameraAnchorWorld = FVector::ZeroVector;
+    FIntPoint CameraFocusTile(INDEX_NONE, INDEX_NONE);
+    bool bHasCameraWarmupTarget = false;
 
     if (bUseManualCameraStart)
     {
@@ -1048,49 +1386,128 @@ void AColonyManager::PositionPlayerCameraOverSettlement() const
     }
     else if (VoxelWorldMgr)
     {
-        // IMPORTANT:
-        // Use the player's resolved spawn-center cell, not SettlementWorldOrigin.
-        // SettlementWorldOrigin is the formation origin/top-left area for agents,
-        // which is why the camera was offset into the wrong place.
-        const FIntPoint DesiredCameraCell = SpawnGridCenter;
-        FIntPoint ResolvedCameraCell = DesiredCameraCell;
+        const UWorldMapSubsystem* WorldMapSubsystem = World->GetSubsystem<UWorldMapSubsystem>();
 
-        if (!VoxelWorldMgr->TryGetNearestSpawnLocationForTerrainCell(
-            DesiredCameraCell,
-            CameraAnchorWorld,
-            ResolvedCameraCell,
-            FMath::Max(SpawnSearchRadius, CameraAnchorSearchRadius),
-            VoxelWorldMgr->TerrainSurfaceZOffset))
+        struct FSpawnSyncFocusTile
         {
-            if (!VoxelWorldMgr->TryGetSurfaceWorldLocation(DesiredCameraCell, CameraAnchorWorld, VoxelWorldMgr->TerrainSurfaceZOffset))
-            {
-                CameraAnchorWorld = VoxelWorldMgr->TerrainCellToWorld(DesiredCameraCell, 0.0f, true);
+            const TCHAR* Source = TEXT("WorldCenter");
+            FIntPoint Tile = FIntPoint::ZeroValue;
+            bool bValid = false;
+        };
 
-                UE_LOG(
-                    LogTemp,
-                    Warning,
-                    TEXT("[ColonyManager] Camera anchor fallback used. DesiredCell=(%d,%d) World=(%.1f, %.1f, %.1f)"),
-                    DesiredCameraCell.X,
-                    DesiredCameraCell.Y,
-                    CameraAnchorWorld.X,
-                    CameraAnchorWorld.Y,
-                    CameraAnchorWorld.Z
-                );
+        FSpawnSyncFocusTile FocusTile;
+
+        auto TryUseFocusTile = [&](const TCHAR* Source, const FIntPoint& CandidateTile) -> bool
+            {
+                if (!VoxelWorldMgr)
+                {
+                    return false;
+                }
+
+                FIntPoint ResolvedTile = CandidateTile;
+                if (VoxelWorldMgr->HasCachedTerrainData())
+                {
+                    ResolvedTile = VoxelWorldMgr->ClampTerrainCellToBounds(ResolvedTile);
+                }
+
+                if (WorldMapSubsystem)
+                {
+                    int32 TileIndex = INDEX_NONE;
+                    if (!WorldMapSubsystem->TileXYToIndex(ResolvedTile.X, ResolvedTile.Y, TileIndex))
+                    {
+                        return false;
+                    }
+                }
+                else if (ResolvedTile.X < 0 || ResolvedTile.Y < 0)
+                {
+                    return false;
+                }
+
+                FocusTile.Source = Source;
+                FocusTile.Tile = ResolvedTile;
+                FocusTile.bValid = true;
+                return true;
+            };
+
+        int32 SelectedTileX = INDEX_NONE;
+        int32 SelectedTileY = INDEX_NONE;
+        int32 SelectedTileIndex = INDEX_NONE;
+        if (TryGetSelectedStartTile(SelectedTileX, SelectedTileY, SelectedTileIndex) && SelectedTileIndex != INDEX_NONE)
+        {
+            TryUseFocusTile(TEXT("SelectedEmbarkTile"), FIntPoint(SelectedTileX, SelectedTileY));
+        }
+
+        if (!FocusTile.bValid && SettlementMgr && SettlementID != INDEX_NONE && WorldMapSubsystem)
+        {
+            const FSettlementState* Settlement = SettlementMgr->GetSettlement(SettlementID);
+            int32 SettlementTileX = INDEX_NONE;
+            int32 SettlementTileY = INDEX_NONE;
+
+            if (Settlement &&
+                Settlement->WorldTileID != INDEX_NONE &&
+                WorldMapSubsystem->TileIndexToXY(Settlement->WorldTileID, SettlementTileX, SettlementTileY))
+            {
+                TryUseFocusTile(TEXT("PlayerSettlementTile"), FIntPoint(SettlementTileX, SettlementTileY));
             }
         }
 
-        UE_LOG(
-            LogTemp,
-            Log,
-            TEXT("[ColonyManager] Camera anchor resolved from selected spawn. Desired=(%d,%d) Resolved=(%d,%d) Surface=(%.1f, %.1f, %.1f)"),
-            DesiredCameraCell.X,
-            DesiredCameraCell.Y,
-            ResolvedCameraCell.X,
-            ResolvedCameraCell.Y,
-            CameraAnchorWorld.X,
-            CameraAnchorWorld.Y,
-            CameraAnchorWorld.Z
-        );
+        if (!FocusTile.bValid)
+        {
+            TryUseFocusTile(TEXT("InitialClaimTile"), SpawnGridCenter);
+        }
+
+        if (!FocusTile.bValid)
+        {
+            const FIntPoint WorldCenter(
+                WorldMapSubsystem ? FMath::Max(0, WorldMapSubsystem->GetGridWidth() / 2) : FMath::Max(0, NavigationGridWidth / 2),
+                WorldMapSubsystem ? FMath::Max(0, WorldMapSubsystem->GetGridHeight() / 2) : FMath::Max(0, NavigationGridHeight / 2)
+            );
+
+            TryUseFocusTile(TEXT("WorldCenter"), WorldCenter);
+        }
+
+        if (!FocusTile.bValid)
+        {
+            UE_LOG(
+                LogTemp,
+                Warning,
+                TEXT("[TerrainVisibility] WARNING: Camera warmup target invalid; falling back to immediate camera focus."));
+            CameraAnchorWorld = CameraPawn->GetActorLocation();
+        }
+        else
+        {
+            CameraFocusTile = FocusTile.Tile;
+            bHasCameraWarmupTarget = true;
+
+            const bool bHasSurfaceWorld = VoxelWorldMgr->TryGetSurfaceWorldLocation(
+                FocusTile.Tile,
+                CameraAnchorWorld,
+                VoxelWorldMgr->TerrainSurfaceZOffset);
+
+            if (!bHasSurfaceWorld)
+            {
+                CameraAnchorWorld = VoxelWorldMgr->TerrainCellToWorld(FocusTile.Tile, 0.0f, true);
+            }
+
+            UE_LOG(
+                LogTemp,
+                Log,
+                TEXT("[SpawnSync] ZCheck CameraSurfaceZ=%.1f"),
+                CameraAnchorWorld.Z
+            );
+
+            UE_LOG(
+                LogTemp,
+                Log,
+                TEXT("[SpawnSync] CameraFocus Source=%s Tile=(%d,%d) World=(%.1f,%.1f,%.1f)"),
+                FocusTile.Source,
+                FocusTile.Tile.X,
+                FocusTile.Tile.Y,
+                CameraAnchorWorld.X,
+                CameraAnchorWorld.Y,
+                CameraAnchorWorld.Z
+            );
+        }
     }
     else
     {
@@ -1098,41 +1515,206 @@ void AColonyManager::PositionPlayerCameraOverSettlement() const
         return;
     }
 
-    // Keep the RTS anchor safely above the surface.
-    const float MinimumCameraAnchorZ = 3000.0f;
-    CameraAnchorWorld.Z = FMath::Max(CameraAnchorWorld.Z, MinimumCameraAnchorZ);
-
-    UE_LOG(
-        LogTemp,
-        Log,
-        TEXT("[ColonyManager] Camera anchor after clamp: (%.1f, %.1f, %.1f)"),
-        CameraAnchorWorld.X,
-        CameraAnchorWorld.Y,
-        CameraAnchorWorld.Z
-    );
-
-    CameraPawn->SnapToRTSView(
-        CameraAnchorWorld,
-        RTSCameraYaw,
-        RTSCameraPitch,
-        RTSCameraHeight,
-        true
-    );
-
-    PC->SetViewTarget(CameraPawn);
-    PC->SetControlRotation(FRotator(RTSCameraPitch, RTSCameraYaw, 0.0f));
-
-    UE_LOG(
-        LogTemp,
-        Log,
-        TEXT("[ColonyManager] Camera positioned at (%.1f, %.1f, %.1f). Manual=%s Camera=%s ViewTarget=%s"),
+    UE_LOG(LogTemp, Log,
+        TEXT("[SpawnSync] CameraAnchor=(X=%.1f,Y=%.1f,Z=%.1f) SettlementOrigin=(%d,%d) SpawnGridCenter=(%d,%d) WorldTile=(%d,%d)"),
         CameraAnchorWorld.X,
         CameraAnchorWorld.Y,
         CameraAnchorWorld.Z,
-        bUseManualCameraStart ? TEXT("true") : TEXT("false"),
-        *CameraPawn->GetName(),
-        PC->GetViewTarget() ? *PC->GetViewTarget()->GetName() : TEXT("None")
-    );
+        SettlementWorldOrigin.X,
+        SettlementWorldOrigin.Y,
+        SpawnGridCenter.X,
+        SpawnGridCenter.Y,
+        CameraFocusTile.X,
+        CameraFocusTile.Y);
+
+    if (ProcessorMgr)
+    {
+        for (const FAgentData& Agent : ProcessorMgr->GetAllAgents())
+        {
+            if (Agent.SettlementID == SettlementID)
+            {
+                const FIntPoint ExpectedWorldCell = SettlementWorldOrigin + Agent.CurrentGridPos;
+                UE_LOG(LogTemp, Log,
+                    TEXT("[SpawnSync] FirstAgentLocal=(%d,%d) ExpectedWorldCell=(%d,%d)"),
+                    Agent.CurrentGridPos.X,
+                    Agent.CurrentGridPos.Y,
+                    ExpectedWorldCell.X,
+                    ExpectedWorldCell.Y);
+                break;
+            }
+        }
+    }
+
+    auto SnapCameraNow = [this](APlayerController* InPC, AWorldForgeCamera* InCameraPawn, const FVector& InCameraAnchorWorld)
+        {
+            if (!InPC || !InCameraPawn)
+            {
+                return;
+            }
+
+            if (InPC->GetPawn() != InCameraPawn)
+            {
+                InPC->Possess(InCameraPawn);
+                UE_LOG(LogTemp, Log, TEXT("[ColonyManager] Possessed camera pawn: %s"), *InCameraPawn->GetName());
+            }
+
+            InCameraPawn->SnapToRTSView(
+                InCameraAnchorWorld,
+                RTSCameraYaw,
+                RTSCameraPitch,
+                RTSCameraHeight,
+                true
+            );
+
+            InPC->SetViewTarget(InCameraPawn);
+            InPC->SetControlRotation(FRotator(RTSCameraPitch, RTSCameraYaw, 0.0f));
+
+            UE_LOG(
+                LogTemp,
+                Log,
+                TEXT("[ColonyManager] Camera positioned at (%.1f, %.1f, %.1f). Manual=%s Camera=%s ViewTarget=%s"),
+                InCameraAnchorWorld.X,
+                InCameraAnchorWorld.Y,
+                InCameraAnchorWorld.Z,
+                bUseManualCameraStart ? TEXT("true") : TEXT("false"),
+                *InCameraPawn->GetName(),
+                InPC->GetViewTarget() ? *InPC->GetViewTarget()->GetName() : TEXT("None")
+            );
+        };
+
+    const bool bShouldDelayCameraSnap =
+        !bUseManualCameraStart &&
+        bHasCameraWarmupTarget &&
+        CameraMeshWarmupDelaySeconds > KINDA_SMALL_NUMBER;
+
+    if (bShouldDelayCameraSnap)
+    {
+        World->GetTimerManager().ClearTimer(CameraWarmupTimerHandle);
+
+        if (PC->GetViewTarget() != CameraPawn)
+        {
+            CameraPawn->SnapToRTSView(
+                CameraAnchorWorld,
+                RTSCameraYaw,
+                RTSCameraPitch,
+                RTSCameraHeight,
+                true
+            );
+        }
+
+        UE_LOG(
+            LogTemp,
+            Log,
+            TEXT("[TerrainVisibility] TerrainReady received. Pending camera warmup for Tile=(%d,%d) World=(%.1f,%.1f,%.1f) Delay=%.2f"),
+            CameraFocusTile.X,
+            CameraFocusTile.Y,
+            CameraAnchorWorld.X,
+            CameraAnchorWorld.Y,
+            CameraAnchorWorld.Z,
+            CameraMeshWarmupDelaySeconds
+        );
+
+        const TWeakObjectPtr<AColonyManager> WeakSelf(this);
+        const TWeakObjectPtr<APlayerController> WeakPC(PC);
+        const TWeakObjectPtr<AWorldForgeCamera> WeakCameraPawn(CameraPawn);
+        const FTimerDelegate CameraWarmupDelegate = FTimerDelegate::CreateLambda(
+            [WeakSelf, WeakPC, WeakCameraPawn, CameraFocusTile, CameraAnchorWorld]()
+            {
+                AColonyManager* StrongSelf = WeakSelf.Get();
+                APlayerController* WarmupPC = WeakPC.Get();
+                AWorldForgeCamera* WarmupCameraPawn = WeakCameraPawn.Get();
+
+                const bool bInvalidWarmupTarget =
+                    !StrongSelf ||
+                    !WarmupPC ||
+                    !WarmupCameraPawn ||
+                    CameraFocusTile.X == INDEX_NONE ||
+                    CameraFocusTile.Y == INDEX_NONE ||
+                    CameraAnchorWorld.ContainsNaN();
+
+                if (bInvalidWarmupTarget)
+                {
+                    UE_LOG(
+                        LogTemp,
+                        Warning,
+                        TEXT("[TerrainVisibility] WARNING: Camera warmup target invalid; falling back to immediate camera focus."));
+
+                    if (StrongSelf && WarmupPC && WarmupCameraPawn)
+                    {
+                        const FVector FallbackCameraWorld =
+                            StrongSelf->bUseManualCameraStart ? StrongSelf->ManualCameraLocation : WarmupCameraPawn->GetActorLocation();
+
+                        if (WarmupPC->GetPawn() != WarmupCameraPawn)
+                        {
+                            WarmupPC->Possess(WarmupCameraPawn);
+                            UE_LOG(LogTemp, Log, TEXT("[ColonyManager] Possessed camera pawn: %s"), *WarmupCameraPawn->GetName());
+                        }
+
+                        WarmupCameraPawn->SnapToRTSView(
+                            FallbackCameraWorld,
+                            StrongSelf->RTSCameraYaw,
+                            StrongSelf->RTSCameraPitch,
+                            StrongSelf->RTSCameraHeight,
+                            true
+                        );
+
+                        WarmupPC->SetViewTarget(WarmupCameraPawn);
+                        WarmupPC->SetControlRotation(FRotator(StrongSelf->RTSCameraPitch, StrongSelf->RTSCameraYaw, 0.0f));
+                    }
+                    return;
+                }
+
+                UE_LOG(
+                    LogTemp,
+                    Log,
+                    TEXT("[TerrainVisibility] CameraWarmup complete. Snapping camera now. Tile=(%d,%d) World=(%.1f,%.1f,%.1f)"),
+                    CameraFocusTile.X,
+                    CameraFocusTile.Y,
+                    CameraAnchorWorld.X,
+                    CameraAnchorWorld.Y,
+                    CameraAnchorWorld.Z
+                );
+
+                if (WarmupPC->GetPawn() != WarmupCameraPawn)
+                {
+                    WarmupPC->Possess(WarmupCameraPawn);
+                    UE_LOG(LogTemp, Log, TEXT("[ColonyManager] Possessed camera pawn: %s"), *WarmupCameraPawn->GetName());
+                }
+
+                WarmupCameraPawn->SnapToRTSView(
+                    CameraAnchorWorld,
+                    StrongSelf->RTSCameraYaw,
+                    StrongSelf->RTSCameraPitch,
+                    StrongSelf->RTSCameraHeight,
+                    true
+                );
+
+                WarmupPC->SetViewTarget(WarmupCameraPawn);
+                WarmupPC->SetControlRotation(FRotator(StrongSelf->RTSCameraPitch, StrongSelf->RTSCameraYaw, 0.0f));
+
+                UE_LOG(
+                    LogTemp,
+                    Log,
+                    TEXT("[ColonyManager] Camera positioned at (%.1f, %.1f, %.1f). Manual=%s Camera=%s ViewTarget=%s"),
+                    CameraAnchorWorld.X,
+                    CameraAnchorWorld.Y,
+                    CameraAnchorWorld.Z,
+                    StrongSelf->bUseManualCameraStart ? TEXT("true") : TEXT("false"),
+                    *WarmupCameraPawn->GetName(),
+                    WarmupPC->GetViewTarget() ? *WarmupPC->GetViewTarget()->GetName() : TEXT("None")
+                );
+            });
+
+        World->GetTimerManager().SetTimer(
+            CameraWarmupTimerHandle,
+            CameraWarmupDelegate,
+            CameraMeshWarmupDelaySeconds,
+            false
+        );
+        return;
+    }
+
+    SnapCameraNow(PC, CameraPawn, CameraAnchorWorld);
 }
 
 FIntPoint AColonyManager::ComputeInitialSpawnCell(int32 AgentIndex) const
@@ -1153,12 +1735,38 @@ FIntPoint AColonyManager::ResolveValidSpawnCell(const FIntPoint& DesiredCell) co
         return DesiredCell;
     }
 
+    const int32 EffectiveSearchRadius = FMath::Max(SpawnSearchRadius, CameraAnchorSearchRadius);
+
+    FVector CellSnapLocation = FVector::ZeroVector;
+    FIntPoint ResolvedCell = DesiredCell;
+    if (VoxelWorldMgr->TryGetNearestSpawnLocationForTerrainCell(
+        DesiredCell,
+        CellSnapLocation,
+        ResolvedCell,
+        EffectiveSearchRadius,
+        VoxelWorldMgr->TerrainSurfaceZOffset))
+    {
+        if (ResolvedCell != DesiredCell)
+        {
+            UE_LOG(
+                LogTemp,
+                Log,
+                TEXT("[CubeTerrainSnap] ColonyManager resolved spawn cell via terrain snap. Desired=(%d,%d) Resolved=(%d,%d) World=%s"),
+                DesiredCell.X,
+                DesiredCell.Y,
+                ResolvedCell.X,
+                ResolvedCell.Y,
+                *CellSnapLocation.ToString()
+            );
+        }
+
+        return ResolvedCell;
+    }
+
     if (VoxelWorldMgr->IsSpawnableTerrainCell(DesiredCell))
     {
         return DesiredCell;
     }
-
-    const int32 EffectiveSearchRadius = FMath::Max(SpawnSearchRadius, CameraAnchorSearchRadius);
 
     FIntPoint FoundCell = DesiredCell;
     if (VoxelWorldMgr->FindNearestSpawnableTerrainCell(DesiredCell, FoundCell, EffectiveSearchRadius))
@@ -1240,6 +1848,18 @@ bool AColonyManager::IsWorldCellAvailableForSpawn(const FIntPoint& WorldCell, co
     if (!VoxelWorldMgr)
     {
         return true;
+    }
+
+    FVector CellSnapLocation = FVector::ZeroVector;
+    FIntPoint ResolvedCell = WorldCell;
+    if (VoxelWorldMgr->TryGetNearestSpawnLocationForTerrainCell(
+        WorldCell,
+        CellSnapLocation,
+        ResolvedCell,
+        0,
+        VoxelWorldMgr->TerrainSurfaceZOffset))
+    {
+        return ResolvedCell == WorldCell;
     }
 
     return VoxelWorldMgr->IsSpawnableTerrainCell(WorldCell);

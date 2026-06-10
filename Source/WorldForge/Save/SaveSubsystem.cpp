@@ -21,6 +21,22 @@
 #include "CosmicSimulationSubsystem.h"       // ADDED
 #include "CivilizationResilienceSystem.h"    // ADDED
 
+namespace
+{
+constexpr int32 FixedSaveSlotSummaryCount = 8;
+
+FString MakeFixedSaveSlotName(const int32 SlotIndex)
+{
+    return FString::Printf(TEXT("WorldForge_Slot%d"), SlotIndex);
+}
+
+FString MakeSummaryTextOrDefault(const FString& Value, const TCHAR* Fallback)
+{
+    const FString TrimmedValue = Value.TrimStartAndEnd();
+    return TrimmedValue.IsEmpty() ? FString(Fallback) : TrimmedValue;
+}
+}
+
 void USaveSubsystem::Initialize(FSubsystemCollectionBase& C)
 {
     Super::Initialize(C);
@@ -357,12 +373,111 @@ bool USaveSubsystem::SaveSlotExists(const FString& S) const
     return UGameplayStatics::DoesSaveGameExist(S, 0);
 }
 
-void USaveSubsystem::DeleteSaveSlot(const FString& S)
+bool USaveSubsystem::DeleteSaveSlot(const FString& SaveSlotName, FString& OutReason)
 {
-    UGameplayStatics::DeleteGameInSlot(S, 0);
+    OutReason.Reset();
+
+    const FString TrimmedSaveSlotName = SaveSlotName.TrimStartAndEnd();
+    if (TrimmedSaveSlotName.IsEmpty())
+    {
+        OutReason = TEXT("Save slot name is empty.");
+        UE_LOG(LogTemp, Warning, TEXT("[SaveSubsystem] Delete failed. Reason='%s'"), *OutReason);
+        return false;
+    }
+
+    if (!UGameplayStatics::DoesSaveGameExist(TrimmedSaveSlotName, 0))
+    {
+        OutReason = FString::Printf(TEXT("Save slot does not exist: %s"), *TrimmedSaveSlotName);
+        UE_LOG(LogTemp, Warning, TEXT("[SaveSubsystem] Delete failed. SaveSlotName='%s' Reason='%s'"),
+            *TrimmedSaveSlotName,
+            *OutReason);
+        return false;
+    }
+
+    if (!UGameplayStatics::DeleteGameInSlot(TrimmedSaveSlotName, 0))
+    {
+        OutReason = FString::Printf(TEXT("Failed to delete save slot: %s"), *TrimmedSaveSlotName);
+        UE_LOG(LogTemp, Error, TEXT("[SaveSubsystem] Delete failed. SaveSlotName='%s' Reason='%s'"),
+            *TrimmedSaveSlotName,
+            *OutReason);
+        return false;
+    }
+
+    UE_LOG(LogTemp, Log, TEXT("[SaveSubsystem] Deleted save slot '%s'"), *TrimmedSaveSlotName);
+    return true;
 }
 
 TArray<FString> USaveSubsystem::GetSaveSlots() const
 {
-    return { TEXT("WorldForge_AutoSave"), TEXT("WorldForge_Slot1") };
+    TArray<FString> Slots;
+    Slots.Reserve(FixedSaveSlotSummaryCount);
+
+    for (int32 SlotIndex = 1; SlotIndex <= FixedSaveSlotSummaryCount; ++SlotIndex)
+    {
+        Slots.Add(MakeFixedSaveSlotName(SlotIndex));
+    }
+
+    return Slots;
+}
+
+TArray<FWorldForgeSaveSlotSummary> USaveSubsystem::GetFixedSaveSlotSummaries(int32 MaxSlots) const
+{
+    MaxSlots = FixedSaveSlotSummaryCount;
+
+    TArray<FWorldForgeSaveSlotSummary> Summaries;
+    Summaries.Reserve(MaxSlots);
+
+    int32 ExistingSaveCount = 0;
+
+    for (int32 SlotIndex = 1; SlotIndex <= MaxSlots; ++SlotIndex)
+    {
+        const FString SlotName = MakeFixedSaveSlotName(SlotIndex);
+
+        FWorldForgeSaveSlotSummary Summary;
+        Summary.SlotIndex = SlotIndex;
+        Summary.SaveSlotName = SlotName;
+        Summary.WorldName = TEXT("Empty Slot");
+        Summary.ColonyName.Reset();
+        Summary.LastPlayedText.Reset();
+        Summary.DayYearText.Reset();
+        Summary.SaveVersionText.Reset();
+        Summary.bHasSave = UGameplayStatics::DoesSaveGameExist(SlotName, 0);
+
+        if (Summary.bHasSave)
+        {
+            ++ExistingSaveCount;
+
+            Summary.WorldName = TEXT("Unknown World");
+            Summary.ColonyName = TEXT("Unknown Colony");
+            Summary.LastPlayedText = TEXT("Unknown");
+            Summary.DayYearText = TEXT("Day ?");
+            Summary.SaveVersionText = TEXT("Unknown Version");
+
+            if (USaveGame* LoadedSave = UGameplayStatics::LoadGameFromSlot(SlotName, 0))
+            {
+                if (const UWorldForgeSaveGame* WorldForgeSave = Cast<UWorldForgeSaveGame>(LoadedSave))
+                {
+                    Summary.WorldName = MakeSummaryTextOrDefault(WorldForgeSave->WorldName, TEXT("Unknown World"));
+                    Summary.ColonyName = MakeSummaryTextOrDefault(WorldForgeSave->ColonyName, TEXT("Unknown Colony"));
+                    Summary.LastPlayedText = MakeSummaryTextOrDefault(WorldForgeSave->SaveTimestamp, TEXT("Unknown"));
+                    Summary.DayYearText = FString::Printf(
+                        TEXT("Day %d, Year %d"),
+                        WorldForgeSave->SimCurrentDay,
+                        WorldForgeSave->SimCurrentYear);
+                    Summary.SaveVersionText = FString::Printf(TEXT("Version %d"), WorldForgeSave->SaveVersion);
+                }
+            }
+        }
+
+        Summaries.Add(Summary);
+    }
+
+    UE_LOG(
+        LogTemp,
+        Log,
+        TEXT("[SaveSubsystem] Built save slot summary list. Slots=%d Existing=%d"),
+        Summaries.Num(),
+        ExistingSaveCount);
+
+    return Summaries;
 }

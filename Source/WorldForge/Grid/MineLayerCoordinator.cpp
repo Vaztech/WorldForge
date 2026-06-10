@@ -46,21 +46,48 @@ void UMineLayerCoordinator::MoveLayer(int32 Delta)
         return;
     }
 
+    // CUBE-MINING-V3-ACCESS: Each layer-down input now moves exactly ONE voxel.
+    // Planning is hard-capped to MaxDepthForLog (3) layers below the deepest
+    // currently open/exposed column. Removing the ×3 slice scaling is what makes
+    // the spec's "16 → 15 → 14 → 13, then stop" behavior work: the step is 1 and
+    // the cap is 3, instead of conflating the two into a single 3-voxel jump.
+    static constexpr int32 MaxDepthForLog = 3;
+
+    const int32 SteppedDelta = Delta; // 1:1 — no slice scaling.
+
+    // Capture pre-move Z for the SliceMove log.
+    int32 SurfaceZ = 0;
+    int32 PreMoveZ = 0;
+    if (const ULayerViewSubsystem* LV = GetLayerView())
+    {
+        SurfaceZ = LV->GetSurfaceVoxelLayerZ();
+        PreMoveZ = LV->HasActiveVoxelLayer() ? LV->GetActiveVoxelLayerZ() : SurfaceZ;
+    }
+    const int32 RequestedZ = PreMoveZ + SteppedDelta;
+    const int32 MinZ = FMath::Max(0, SurfaceZ - MaxDepthForLog);
+
     // GridSelectionSubsystem::AdjustActiveToolLayer moves LayerViewSubsystem
     // internally and then triggers a grid rebuild. We call it first, then sync
     // the cutaway to the new LayerView state so all three systems agree.
     if (UGridSelectionSubsystem* Grid = GetGrid())
     {
-        Grid->AdjustActiveToolLayer(Delta);
+        Grid->AdjustActiveToolLayer(SteppedDelta);
     }
 
     SyncCutawayToLayerView();
 
+    const int32 FinalZ = GetActiveVoxelLayerZ();
+    const int32 RelOffset = GetRelativeLayerOffset();
+
+    UE_LOG(LogMineLayerCoord, Log,
+        TEXT("[CUBE-MINING-V2-UG] SliceMove Delta=%d Step=%d SurfaceZ=%d RequestedZ=%d FinalZ=%d Relative=%d MinZ=%d MaxZ=%d"),
+        Delta, SteppedDelta, SurfaceZ, RequestedZ, FinalZ, RelOffset, MinZ, SurfaceZ);
+
     UE_LOG(LogMineLayerCoord, Log,
         TEXT("[MineLayerCoord] MoveLayer Delta=%d → VoxelZ=%d RelativeOffset=%d Underground=%s"),
         Delta,
-        GetActiveVoxelLayerZ(),
-        GetRelativeLayerOffset(),
+        FinalZ,
+        RelOffset,
         IsUnderground() ? TEXT("true") : TEXT("false"));
 }
 
@@ -119,7 +146,7 @@ int32 UMineLayerCoordinator::GetRelativeLayerOffset() const
 void UMineLayerCoordinator::SyncCutawayToLayerView() const
 {
     const ULayerViewSubsystem* LayerView = GetLayerView();
-    UTerrainCutawaySubsystem*  Cutaway   = GetCutaway();
+    UTerrainCutawaySubsystem* Cutaway = GetCutaway();
 
     if (!LayerView || !Cutaway || !LayerView->HasActiveVoxelLayer())
     {

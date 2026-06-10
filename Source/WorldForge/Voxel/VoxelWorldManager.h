@@ -13,6 +13,8 @@ class AVoxelWorld;
 class AStaticMeshActor;
 class UStaticMesh;
 class UResourceSpawnSubsystem;
+class UCubeTerrainRuntime;
+class AWFCubeTerrainActor;       // CUBE-TERRAIN-01D: prototype patch renderer
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnTerrainReady);
 
@@ -55,6 +57,24 @@ struct FPerlinOctaveSettings
     int32 SeedOffset = 0;
 };
 
+USTRUCT(BlueprintType)
+struct FWorldForgeVoxelMeshBacklog
+{
+    GENERATED_BODY()
+
+    UPROPERTY(BlueprintReadOnly, Category = "WorldForge|Voxel")
+    bool bAvailable = false;
+
+    UPROPERTY(BlueprintReadOnly, Category = "WorldForge|Voxel")
+    int32 TotalTasksRemaining = -1;
+
+    UPROPERTY(BlueprintReadOnly, Category = "WorldForge|Voxel")
+    int32 MeshTasksRemaining = -1;
+
+    UPROPERTY(BlueprintReadOnly, Category = "WorldForge|Voxel")
+    int32 MeshActionsQueued = -1;
+};
+
 UCLASS(BlueprintType, Blueprintable)
 class WORLDFORGE_API UVoxelWorldManager : public UWorldSubsystem
 {
@@ -76,6 +96,9 @@ public:
 
     UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
     bool IsTerrainRuntimeStable() const;
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
+    bool TryGetVoxelMeshBacklog(FWorldForgeVoxelMeshBacklog& OutBacklog) const;
 
     UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
     bool IsSurfaceReady() const
@@ -204,6 +227,12 @@ public:
 
 
 
+    // ── Seed handoff: call before GenerateTerrainFromTiles so the terrain
+    // generator receives the real embark/world seed instead of the hardcoded
+    // 1337 default.  The pipeline calls this in Step05_InitVoxelChunks.
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Voxel")
+    void SetWorldSeed(int64 InSeed);
+
     // ── FIX (Issue 1): Accept Step03 tectonic ranges so the voxel generator
     // uses the same mountain data as the tile map.  Call before GenerateTerrainFromTiles.
     UFUNCTION(BlueprintCallable, Category = "WorldForge|Voxel")
@@ -211,6 +240,26 @@ public:
 
     UFUNCTION(BlueprintCallable, Category = "WorldForge|Voxel")
     void SetPipelineVolcanoes(const TArray<FVolcanoData>& InVolcanoes);
+
+    // LAKE-FIX-01A: Accept lake basin descriptors from BuildLakeBasins().
+    // Must be called before GenerateTerrainFromTiles so the snapshot includes lake data.
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Voxel")
+    void SetPipelineLakeBasins(const TArray<FLakeBasinData>& InLakeBasins);
+
+    // WATERLINE-LAKE-01B: Build world-space lake surface descriptors from the cached
+    // terrain snapshot and lake basin data. Call after terrain is ready.
+    // Returns an empty array if no snapshot or no lake basins are present.
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Waterline")
+    TArray<FWaterlineLakeSurfaceDesc> GetWaterlineLakeSurfaceDescs() const;
+
+    // RIVER-SYSTEM-01: Build lightweight river surface descriptors from the
+    // current terrain snapshot. Call after terrain is ready.
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Waterline")
+    TArray<FWorldForgeRiverSurfaceDesc> GetRiverSurfaceDescs() const;
+
+    // RIVER-WATER-02B: Get full river network descriptors (one per connected river component).
+    // Returns a const reference into the terrain snapshot. Call after terrain is ready.
+    const TArray<FWorldForgeRiverNetworkDesc>& GetRiverNetworkDescs() const;
 
     // ── FIX (Resource Discovery): Accept updated tile resource data from the pipeline.
     // Call AFTER Step08_SeedResources so PendingWorldTiles and the snapshot
@@ -248,6 +297,17 @@ public:
     UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
     bool IsSpawnableTerrainCell(FIntPoint GridCell) const;
 
+    // CUBE-TERRAIN-04U-STEP1: CubePrototype-aware terrain passability for nav-grid builds.
+    // When CubePrototype runtime is active: queries the cube surface block.
+    //   Water/Lava/Air -> false. Grass/Dirt/Sand/Snow/Rock/DeepRock/Basalt -> true.
+    // Otherwise: falls back to IsSpawnableTerrainCell (smooth/SDF semantics unchanged).
+    // OutReason: "Water", "Lava", "Air", "NoSurface", "OutOfBounds", "Walkable", "NotSpawnable".
+    // OutSurfaceZ: cube surface Z when CubePrototype is active; 0 in the fallback path.
+    bool IsTerrainCellWalkableForNavigation(
+        const FIntPoint& TerrainCell,
+        FString* OutReason = nullptr,
+        int32* OutSurfaceZ = nullptr) const;
+
     UFUNCTION(BlueprintCallable, Category = "WorldForge|Voxel")
     bool FindNearestSpawnableTerrainCell(FIntPoint StartCell, FIntPoint& OutCell, int32 MaxSearchRadius = 16) const;
 
@@ -258,6 +318,15 @@ public:
         FIntPoint& OutResolvedCell,
         int32 MaxSearchRadius = 16,
         float ZOffset = 0.0f) const;
+
+    UFUNCTION(BlueprintCallable, Category="WorldForge|Voxel|Cube Terrain")
+    bool TryGetCubeSnapForWorldPos(
+        const FVector& DesiredWorldLocation,
+        FVector& OutWorldLocation,
+        FIntPoint& OutResolvedCell,
+        int32 MaxSearchRadius = 8,
+        float ZOffset = 0.0f
+    ) const;
 
     UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
     FIntPoint ClampTerrainCellToBounds(FIntPoint GridCell) const;
@@ -304,7 +373,12 @@ public:
     float ChunkWorldSize = 3200.0f;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Voxel")
-    float VoxelSize = 100.0f;
+    float VoxelSize = 200.0f;
+
+    // CUBE-VOXEL-SCALE: cells per tile per axis, mirrored from UWorldForgeTerrainSettings.
+    // Drives the render block grid (BlocksPerWorldTile) so it matches the mining voxel grid.
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Voxel")
+    int32 SubdivisionsPerTile = 16;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Voxel")
     float TerrainSurfaceZOffset = 50.0f;
@@ -533,6 +607,25 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Voxel")
     int32 MaxTerrainRetryCount = 40;
 
+    // MiniMapFix: public accessors for terrain origin and cell size.
+    // External callers (e.g., WorldMapSubsystem::WorldPositionToTileXY) must use
+    // these instead of WorldToTerrainCell, which depends on CachedTerrainGridWidth/Height
+    // (transient, zero until CacheTerrainMetadata runs during terrain generation).
+    inline FVector GetTerrainWorldOrigin() const { return GetVoxelWorldOrigin(); }
+    inline float   GetTerrainCellSize()    const { return GetTerrainCellWorldSize(); }
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
+    float GetGeneratedSeaLevelWorldZ() const;
+
+    // CUBE-TERRAIN-01F: Cache the confirmed embark tile for cube patch centering.
+    // Called by WorldGenBootstrapActor::QueueSelectedTileCameraHandoff after full-map confirm.
+    // If CubePrototype mode is active and the runtime is valid, rebuilds the patch immediately.
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Voxel")
+    void SetConfirmedEmbarkTile(int32 InTileX, int32 InTileY);
+
+    // CUBE-TERRAIN-01F: Returns true and populates OutX/OutY if a confirmed tile has been set.
+    bool GetConfirmedEmbarkTile(int32& OutX, int32& OutY) const;
+
 protected:
     UFUNCTION(BlueprintImplementableEvent, Category = "WorldForge|Voxel")
     void OnBiomeChunkRequested(FIntPoint ChunkCoord, const FVoxelBiomeProfile& Profile);
@@ -621,11 +714,35 @@ private:
     void ClearPendingTerrainRequest();
     void BroadcastTerrainReadyIfNeeded();
 
+    // CUBE-TERRAIN-01D: Spawn (or replace) the prototype cube patch actor.
+    // Called after CubeTerrainRuntime::BuildFromTiles succeeds.
+    // Smooth terrain is unaffected.
+    void SpawnCubeTerrainActor();
+
     // ── Resource Discovery: notify ResourceSpawnSubsystem when terrain is ready ──
     void NotifyResourceSpawnSystemTerrainReady();
 
     UPROPERTY(Transient)
     TObjectPtr<AVoxelWorld> VoxelWorldActor = nullptr;
+
+    // CUBE-TERRAIN-01B: Parallel cube terrain runtime.
+    // Allocated during Initialize(). Active only when CurrentTerrainMode == CubePrototype.
+    // Smooth terrain path is completely unaffected when this is idle.
+    UPROPERTY(Transient)
+    TObjectPtr<UCubeTerrainRuntime> CubeTerrainRuntime = nullptr;
+
+    // CUBE-TERRAIN-01D: Prototype patch renderer actor.
+    // Spawned/destroyed by SpawnCubeTerrainActor() when CubePrototype build completes.
+    // Null when CubePrototype is not active. Does not affect Smooth terrain.
+    UPROPERTY(Transient)
+    TObjectPtr<AWFCubeTerrainActor> CubeTerrainActor = nullptr;
+
+    // CUBE-TERRAIN-04N-STEP9: Configurable spawn class for the cube terrain actor.
+    // Allows a Blueprint subclass of AWFCubeTerrainActor (with BlockTypeMaterials
+    // populated) to be used in place of the native default. If null, SpawnCubeTerrainActor()
+    // falls back to AWFCubeTerrainActor::StaticClass() so behavior is unchanged.
+    UPROPERTY(EditAnywhere, Category="Cube Terrain")
+    TSubclassOf<AWFCubeTerrainActor> CubeTerrainActorClass;
 
     FWorldForgeTerrainSnapshot TerrainSnapshot;
 
@@ -657,6 +774,10 @@ private:
     UPROPERTY(Transient)
     TArray<FGameplayTag> CachedBiomeTags;
 
+    // ── Seed: world generation seed received from the pipeline in Step05.
+    // Baked into TerrainSnapshot.WorldSeed during BuildTerrainSnapshot().
+    int64 CachedWorldSeed = 0;
+
     // ── FIX (Issue 1): Cached Step03 mountain ranges, copied into the
     // terrain snapshot so the voxel generator uses real tectonic data.
     UPROPERTY(Transient)
@@ -664,6 +785,10 @@ private:
 
     UPROPERTY(Transient)
     TArray<FVolcanoData> CachedVolcanoes;
+
+    // LAKE-FIX-01A: Lake basin descriptors propagated from WorldGenPipeline.
+    UPROPERTY(Transient)
+    TArray<FLakeBasinData> CachedLakeBasins;
 
     UPROPERTY(Transient)
     TMap<FIntVector, TObjectPtr<AStaticMeshActor>> FallbackPlacedBlockActors;
@@ -718,4 +843,22 @@ private:
 
     UPROPERTY(Transient)
     int32 CurrentBlockHeightStep = 4;
+
+    // CUBE-TERRAIN-01F: Confirmed embark tile for CubePrototype patch centering.
+    // Set via SetConfirmedEmbarkTile() when the full-map confirm fires (bootstrap flow).
+    // -1 = not yet set. BuildPatch reads this before falling back to EmbarkationManager.
+    UPROPERTY(Transient)
+    int32 ConfirmedEmbarkTileX = -1;
+
+    UPROPERTY(Transient)
+    int32 ConfirmedEmbarkTileY = -1;
+
+    // CUBE-TERRAIN-04B: Last tile coordinates used for a successful cube patch rebuild.
+    // SetConfirmedEmbarkTile() uses these to skip duplicate rebuilds when the
+    // confirm event fires repeatedly with the same tile.
+    UPROPERTY(Transient)
+    int32 LastCubePatchCenterX = INDEX_NONE;
+
+    UPROPERTY(Transient)
+    int32 LastCubePatchCenterY = INDEX_NONE;
 };

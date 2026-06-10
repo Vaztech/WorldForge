@@ -57,7 +57,7 @@ private:
     bool TryGetSelectedStartTile(int32& OutTileX, int32& OutTileY, int32& OutTileIndex) const;
     FIntPoint ResolveInitialSettlementWorldOrigin() const;
     FIntPoint ComputeSettlementOriginFromSpawnCenter(const FIntPoint& InSpawnCenter) const;
-    void PositionPlayerCameraOverSettlement() const;
+    void PositionPlayerCameraOverSettlement();
 
     FIntPoint ComputeInitialSpawnCell(int32 AgentIndex) const;
     FIntPoint ResolveValidSpawnCell(const FIntPoint& DesiredCell) const;
@@ -168,6 +168,9 @@ private:
     UPROPERTY(EditAnywhere, Category = "Colony|Camera")
     float RTSCameraYaw = 45.0f;
 
+    UPROPERTY(EditAnywhere, Category = "Colony|Camera", meta = (ClampMin = "0.0", UIMin = "0.0"))
+    float CameraMeshWarmupDelaySeconds = 1.5f;
+
     UPROPERTY(EditAnywhere, Category = "Colony|Camera")
     bool bUseManualCameraStart = false;
 
@@ -186,4 +189,5 @@ private:
     int32 BootstrapRetryCount = 0;
 
     FTimerHandle BootstrapTimerHandle;
+    FTimerHandle CameraWarmupTimerHandle;
 };

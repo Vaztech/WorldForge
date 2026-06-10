@@ -20,6 +20,8 @@
 #include "Voxel/VoxelWorldManager.h"
 #include "Utility/WorldForgeTerrainSnapUtility.h"
 
+#include "Grid/GridSelectionSubsystem.h"
+#include "Grid/GridDesignationTypes.h"
 #include "CollisionQueryParams.h"
 #include "Engine/World.h"
 
@@ -1183,12 +1185,22 @@ void UFarmingSubsystem::OnPlantCompleted(int32 ZoneID, FIntPoint TilePos)
 
     FVector WorldPos = FVector::ZeroVector;
 
+    int32 SurfaceVoxelZ = 0;
     if (const UVoxelWorldManager* VoxelWorldManager = World->GetSubsystem<UVoxelWorldManager>())
     {
-        int32 SurfaceVoxelZ = 0;
         const bool bHasSurfaceZ = VoxelWorldManager->TryGetTerrainSurfaceVoxelZ(
             WorldGridCell,
             SurfaceVoxelZ);
+
+        UE_LOG(LogTemp, Log,
+            TEXT("[FarmingSubsystem] Crop terrain lookup. Zone=%d LocalTile=(%d,%d) WorldGridCell=(%d,%d) SurfaceVoxelZ=%d HasSurface=%s"),
+            ZoneID,
+            TilePos.X,
+            TilePos.Y,
+            WorldGridCell.X,
+            WorldGridCell.Y,
+            SurfaceVoxelZ,
+            bHasSurfaceZ ? TEXT("true") : TEXT("false"));
 
         const FVector CellCenterXY = bHasSurfaceZ
             ? VoxelWorldManager->GridToWorld(WorldGridCell, SurfaceVoxelZ)
@@ -1316,6 +1328,41 @@ void UFarmingSubsystem::OnPlantCompleted(int32 ZoneID, FIntPoint TilePos)
                     WorldGridCell.Y,
                     *Zone->CropRowName.ToString(),
                     *CropActor->GetName());
+
+                // Patch 2C: Remove the confirmed farm overlay tile now that
+                // the crop/farm plot was successfully created.
+                // Uses the same FIntVector coord format as CommitFarmCellsToConfirmedOverlay.
+                UGridSelectionSubsystem* GridSS = World->GetSubsystem<UGridSelectionSubsystem>();
+                if (GridSS)
+                {
+                    const FIntVector OverlayVoxelCoord(WorldGridCell.X, WorldGridCell.Y, SurfaceVoxelZ);
+                    const bool bOverlayRemoved = GridSS->RemoveConfirmedDesignationCell(
+                        OverlayVoxelCoord,
+                        EGridDesignationType::Farm);
+
+                    UE_LOG(LogTemp, Log,
+                        TEXT("[FarmingSubsystem] [2C] Farm overlay removal. Zone=%d CropRow=%s LocalTile=(%d,%d) WorldGridCell=(%d,%d) OverlayVoxel=(%d,%d,%d) Removed=%s"),
+                        ZoneID,
+                        *Zone->CropRowName.ToString(),
+                        TilePos.X,
+                        TilePos.Y,
+                        WorldGridCell.X,
+                        WorldGridCell.Y,
+                        OverlayVoxelCoord.X,
+                        OverlayVoxelCoord.Y,
+                        OverlayVoxelCoord.Z,
+                        bOverlayRemoved ? TEXT("true") : TEXT("false"));
+                }
+                else
+                {
+                    UE_LOG(LogTemp, Warning,
+                        TEXT("[FarmingSubsystem] [2C] Farm overlay removal skipped: GridSelectionSubsystem unavailable. Zone=%d LocalTile=(%d,%d) WorldGridCell=(%d,%d)"),
+                        ZoneID,
+                        TilePos.X,
+                        TilePos.Y,
+                        WorldGridCell.X,
+                        WorldGridCell.Y);
+                }
             }
             else
             {

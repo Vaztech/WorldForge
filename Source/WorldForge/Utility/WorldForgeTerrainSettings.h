@@ -26,8 +26,21 @@ public:
     UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Voxel", meta = (ClampMin = "1.0"))
     float ChunkWorldSize = 3200.0f;
 
+    // CUBE-VOXEL-SCALE: single source of truth for grid resolution.
+    // One terrain tile (ChunkWorldSize wide) is divided into SubdivisionsPerTile cells
+    // per axis. This drives BOTH the render block grid AND the mining/selection voxel
+    // grid so they always align. Default 16 → 16x16 cells per tile → 200uu cells at the
+    // 3200uu tile size (2m DF-style). Change ONLY this to re-scale the whole grid:
+    //   VoxelSize           = ChunkWorldSize / SubdivisionsPerTile  (derived in ctor)
+    //   render BlocksPerTile = SubdivisionsPerTile                  (fed at build time)
+    UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Voxel", meta = (ClampMin = "1", ClampMax = "64"))
+    int32 SubdivisionsPerTile = 16;
+
+    // Derived from ChunkWorldSize / SubdivisionsPerTile in the constructor. Kept as a
+    // stored field for editor visibility and back-compat with callers that read it
+    // directly, but it must NOT be edited independently — change SubdivisionsPerTile.
     UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Voxel", meta = (ClampMin = "1.0"))
-    float VoxelSize = 100.0f;
+    float VoxelSize = 200.0f;
 
     UPROPERTY(EditAnywhere, Config, BlueprintReadWrite, Category = "Voxel")
     float TerrainSurfaceZOffset = 50.0f;

@@ -21,7 +21,25 @@
       "mcp__nwiro__reparent_blueprint",
       "mcp__nwiro__read_data_table",
       "mcp__nwiro__list_project_modules",
-      "mcp__nwiro__write_file"
+      "mcp__nwiro__write_file",
+      "mcp__nwiro__set_cdo_property",
+      "mcp__nwiro__bp_get_compile_errors",
+      "mcp__nwiro__create_data_table",
+      "mcp__nwiro__import_data_table_json",
+      "mcp__nwiro__delete_file",
+      "mcp__nwiro__undo",
+      "mcp__nwiro__bp_find_unconnected_pins",
+      "mcp__nwiro__get_level_actors",
+      "mcp__nwiro__get_actor_property",
+      "mcp__nwiro__find_materials",
+      "mcp__nwiro__inspect_material",
+      "mcp__nwiro__create_material_instance",
+      "mcp__nwiro__get_level_info",
+      "mcp__nwiro__open_level",
+      "mcp__nwiro__find_static_meshes",
+      "mcp__nwiro__play_in_editor",
+      "mcp__nwiro__stop_pie",
+      "mcp__nwiro__get_build_configuration"
     ]
   }
 }

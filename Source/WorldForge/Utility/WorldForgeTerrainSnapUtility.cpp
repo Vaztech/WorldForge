@@ -164,6 +164,18 @@ bool UWorldForgeTerrainSnapUtility::TryGetSnapLocationFromVoxelWorld(
         return false;
     }
 
+    constexpr int32 SearchRadius = 8;
+    FIntPoint CubeResolvedCell;
+    if (VoxelWorldManager->TryGetCubeSnapForWorldPos(
+        InWorldLocation,
+        OutSnappedLocation,
+        CubeResolvedCell,
+        SearchRadius,
+        ZOffset))
+    {
+        return true;
+    }
+
     // Use exact voxel XY -> terrain surface voxel Z when possible.
     const FIntPoint VoxelXY = VoxelWorldManager->WorldToGrid(InWorldLocation);
 

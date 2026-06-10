@@ -32,6 +32,16 @@
 
 namespace
 {
+    constexpr float WF_LakeBasinCoreScale = 0.65f;
+    constexpr float WF_LakeBasinEdgeBlendScale = 1.25f;
+    constexpr float WF_LakeMinShorelineFeatherTiles = 2.0f;
+    constexpr float WF_LakeMaxShorelineFeatherTiles = 3.0f;
+    constexpr float WF_LakeMinLoweringVoxels = 0.50f;
+    constexpr float WF_LakeMaxLoweringVoxels = 0.70f;
+    constexpr float WF_LakeSteepEdgeWarningThreshold = 0.40f;
+    constexpr float WF_CoastMaterialReachTiles = 1.85f;
+    constexpr float WF_CoastSandSlopeMaxDegrees = 14.0f;
+
     static float WF_FractalPerlin2D(float X, float Y, float Frequency, int32 Octaves)
     {
         float Total = 0.0f;
@@ -60,6 +70,93 @@ namespace
     static float WF_Perlin3D(float X, float Y, float Z)
     {
         return FMath::PerlinNoise3D(FVector(X, Y, Z));
+    }
+
+    static float WF_ComputeLakeFloorLoweringVoxels(const FWorldForgeTerrainSnapshot& Snapshot)
+    {
+        return FMath::Clamp(
+            static_cast<float>(Snapshot.LakeBasinDepthVoxels) * 0.05f,
+            WF_LakeMinLoweringVoxels,
+            WF_LakeMaxLoweringVoxels);
+    }
+
+    static void WF_LogLakeTerrainShapeDiagnostics(const FWorldForgeTerrainSnapshot& Snapshot)
+    {
+        if (!Snapshot.IsValid() || Snapshot.PipelineLakeBasins.Num() == 0)
+        {
+            return;
+        }
+
+        const float ChunkSizeF = static_cast<float>(FMath::Max(1, Snapshot.ChunkSizeVoxels));
+        const float HalfGridX = static_cast<float>(Snapshot.GridWidth) * 0.5f;
+        const float HalfGridY = static_cast<float>(Snapshot.GridHeight) * 0.5f;
+        const float MaxLoweringVoxels = WF_ComputeLakeFloorLoweringVoxels(Snapshot);
+
+        for (const FLakeBasinData& Basin : Snapshot.PipelineLakeBasins)
+        {
+            if (Basin.TileCount <= 0)
+            {
+                continue;
+            }
+
+            const float CenterX = (static_cast<float>(Basin.CenterTileX) + 0.5f - HalfGridX) * ChunkSizeF;
+            const float CenterY = (static_cast<float>(Basin.CenterTileY) + 0.5f - HalfGridY) * ChunkSizeF;
+            const float WaterSurfaceHeight = FWorldForgeTerrainMath::ElevationToVoxelHeight(
+                Basin.WaterSurfaceElevation01,
+                Snapshot);
+            const float BasinFloorHeight = FWorldForgeTerrainMath::ElevationToVoxelHeight(
+                Basin.FloorElevation01,
+                Snapshot);
+            const float LoweringVoxels = FMath::Clamp(
+                WaterSurfaceHeight - BasinFloorHeight,
+                WF_LakeMinLoweringVoxels,
+                MaxLoweringVoxels);
+            const float ShorelineFeatherTiles = FMath::Clamp(
+                Basin.ShoreFalloffTiles > KINDA_SMALL_NUMBER
+                    ? Basin.ShoreFalloffTiles
+                    : 2.5f,
+                WF_LakeMinShorelineFeatherTiles,
+                WF_LakeMaxShorelineFeatherTiles);
+            const float MaxEdgeDelta = LoweringVoxels / FMath::Max(1.0f, ShorelineFeatherTiles);
+            const int32 ChunkSpanX = FMath::Max(1, Basin.MaxTileX - Basin.MinTileX + 1);
+            const int32 ChunkSpanY = FMath::Max(1, Basin.MaxTileY - Basin.MinTileY + 1);
+
+            UE_LOG(
+                LogTemp,
+                Log,
+                TEXT("[LakeFix] TerrainShape Basin=%d Tiles=%d Center=(%.0f,%.0f) SurfaceZ=%.1f LoweringVoxels=%.2f FeatherTiles=%.1f"),
+                Basin.BasinID,
+                Basin.TileCount,
+                CenterX,
+                CenterY,
+                WaterSurfaceHeight,
+                LoweringVoxels,
+                ShorelineFeatherTiles);
+
+            UE_LOG(
+                LogTemp,
+                Log,
+                TEXT("[LakeFix] TerrainShapeSeams Basin=%d ChunkSpan=(%d,%d) TileBounds=[%d..%d,%d..%d] CoreScale=%.2f EdgeBlendScale=%.2f"),
+                Basin.BasinID,
+                ChunkSpanX,
+                ChunkSpanY,
+                Basin.MinTileX,
+                Basin.MaxTileX,
+                Basin.MinTileY,
+                Basin.MaxTileY,
+                WF_LakeBasinCoreScale,
+                WF_LakeBasinEdgeBlendScale);
+
+            if (MaxEdgeDelta > WF_LakeSteepEdgeWarningThreshold)
+            {
+                UE_LOG(
+                    LogTemp,
+                    Warning,
+                    TEXT("[LakeFix] WARNING: Lake basin may be too steep. Basin=%d MaxEdgeDelta=%.2f"),
+                    Basin.BasinID,
+                    MaxEdgeDelta);
+            }
+        }
     }
 }
 
@@ -92,18 +189,181 @@ void FWorldForgeTerrainGeneratorInstance::Init(const FVoxelGeneratorInit& InitSt
     if (TerrainSnapshot.IsValid())
     {
         const float HalfGridX = static_cast<float>(TerrainSnapshot.GridWidth) * 0.5f;
+        const float HalfGridY = static_cast<float>(TerrainSnapshot.GridHeight) * 0.5f;
         const float ChunkSizeF = static_cast<float>(TerrainSnapshot.ChunkSizeVoxels);
         const float MinVoxel = -HalfGridX * ChunkSizeF;
         const float MaxVoxel = HalfGridX * ChunkSizeF;
+
+        const int32 TileCount = TerrainSnapshot.WorldTiles.Num();
+        const float WaterThreshold = FMath::Clamp(TerrainSnapshot.WaterThreshold, 0.0f, 1.0f);
+        const float SeaLevel = static_cast<float>(TerrainSnapshot.SeaLevelVoxels);
+
+        bool bHasElevationStats = false;
+        float ElevationMin = 0.0f;
+        float ElevationMax = 0.0f;
+        int32 WaterTileCount = 0;
+        int32 LandTileCount = 0;
+
+        for (int32 TileIndex = 0; TileIndex < TileCount; ++TileIndex)
+        {
+            const FIntPoint Cell(
+                TerrainSnapshot.GridWidth > 0 ? TileIndex % TerrainSnapshot.GridWidth : 0,
+                TerrainSnapshot.GridWidth > 0 ? TileIndex / TerrainSnapshot.GridWidth : 0);
+            const float Elevation = TerrainSnapshot.GetTileElevation(Cell, 0.0f);
+
+            if (!bHasElevationStats)
+            {
+                ElevationMin = Elevation;
+                ElevationMax = Elevation;
+                bHasElevationStats = true;
+            }
+            else
+            {
+                ElevationMin = FMath::Min(ElevationMin, Elevation);
+                ElevationMax = FMath::Max(ElevationMax, Elevation);
+            }
+
+            if (Elevation <= WaterThreshold)
+            {
+                ++WaterTileCount;
+            }
+            else
+            {
+                ++LandTileCount;
+            }
+        }
+
+        bool bHasSurfaceStats = false;
+        float SurfaceMin = 0.0f;
+        float SurfaceMax = 0.0f;
+        float RidgeMax = 0.0f;
+        int32 SurfaceSamples = 0;
+
+        const int32 SampleStepX = FMath::Max(1, TerrainSnapshot.GridWidth / 16);
+        const int32 SampleStepY = FMath::Max(1, TerrainSnapshot.GridHeight / 16);
+
+        for (int32 CellY = 0; CellY < TerrainSnapshot.GridHeight; CellY += SampleStepY)
+        {
+            for (int32 CellX = 0; CellX < TerrainSnapshot.GridWidth; CellX += SampleStepX)
+            {
+                const float VoxelX = (static_cast<float>(CellX) + 0.5f - HalfGridX) * ChunkSizeF;
+                const float VoxelY = (static_cast<float>(CellY) + 0.5f - HalfGridY) * ChunkSizeF;
+                const float SurfaceHeight = ComputeSurfaceHeight(VoxelX, VoxelY);
+
+                if (!bHasSurfaceStats)
+                {
+                    SurfaceMin = SurfaceHeight;
+                    SurfaceMax = SurfaceHeight;
+                    bHasSurfaceStats = true;
+                }
+                else
+                {
+                    SurfaceMin = FMath::Min(SurfaceMin, SurfaceHeight);
+                    SurfaceMax = FMath::Max(SurfaceMax, SurfaceHeight);
+                }
+
+                const float MacroHeight = FWorldForgeTerrainMath::ComputeSurfaceHeight(VoxelX, VoxelY, TerrainSnapshot);
+                if (MacroHeight > SeaLevel)
+                {
+                    RidgeMax = FMath::Max(
+                        RidgeMax,
+                        FWorldForgeTerrainMath::SampleMountainRidgeHeight(VoxelX, VoxelY, TerrainSnapshot));
+                }
+
+                ++SurfaceSamples;
+            }
+        }
+
         UE_LOG(LogTemp, Log,
-            TEXT("[TerrainGen] Init v5.0: Grid=%dx%d ChunkSizeVoxels=%d VoxelSize=%.1f "
-                "Expected voxel range=[%.0f..%.0f] (total=%.0f) Volcanoes=%d DirtyChunks=%d"),
+            TEXT("[TerrainGen] Init v5.0: Seed=%d Grid=%dx%d ChunkSizeVoxels=%d VoxelSize=%.1f "
+                "Expected voxel range=[%.0f..%.0f] (total=%.0f) MountainRanges=%d Volcanoes=%d DirtyChunks=%d"),
+            Seed,
             TerrainSnapshot.GridWidth, TerrainSnapshot.GridHeight,
             TerrainSnapshot.ChunkSizeVoxels,
             TerrainSnapshot.VoxelSize,
             MinVoxel, MaxVoxel, MaxVoxel - MinVoxel,
+            TerrainSnapshot.PipelineMountainRanges.Num(),
             TerrainSnapshot.PipelineVolcanoes.Num(),
             TerrainSnapshot.Modifications.NumDirtyChunks());
+
+        UE_LOG(LogTemp, Log,
+            TEXT("[TerrainGen] Snapshot Grid=%dx%d Tiles=%d MountainRanges=%d Volcanoes=%d ElevMin=%.3f ElevMax=%.3f WaterTiles=%d LandTiles=%d"),
+            TerrainSnapshot.GridWidth,
+            TerrainSnapshot.GridHeight,
+            TileCount,
+            TerrainSnapshot.PipelineMountainRanges.Num(),
+            TerrainSnapshot.PipelineVolcanoes.Num(),
+            bHasElevationStats ? ElevationMin : 0.0f,
+            bHasElevationStats ? ElevationMax : 0.0f,
+            WaterTileCount,
+            LandTileCount);
+
+        UE_LOG(LogTemp, Log,
+            TEXT("[TerrainGen] HeightStats SurfaceMin=%.1f SurfaceMax=%.1f RidgeMax=%.1f Samples=%d"),
+            bHasSurfaceStats ? SurfaceMin : 0.0f,
+            bHasSurfaceStats ? SurfaceMax : 0.0f,
+            RidgeMax,
+            SurfaceSamples);
+
+        UE_LOG(LogTemp, Log,
+            TEXT("[TerrainMaterial] CoastBand=%.2f SandMax=%.3f DirtMin=%.3f SlopeThresholds=(Dirt=%.1f Rock=%.1f Cliff=%.1f)"),
+            TerrainSnapshot.CoastBandVoxels,
+            TerrainSnapshot.SandMaxElevationNormalized,
+            TerrainSnapshot.DirtMinElevationNormalized,
+            TerrainSnapshot.DirtSlopeThresholdDegrees,
+            TerrainSnapshot.RockSlopeThresholdDegrees,
+            TerrainSnapshot.CliffSlopeThresholdDegrees);
+
+        FWorldForgeTerrainMath::LogCoastDiagnostics(TerrainSnapshot);
+
+        {
+            const float RepairMaxLoweringVoxels = WF_ComputeLakeFloorLoweringVoxels(TerrainSnapshot);
+            UE_LOG(LogTemp, Log,
+                TEXT("[LakeFix] Repair shaping active. Basins=%d LakeTiles=%d MaxLoweringVoxels=%.2f"),
+                TerrainSnapshot.PipelineLakeBasins.Num(),
+                TerrainSnapshot.PipelineLakeTileCount,
+                RepairMaxLoweringVoxels);
+            UE_LOG(LogTemp, Log,
+                TEXT("[LakeFix] Shallow lake terrain shaping active; Waterline surfaces are handled by WorldGenBootstrapActor."));
+        }
+
+        WF_LogLakeTerrainShapeDiagnostics(TerrainSnapshot);
+
+        if (TerrainSnapshot.PipelineMountainRanges.Num() == 0)
+        {
+            UE_LOG(LogTemp, Warning,
+                TEXT("[TerrainGen] MountainRanges == 0; 3D terrain will not receive Step03 mountain ridge displacement."));
+        }
+
+        if (bHasElevationStats && FMath::Abs(ElevationMax - ElevationMin) <= 0.001f)
+        {
+            UE_LOG(LogTemp, Warning,
+                TEXT("[TerrainGen] Tile elevations are nearly identical. ElevMin=%.3f ElevMax=%.3f"),
+                ElevationMin,
+                ElevationMax);
+        }
+
+        const float LowReliefThreshold = SeaLevel + FMath::Max(
+            TerrainSnapshot.CoastBandVoxels + 4.0f,
+            static_cast<float>(FMath::Max(1, TerrainSnapshot.MaxLandHeightVoxels)) * 0.08f);
+        if (bHasSurfaceStats && SurfaceMax <= LowReliefThreshold)
+        {
+            UE_LOG(LogTemp, Warning,
+                TEXT("[TerrainGen] SurfaceMax is only slightly above sea level. SurfaceMax=%.1f SeaLevel=%.1f Threshold=%.1f"),
+                SurfaceMax,
+                SeaLevel,
+                LowReliefThreshold);
+        }
+
+        const float RidgeNearZeroThreshold = FMath::Max(0.5f, TerrainSnapshot.MountainMinHeightVoxels * 0.05f);
+        if (TerrainSnapshot.PipelineMountainRanges.Num() > 0 && RidgeMax <= RidgeNearZeroThreshold)
+        {
+            UE_LOG(LogTemp, Warning,
+                TEXT("[TerrainGen] RidgeMax is near zero despite MountainRanges=%d. RidgeMax=%.2f Threshold=%.2f"),
+                TerrainSnapshot.PipelineMountainRanges.Num(),
+                RidgeMax,
+                RidgeNearZeroThreshold);
+        }
     }
 }
 
@@ -297,21 +557,45 @@ FVector FWorldForgeTerrainGeneratorInstance::GetUpVector(v_flt X, v_flt Y, v_flt
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// SURFACE HEIGHT (unchanged — 2D macro shape)
+// SURFACE HEIGHT (macro height + coast + lake shaping)
 // ═══════════════════════════════════════════════════════════════════
 
 float FWorldForgeTerrainGeneratorInstance::ComputeSurfaceHeight(float VoxelX, float VoxelY) const
 {
-    // Step 1: Get bilinearly interpolated macro height from tile elevation
+    // Step 1: Get bilinearly interpolated macro height from tile elevation.
     const float MacroHeight = FWorldForgeTerrainMath::ComputeSurfaceHeight(
         VoxelX, VoxelY, TerrainSnapshot);
 
-    // Step 2: Add mountain ridge displacement + volcano height from Step03.
-    // Only on land — skip if macro height is at or below sea level.
+    // Step 2: Feather ordinary coast and inlet land down toward sea level.
+    const float CoastalHeight = FWorldForgeTerrainMath::ApplyCoastalShorelineShaping(
+        VoxelX, VoxelY, MacroHeight, TerrainSnapshot);
+
+    // Step 3: Shape accepted lake basins with a shallow elliptical profile.
+    float BasinHeight = CoastalHeight;
+    const bool bHasLakes = TerrainSnapshot.PipelineLakeTileCount > 0;
+    if (bHasLakes)
+    {
+        BasinHeight = FWorldForgeTerrainMath::ApplyLakeBasinShaping(
+            VoxelX, VoxelY, CoastalHeight, TerrainSnapshot);
+    }
+
+    // Step 4: Apply shallow river channel shaping from lightweight descriptors.
+    float RiverHeight = BasinHeight;
+    const bool bHasRivers = TerrainSnapshot.RiverSurfaceDescCount > 0;
+    if (bHasRivers)
+    {
+        RiverHeight = FWorldForgeTerrainMath::ApplyRiverChannelShaping(
+            VoxelX, VoxelY, BasinHeight, TerrainSnapshot);
+    }
+
+    // Step 5: Add mountain ridge displacement + volcano height from Step03.
+    // Suppress these layers anywhere the lake or river shaping path changed the column.
     float RidgeHeight = 0.0f;
     float VolcanoHeight = 0.0f;
     const float SeaLevel = static_cast<float>(TerrainSnapshot.SeaLevelVoxels);
-    if (MacroHeight > SeaLevel)
+    const bool bInsideLakeBasin = bHasLakes && !FMath::IsNearlyEqual(BasinHeight, CoastalHeight, 0.01f);
+    const bool bInsideRiverChannel = bHasRivers && !FMath::IsNearlyEqual(RiverHeight, BasinHeight, 0.01f);
+    if (!bInsideLakeBasin && !bInsideRiverChannel && RiverHeight > SeaLevel)
     {
         RidgeHeight = FWorldForgeTerrainMath::SampleMountainRidgeHeight(
             VoxelX, VoxelY, TerrainSnapshot);
@@ -320,7 +604,7 @@ float FWorldForgeTerrainGeneratorInstance::ComputeSurfaceHeight(float VoxelX, fl
             VoxelX, VoxelY, TerrainSnapshot);
     }
 
-    // Step 3: Add small biome-dependent detail noise
+    // Step 6: Add small biome-dependent detail noise.
     float DetailHeight = 0.0f;
     if (const FVoxelBiomeProfile* Profile = SamplePrimaryBiomeProfile(VoxelX, VoxelY))
     {
@@ -328,7 +612,7 @@ float FWorldForgeTerrainGeneratorInstance::ComputeSurfaceHeight(float VoxelX, fl
     }
     DetailHeight = FMath::Clamp(DetailHeight, -24.0f, 24.0f);
 
-    return MacroHeight + RidgeHeight + VolcanoHeight + DetailHeight;
+    return RiverHeight + RidgeHeight + VolcanoHeight + DetailHeight;
 }
 
 // ─── Tile elevation sampler (delegates to TerrainMath) ──────────
@@ -581,7 +865,8 @@ float FWorldForgeTerrainGeneratorInstance::ComputeCaveDensity(float X, float Y, 
 
 float FWorldForgeTerrainGeneratorInstance::ComputeApproximateSlopeDegrees(float VoxelX, float VoxelY) const
 {
-    const float SampleOffset = static_cast<float>(FMath::Max(1, TerrainSnapshot.ChunkSizeVoxels));
+    // Local 4-voxel sampling for material slope classification; avoids tile-wide slope quantization that causes blocky material plates.
+    const float SampleOffset = 4.0f;
 
     const float Hx0 = ComputeSurfaceHeight(VoxelX - SampleOffset, VoxelY);
     const float Hx1 = ComputeSurfaceHeight(VoxelX + SampleOffset, VoxelY);
@@ -600,7 +885,7 @@ float FWorldForgeTerrainGeneratorInstance::ComputeNormalizedSurfaceElevation(flo
     return FWorldForgeTerrainMath::ComputeNormalizedLandElevation(SurfaceHeight, TerrainSnapshot);
 }
 
-// ─── Surface material classification (unchanged) ────────────────
+// ─── Surface material classification (coast-aware) ──────────────
 
 int32 FWorldForgeTerrainGeneratorInstance::ClassifyTerrainMaterialLayer(float VoxelX, float VoxelY, float SurfaceHeight) const
 {
@@ -639,10 +924,27 @@ int32 FWorldForgeTerrainGeneratorInstance::ClassifyTerrainMaterialLayer(float Vo
     }
 
     const float CoastBand = FMath::Max(0.0f, TerrainSnapshot.CoastBandVoxels);
-    if (SurfaceHeight <= (SeaLevel + CoastBand) ||
-        NormElev <= FMath::Clamp(TerrainSnapshot.SandMaxElevationNormalized, 0.0f, 1.0f))
+    const float SandMaxElevation = FMath::Clamp(TerrainSnapshot.SandMaxElevationNormalized, 0.0f, 1.0f);
+    if (SurfaceHeight <= (SeaLevel + CoastBand) || NormElev <= SandMaxElevation)
     {
-        return TerrainLayer_Sand;
+        const float CoastDistanceTiles = FWorldForgeTerrainMath::SampleCoastalWaterDistanceTiles(
+            VoxelX, VoxelY, TerrainSnapshot);
+        const bool bNearCoastalWater = CoastDistanceTiles >= 0.0f &&
+            CoastDistanceTiles <= WF_CoastMaterialReachTiles;
+        const float SandSlopeLimit = FMath::Min(
+            WF_CoastSandSlopeMaxDegrees,
+            FMath::Max(0.0f, TerrainSnapshot.DirtSlopeThresholdDegrees));
+        const bool bImmediateShore = bNearCoastalWater &&
+            SurfaceHeight <= (SeaLevel + CoastBand) &&
+            SlopeDeg <= SandSlopeLimit;
+        const bool bLowGentleCoastShelf = bNearCoastalWater &&
+            NormElev <= SandMaxElevation &&
+            SlopeDeg <= SandSlopeLimit;
+
+        if (bImmediateShore || bLowGentleCoastShelf)
+        {
+            return TerrainLayer_Sand;
+        }
     }
 
     if (NormElev >= FMath::Clamp(TerrainSnapshot.SnowMinElevationNormalized, 0.0f, 1.0f))

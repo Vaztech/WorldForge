@@ -50,6 +50,54 @@ namespace
         const uint8 B = static_cast<uint8>((CivID * 197 + 140) % 255);
         return FColor(R, G, B, 255);
     }
+
+    static const FColor GFullMapRiverOverlayColor(25, 145, 255, 255);
+    static constexpr float GFullMapRiverMinDepth = 0.04f;
+    static constexpr float GFullMapRiverMaxDepth = 0.15f;
+    static constexpr int32 GFullMapRiverOverlayRadius = 1;
+
+    static bool IsLargeWaterBodyTile(const FWorldTileData& Tile)
+    {
+        static const FGameplayTag DeepOceanTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.DeepOcean")), false);
+        static const FGameplayTag OceanTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Ocean")), false);
+        static const FGameplayTag SeaTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Sea")), false);
+        static const FGameplayTag LakeTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.Lake")), false);
+
+        return Tile.BiomeType.MatchesTag(DeepOceanTag)
+            || Tile.BiomeType.MatchesTag(OceanTag)
+            || Tile.BiomeType.MatchesTag(SeaTag)
+            || Tile.BiomeType.MatchesTag(LakeTag);
+    }
+
+    static bool IsRiverLikeTile(const FWorldTileData& Tile)
+    {
+        static const FGameplayTag RiverTag = FGameplayTag::RequestGameplayTag(FName(TEXT("WorldForge.Biome.River")), false);
+
+        if (IsLargeWaterBodyTile(Tile))
+        {
+            return false;
+        }
+
+        return Tile.BiomeType.MatchesTag(RiverTag)
+            || (Tile.WaterDepth >= GFullMapRiverMinDepth && Tile.WaterDepth < GFullMapRiverMaxDepth);
+    }
+
+    static int32 BuildRiverLikeTileFlags(const TArray<FWorldTileData>& Tiles, TArray<uint8>& OutFlags)
+    {
+        OutFlags.Init(0, Tiles.Num());
+
+        int32 RiverTileCount = 0;
+        for (int32 TileIndex = 0; TileIndex < Tiles.Num(); ++TileIndex)
+        {
+            if (IsRiverLikeTile(Tiles[TileIndex]))
+            {
+                OutFlags[TileIndex] = 1;
+                ++RiverTileCount;
+            }
+        }
+
+        return RiverTileCount;
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -417,8 +465,27 @@ void UWorldMapSubsystem::RebuildMapTexture()
         return;
     }
 
+    const int32 PixelCount = GridWidth * GridHeight;
+
     TArray<FColor> PixelData;
-    PixelData.SetNumZeroed(GridWidth * GridHeight);
+    PixelData.SetNumZeroed(PixelCount);
+
+    TArray<uint8> RiverLikeTileFlags;
+    const int32 RiverOverlayTiles = BuildRiverLikeTileFlags(WorldTiles, RiverLikeTileFlags);
+
+    auto BuildRiverOverlayColor = [&](const FWorldTileData& OverlayTile) -> FColor
+        {
+            FColor OverlayColor = GFullMapRiverOverlayColor;
+
+            if (IsOverlayLayerActive(WorldForgeOverlay::Fog)
+                && (OverlayTile.KnowledgeState.KnowledgeLevel == EKnowledgeLevel::Unexplored
+                    || OverlayTile.KnowledgeState.KnowledgeLevel == EKnowledgeLevel::Rumored))
+            {
+                OverlayColor = BlendLayer(OverlayColor, MakeFogLayerColor(OverlayTile), FogAlpha);
+            }
+
+            return OverlayColor;
+        };
 
     for (int32 Y = 0; Y < GridHeight; ++Y)
     {
@@ -429,6 +496,67 @@ void UWorldMapSubsystem::RebuildMapTexture()
             PixelData[Index] = ComputeBlendedTileColorAtCell(X, Y, Tile);
         }
     }
+
+    int32 PaintedPixels = 0;
+    TArray<uint8> PaintedPixelFlags;
+    PaintedPixelFlags.Init(0, PixelCount);
+
+    for (int32 TileY = 0; TileY < GridHeight; ++TileY)
+    {
+        for (int32 TileX = 0; TileX < GridWidth; ++TileX)
+        {
+            const int32 SourceIndex = TileY * GridWidth + TileX;
+            if (RiverLikeTileFlags[SourceIndex] == 0)
+            {
+                continue;
+            }
+
+            for (int32 OffsetY = -GFullMapRiverOverlayRadius; OffsetY <= GFullMapRiverOverlayRadius; ++OffsetY)
+            {
+                const int32 TargetY = TileY + OffsetY;
+                if (TargetY < 0 || TargetY >= GridHeight)
+                {
+                    continue;
+                }
+
+                for (int32 OffsetX = -GFullMapRiverOverlayRadius; OffsetX <= GFullMapRiverOverlayRadius; ++OffsetX)
+                {
+                    const int32 TargetX = TileX + OffsetX;
+                    if (TargetX < 0 || TargetX >= GridWidth)
+                    {
+                        continue;
+                    }
+
+                    const int32 TargetIndex = TargetY * GridWidth + TargetX;
+                    if (!WorldTiles.IsValidIndex(TargetIndex))
+                    {
+                        continue;
+                    }
+
+                    const FWorldTileData& TargetTile = WorldTiles[TargetIndex];
+                    if (IsLargeWaterBodyTile(TargetTile))
+                    {
+                        continue;
+                    }
+
+                    PixelData[TargetIndex] = BuildRiverOverlayColor(TargetTile);
+                    if (PaintedPixelFlags[TargetIndex] == 0)
+                    {
+                        PaintedPixelFlags[TargetIndex] = 1;
+                        ++PaintedPixels;
+                    }
+                }
+            }
+        }
+    }
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[FullMapRiverOverlay] RiverOverlayTiles=%d PaintedPixels=%d Color=(%d,%d,%d)"),
+        RiverOverlayTiles,
+        PaintedPixels,
+        GFullMapRiverOverlayColor.R,
+        GFullMapRiverOverlayColor.G,
+        GFullMapRiverOverlayColor.B);
 
     UploadMapPixels(PixelData);
 
@@ -499,8 +627,30 @@ void UWorldMapSubsystem::RebuildDetailedMapTexture()
         return;
     }
 
+    const int32 PixelCount = Res * Res;
+
     TArray<FColor> Pixels;
-    Pixels.SetNumUninitialized(Res * Res);
+    Pixels.SetNumUninitialized(PixelCount);
+
+    TArray<int32> PixelToTileIndex;
+    PixelToTileIndex.Init(INDEX_NONE, PixelCount);
+
+    TArray<uint8> RiverLikeTileFlags;
+    const int32 RiverOverlayTiles = BuildRiverLikeTileFlags(WorldTiles, RiverLikeTileFlags);
+
+    auto BuildRiverOverlayColor = [&](const FWorldTileData& OverlayTile) -> FColor
+        {
+            FColor OverlayColor = GFullMapRiverOverlayColor;
+
+            if (IsOverlayLayerActive(WorldForgeOverlay::Fog)
+                && (OverlayTile.KnowledgeState.KnowledgeLevel == EKnowledgeLevel::Unexplored
+                    || OverlayTile.KnowledgeState.KnowledgeLevel == EKnowledgeLevel::Rumored))
+            {
+                OverlayColor = BlendLayer(OverlayColor, MakeFogLayerColor(OverlayTile), FogAlpha);
+            }
+
+            return OverlayColor;
+        };
 
     const UWorld* World = GetWorld();
     const UVoxelWorldManager* VoxelMgr = World ? World->GetSubsystem<UVoxelWorldManager>() : nullptr;
@@ -532,6 +682,7 @@ void UWorldMapSubsystem::RebuildDetailedMapTexture()
     {
         for (int32 PX = 0; PX < Res; ++PX)
         {
+            const int32 PixelIndex = PY * Res + PX;
             const float U = (static_cast<float>(PX) + 0.5f) * InvRes;
             const float V = (static_cast<float>(PY) + 0.5f) * InvRes;
 
@@ -613,6 +764,8 @@ void UWorldMapSubsystem::RebuildDetailedMapTexture()
                     GridHeight - 1);
 
                 const int32 CivTileIdx = CivTileY * GridWidth + CivTileX;
+                PixelToTileIndex[PixelIndex] = CivTileIdx;
+
                 if (WorldTiles.IsValidIndex(CivTileIdx))
                 {
                     const FWorldTileData& OverlayTile = WorldTiles[CivTileIdx];
@@ -658,9 +811,73 @@ void UWorldMapSubsystem::RebuildDetailedMapTexture()
                 }
             }
 
-            Pixels[PY * Res + PX] = PixelColor;
+            Pixels[PixelIndex] = PixelColor;
         }
     }
+
+    int32 PaintedPixels = 0;
+    TArray<uint8> PaintedPixelFlags;
+    PaintedPixelFlags.Init(0, PixelCount);
+
+    for (int32 PY = 0; PY < Res; ++PY)
+    {
+        for (int32 PX = 0; PX < Res; ++PX)
+        {
+            const int32 SourcePixelIndex = PY * Res + PX;
+            const int32 SourceTileIndex = PixelToTileIndex[SourcePixelIndex];
+
+            if (!RiverLikeTileFlags.IsValidIndex(SourceTileIndex) || RiverLikeTileFlags[SourceTileIndex] == 0)
+            {
+                continue;
+            }
+
+            for (int32 OffsetY = -GFullMapRiverOverlayRadius; OffsetY <= GFullMapRiverOverlayRadius; ++OffsetY)
+            {
+                const int32 TargetY = PY + OffsetY;
+                if (TargetY < 0 || TargetY >= Res)
+                {
+                    continue;
+                }
+
+                for (int32 OffsetX = -GFullMapRiverOverlayRadius; OffsetX <= GFullMapRiverOverlayRadius; ++OffsetX)
+                {
+                    const int32 TargetX = PX + OffsetX;
+                    if (TargetX < 0 || TargetX >= Res)
+                    {
+                        continue;
+                    }
+
+                    const int32 TargetPixelIndex = TargetY * Res + TargetX;
+                    const int32 TargetTileIndex = PixelToTileIndex[TargetPixelIndex];
+                    if (!WorldTiles.IsValidIndex(TargetTileIndex))
+                    {
+                        continue;
+                    }
+
+                    const FWorldTileData& TargetTile = WorldTiles[TargetTileIndex];
+                    if (IsLargeWaterBodyTile(TargetTile))
+                    {
+                        continue;
+                    }
+
+                    Pixels[TargetPixelIndex] = BuildRiverOverlayColor(TargetTile);
+                    if (PaintedPixelFlags[TargetPixelIndex] == 0)
+                    {
+                        PaintedPixelFlags[TargetPixelIndex] = 1;
+                        ++PaintedPixels;
+                    }
+                }
+            }
+        }
+    }
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[FullMapRiverOverlay] RiverOverlayTiles=%d PaintedPixels=%d Color=(%d,%d,%d)"),
+        RiverOverlayTiles,
+        PaintedPixels,
+        GFullMapRiverOverlayColor.R,
+        GFullMapRiverOverlayColor.G,
+        GFullMapRiverOverlayColor.B);
 
     FTexture2DMipMap& Mip = DetailedMapTexture->GetPlatformData()->Mips[0];
     void* Data = Mip.BulkData.Lock(LOCK_READ_WRITE);
@@ -836,9 +1053,15 @@ bool UWorldMapSubsystem::TileIndexToXY(int32 TileIndex, int32& OutTileX, int32& 
     return true;
 }
 
-bool UWorldMapSubsystem::WorldPositionToWorldTileIndex(const FVector& WorldPosition, int32& OutWorldTileIndex) const
+bool UWorldMapSubsystem::WorldPositionToTileXY(const FVector& WorldPosition, int32& OutTileX, int32& OutTileY) const
 {
-    OutWorldTileIndex = INDEX_NONE;
+    OutTileX = INDEX_NONE;
+    OutTileY = INDEX_NONE;
+
+    if (!bInitialized || GridWidth <= 0 || GridHeight <= 0)
+    {
+        return false;
+    }
 
     const UWorld* World = GetWorld();
     const UVoxelWorldManager* VoxelMgr = World ? World->GetSubsystem<UVoxelWorldManager>() : nullptr;
@@ -847,8 +1070,51 @@ bool UWorldMapSubsystem::WorldPositionToWorldTileIndex(const FVector& WorldPosit
         return false;
     }
 
-    const FIntPoint WorldCell = VoxelMgr->WorldToTerrainCell(WorldPosition);
-    return WorldCellToWorldTileIndex(WorldCell, OutWorldTileIndex);
+    // MiniMapFix: Use GridWidth/GridHeight from this subsystem (authoritative).
+    // VoxelWorldManager::CachedTerrainGridWidth/Height are transient and only set when
+    // CacheTerrainMetadata() runs, so they may be 0 or stale on large worlds.
+    const FVector  Origin   = VoxelMgr->GetTerrainWorldOrigin();
+    const float    CellSize = VoxelMgr->GetTerrainCellSize();
+
+    if (CellSize <= 0.0f)
+    {
+        return false;
+    }
+
+    const FVector LocalPos = WorldPosition - Origin;
+    OutTileX = FMath::FloorToInt(LocalPos.X / CellSize + static_cast<float>(GridWidth)  * 0.5f);
+    OutTileY = FMath::FloorToInt(LocalPos.Y / CellSize + static_cast<float>(GridHeight) * 0.5f);
+
+    // Throttled diagnostic log — fires at most once every 2 seconds.
+    static float LastLogTime_WorldPositionToTileXY = -1.0f;
+    const float  NowTime = World ? World->GetRealTimeSeconds() : -1.0f;
+    if (NowTime >= 0.0f && NowTime - LastLogTime_WorldPositionToTileXY > 2.0f)
+    {
+        LastLogTime_WorldPositionToTileXY = NowTime;
+        UE_LOG(LogTemp, Log,
+            TEXT("[MiniMapFix] WorldPositionToTileXY: Pos=(%.1f,%.1f) Origin=(%.1f,%.1f) CellSize=%.1f Grid=%dx%d => Tile=(%d,%d)"),
+            WorldPosition.X, WorldPosition.Y,
+            Origin.X, Origin.Y,
+            CellSize, GridWidth, GridHeight,
+            OutTileX, OutTileY);
+    }
+
+    return true;
+}
+
+bool UWorldMapSubsystem::WorldPositionToWorldTileIndex(const FVector& WorldPosition, int32& OutWorldTileIndex) const
+{
+    OutWorldTileIndex = INDEX_NONE;
+
+    // MiniMapFix: delegate to the authoritative helper instead of the stale-cache path.
+    int32 TileX = INDEX_NONE;
+    int32 TileY = INDEX_NONE;
+    if (!WorldPositionToTileXY(WorldPosition, TileX, TileY))
+    {
+        return false;
+    }
+
+    return TileXYToIndex(TileX, TileY, OutWorldTileIndex);
 }
 
 bool UWorldMapSubsystem::WorldCellToWorldTileIndex(const FIntPoint& WorldCell, int32& OutWorldTileIndex) const
@@ -1171,7 +1437,7 @@ FColor UWorldMapSubsystem::MakeTileMapColor(const FWorldTileData& Tile) const
     }
     else if (Tile.BiomeType.MatchesTag(RiverTag))
     {
-        BaseColor = FColor(45, 130, 200);
+        BaseColor = GFullMapRiverOverlayColor;
     }
     else if (Tile.BiomeType.MatchesTag(LakeTag) || Tile.BiomeType.MatchesTag(WaterTag))
     {
@@ -1270,6 +1536,12 @@ FColor UWorldMapSubsystem::MakeTileMapColor(const FWorldTileData& Tile) const
         {
             BaseColor = FColor(180, 180, 180);
         }
+    }
+
+    // Visual-only: keep shallow river traces readable even when Step04 biome classification does not leave a River biome tag behind.
+    if (IsRiverLikeTile(Tile))
+    {
+        BaseColor = GFullMapRiverOverlayColor;
     }
 
     const float Brightness = FMath::Lerp(0.75f, 1.15f, Elevation);
@@ -1516,6 +1788,8 @@ bool UWorldMapSubsystem::IsTileWaterLike(int32 TileX, int32 TileY) const
         Biome.Contains(TEXT("Sea")) ||
         Biome.Contains(TEXT("Lake")) ||
         Biome.Contains(TEXT("River")) ||
+        Biome.Contains(TEXT("Coastal")) ||
+        Biome.Contains(TEXT("Beach")) ||
         Biome.Contains(TEXT("Underwater")))
     {
         return true;

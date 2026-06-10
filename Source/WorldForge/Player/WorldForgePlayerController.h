@@ -52,6 +52,7 @@ class USimulationTimeManager;
 class AWorldForgeMiniMapHUD;
 class AWorldForgeColonist;
 class UProcessorManager;
+class AWorldGenBootstrapActor;
 
 UCLASS()
 class WORLDFORGE_API AWorldForgePlayerController : public APlayerController
@@ -183,6 +184,9 @@ public:
     /** Returns the current speed level index (0=1x, 1=2x, 2=3x, 3=4x). */
     UFUNCTION(BlueprintPure, Category = "WorldForge|SimSpeed")
     int32 GetCurrentSimSpeedIndex() const { return CurrentSimSpeedIndex; }
+
+    UFUNCTION(BlueprintCallable, Category = "WorldForge|Camera")
+    void NotifyCameraHandoffComplete();
 
 protected:
     virtual void BeginPlay() override;
@@ -393,9 +397,14 @@ private:
     UPROPERTY(Transient)
     TObjectPtr<AWorldForgeCamera> WorldForgeCamera = nullptr;
 
-    bool   bBuildWidgetVisible      = false;
-    bool   bBuildInputSuppressed    = false;
-    bool   bCameraViewTargetApplied = false;
+    UPROPERTY(Transient)
+    TObjectPtr<AWorldGenBootstrapActor> CachedBootstrapActor = nullptr;
+
+    bool   bBuildWidgetVisible           = false;
+    bool   bBuildInputSuppressed         = false;
+    bool   bCameraViewTargetApplied      = false;
+    bool   bPrePlayBlockedByBootstrap    = false;
+    bool   bHasCheckedPrePlayBlocking    = false;
 
     double LastBuildClickTime       = 0.0;
     double LastPauseToggleTime      = -1000.0;

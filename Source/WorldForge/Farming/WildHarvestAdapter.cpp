@@ -569,8 +569,11 @@ AActor* UWildHarvestAdapter::SpawnCropPatch(FName CropRow, FVector WorldPos)
         const FBoxSphereBounds Bounds = BestBaseComponent->Bounds;
         const float ComponentTopZ = Bounds.Origin.Z + Bounds.BoxExtent.Z;
 
-        // Raise this if the soil is buried. Lower it if the soil floats.
-        const float DesiredTopZ = WorldPos.Z + 11.0f;
+        // Align soil component BOTTOM flush with the terrain surface.
+        // DesiredTopZ = TerrainZ + full component height → DeltaZ = TerrainZ - ComponentBottomZ.
+        // This is correct regardless of where the actor pivot sits (bottom, center, or top).
+        const float SoilHeight = Bounds.BoxExtent.Z * 2.0f;
+        const float DesiredTopZ = WorldPos.Z + SoilHeight;
         const float DeltaZ = DesiredTopZ - ComponentTopZ;
 
         FVector AdjustedLocation = Actor->GetActorLocation();
@@ -579,10 +582,11 @@ AActor* UWildHarvestAdapter::SpawnCropPatch(FName CropRow, FVector WorldPos)
         Actor->SetActorLocation(AdjustedLocation, false, nullptr, ETeleportType::TeleportPhysics);
 
         UE_LOG(LogTemp, Log,
-            TEXT("[WildHarvestAdapter] Aligned crop patch TOP to terrain. Actor=%s BaseComponent=%s TerrainZ=%.2f TopZ=%.2f DeltaZ=%.2f FinalLocation=%s"),
+            TEXT("[WildHarvestAdapter] Aligned crop patch BOTTOM to terrain. Actor=%s BaseComponent=%s TerrainZ=%.2f SoilHeight=%.2f ComponentTopZ=%.2f DeltaZ=%.2f FinalLocation=%s"),
             *Actor->GetName(),
             *BestBaseComponent->GetName(),
             WorldPos.Z,
+            SoilHeight,
             ComponentTopZ,
             DeltaZ,
             *Actor->GetActorLocation().ToString());

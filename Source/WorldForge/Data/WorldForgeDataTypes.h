@@ -129,8 +129,9 @@ enum class EBuildingPurpose : uint8
 UENUM(BlueprintType)
 enum class ETerrainMode : uint8
 {
-    Smooth UMETA(DisplayName = "Smooth"),
-    Blocky UMETA(DisplayName = "Blocky")
+    Smooth         UMETA(DisplayName = "Smooth"),
+    Blocky         UMETA(DisplayName = "Blocky"),
+    CubePrototype  UMETA(DisplayName = "Cube Prototype (Disabled)")
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1492,6 +1493,112 @@ struct FWindConfig
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, SaveGame)
     float LapseRate = 0.30f;
+};
+
+// ── LAKE-FIX-01A: Per-basin descriptor built by BuildLakeBasins() after Step04. ──
+// Stores geometry metadata for each flood-filled lake group.
+// TileIndices are intentionally omitted — terrain shaping uses bilinear
+// WaterDepth sampling instead, keeping this struct lightweight.
+USTRUCT(BlueprintType)
+struct FLakeBasinData
+{
+    GENERATED_BODY()
+
+    UPROPERTY() int32 BasinID = -1;
+    UPROPERTY() int32 CenterTileX = 0;
+    UPROPERTY() int32 CenterTileY = 0;
+    UPROPERTY() int32 TileCount = 0;
+    UPROPERTY() int32 MinTileX = 0;
+    UPROPERTY() int32 MaxTileX = 0;
+    UPROPERTY() int32 MinTileY = 0;
+    UPROPERTY() int32 MaxTileY = 0;
+    UPROPERTY() float WaterSurfaceElevation01 = 0.48f;
+    UPROPERTY() float FloorElevation01 = 0.46f;
+    UPROPERTY() float ShoreFalloffTiles = 2.0f;
+    UPROPERTY() int32 SourceType = 0; // 0=RiverEndpoint, 1=BasinNoise
+};
+
+// ── WATERLINE-LAKE-01B: World-space lake surface descriptor for Waterline Pro 6 integration. ──
+// Derived from FLakeBasinData after terrain generation. Used by WorldGenBootstrapActor to
+// spawn/reposition BP_WaterSim_V2_Local actors over each generated lake basin.
+USTRUCT(BlueprintType)
+struct FWaterlineLakeSurfaceDesc
+{
+    GENERATED_BODY()
+
+    // Basin ID matching FLakeBasinData.BasinID
+    UPROPERTY(BlueprintReadOnly) int32 BasinID = -1;
+
+    // World-space center of the lake (X, Y = tile center, Z = water surface elevation in UU)
+    UPROPERTY(BlueprintReadOnly) FVector WorldCenter = FVector::ZeroVector;
+
+    // Water surface world Z (same as WorldCenter.Z, provided separately for actor placement)
+    UPROPERTY(BlueprintReadOnly) float WaterSurfaceZ = 0.0f;
+
+    // Half-extent of the lake bounding box in world units (X and Y axes)
+    UPROPERTY(BlueprintReadOnly) float HalfExtentX = 0.0f;
+    UPROPERTY(BlueprintReadOnly) float HalfExtentY = 0.0f;
+
+    // Number of lake tiles in this basin
+    UPROPERTY(BlueprintReadOnly) int32 TileCount = 0;
+
+    // Biome tag at the basin center tile (may be invalid if no biome data)
+    UPROPERTY(BlueprintReadOnly) FGameplayTag BiomeTag;
+};
+
+// ── RIVER-SYSTEM-01: Lightweight river surface descriptor. ──
+// Built from existing river biome / WaterDepth tiles after terrain generation.
+// Descriptors are intentionally segmented so the existing WorldForgeRiverSurfaceActor
+// can render short local stretches without a heavy water simulation stack.
+USTRUCT(BlueprintType)
+struct FWorldForgeRiverSurfaceDesc
+{
+    GENERATED_BODY()
+
+    UPROPERTY(BlueprintReadOnly) int32 RiverID = -1;
+    UPROPERTY(BlueprintReadOnly) FIntPoint StartTile = FIntPoint::ZeroValue;
+    UPROPERTY(BlueprintReadOnly) FIntPoint EndTile = FIntPoint::ZeroValue;
+    UPROPERTY(BlueprintReadOnly) FIntPoint MinTile = FIntPoint::ZeroValue;
+    UPROPERTY(BlueprintReadOnly) FIntPoint MaxTile = FIntPoint::ZeroValue;
+    UPROPERTY(BlueprintReadOnly) int32 TileCount = 0;
+    UPROPERTY(BlueprintReadOnly) TArray<FIntPoint> TilePath;
+    UPROPERTY(BlueprintReadOnly) FVector WorldStart = FVector::ZeroVector;
+    UPROPERTY(BlueprintReadOnly) float AverageWaterZ = 0.0f;
+    UPROPERTY(BlueprintReadOnly) float AverageWidth = 1.0f;
+    UPROPERTY(BlueprintReadOnly) float AverageWaterDepth = 0.0f;
+    UPROPERTY(BlueprintReadOnly) float AverageSurfaceElevation01 = 0.48f;
+    UPROPERTY(BlueprintReadOnly) float FlowSpeed = 0.25f;
+    UPROPERTY(BlueprintReadOnly) float ChannelDepthVoxels = 1.0f;
+    UPROPERTY(BlueprintReadOnly) float BankFalloffTiles = 1.25f;
+};
+
+// ── RIVER-WATER-02B: Full river network descriptor. ──
+// One descriptor per connected river component. Persisted in the terrain
+// snapshot so future patches can carve and render 3D rivers from full ordered
+// paths instead of short reconstructed 8-tile chunks.
+// Does not replace FWorldForgeRiverSurfaceDesc — the legacy short-segment
+// path remains intact for the current river actor spawning system.
+USTRUCT(BlueprintType)
+struct FWorldForgeRiverNetworkDesc
+{
+    GENERATED_BODY()
+
+    UPROPERTY(BlueprintReadOnly) int32 NetworkID = -1;
+    // Ordered tile indices (Y*GridWidth+X) from source to outlet.
+    UPROPERTY(BlueprintReadOnly) TArray<int32> TilePath;
+    UPROPERTY(BlueprintReadOnly) int32 SourceTileIndex = -1;
+    UPROPERTY(BlueprintReadOnly) int32 OutletTileIndex = -1;
+    UPROPERTY(BlueprintReadOnly) int32 TileCount = 0;
+    UPROPERTY(BlueprintReadOnly) float AverageWaterZ = 0.0f;
+    UPROPERTY(BlueprintReadOnly) float AverageWidth = 1.0f;
+    UPROPERTY(BlueprintReadOnly) float AverageWaterDepth = 0.0f;
+    UPROPERTY(BlueprintReadOnly) float MaxWaterDepth = 0.0f;
+    UPROPERTY(BlueprintReadOnly) float FlowStrength = 0.0f;
+    UPROPERTY(BlueprintReadOnly) bool bHasOutlet = false;
+    UPROPERTY(BlueprintReadOnly) bool bTouchesLake = false;
+    UPROPERTY(BlueprintReadOnly) bool bTouchesSeaOrOcean = false;
+    UPROPERTY(BlueprintReadOnly) FIntPoint BoundsMin = FIntPoint::ZeroValue;
+    UPROPERTY(BlueprintReadOnly) FIntPoint BoundsMax = FIntPoint::ZeroValue;
 };
 
 USTRUCT(BlueprintType)

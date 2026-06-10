@@ -128,7 +128,7 @@ void UBuildModeManager::Deinitialize()
     }
 
     DestroyGridOverlay();
-    DestroyMiningLayerRenderer();
+    DestroyMiningLayerRenderer(TEXT("Deinitialize"));
     DestroyGhost();
     Super::Deinitialize();
 }
@@ -192,6 +192,18 @@ ULayerViewSubsystem* UBuildModeManager::GetLayerViewSubsystem() const
 {
     UWorld* W = GetWorld();
     return W ? W->GetSubsystem<ULayerViewSubsystem>() : nullptr;
+}
+
+int32 UBuildModeManager::GetTotalMinePlanCount() const
+{
+    const UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem();
+    return GridSelection ? GridSelection->GetTotalMinePlanCount() : 0;
+}
+
+int32 UBuildModeManager::GetMinePlanLayerCount() const
+{
+    const UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem();
+    return GridSelection ? GridSelection->GetMinePlanLayerCount() : 0;
 }
 
 int32 UBuildModeManager::GetEffectiveSettlementID() const
@@ -756,6 +768,12 @@ void UBuildModeManager::AdjustActiveToolLayer(int32 Delta)
             GridSelection->TickSelectionFromMouse(PC);
         }
 
+        if (CurrentToolMode == EBuildToolMode::Mine)
+        {
+            SyncSelectionFromGridSelection();
+            UpdateMiningLayerRenderer();
+        }
+
         BroadcastFeedback(FString::Printf(TEXT("Tool layer: %+d"), GridSelection->GetActiveToolLayerOffset()));
     }
 }
@@ -769,6 +787,12 @@ void UBuildModeManager::ResetActiveToolLayer()
         if (APlayerController* PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr)
         {
             GridSelection->TickSelectionFromMouse(PC);
+        }
+
+        if (CurrentToolMode == EBuildToolMode::Mine)
+        {
+            SyncSelectionFromGridSelection();
+            UpdateMiningLayerRenderer();
         }
 
         BroadcastFeedback(TEXT("Tool layer reset to surface."));
@@ -790,6 +814,17 @@ void UBuildModeManager::AdjustActiveViewLayer(int32 Delta)
     if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
     {
         GridSelection->AdjustActiveViewLayer(Delta);
+
+        if (CurrentToolMode == EBuildToolMode::Mine)
+        {
+            if (APlayerController* PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr)
+            {
+                GridSelection->TickSelectionFromMouse(PC);
+            }
+            SyncSelectionFromGridSelection();
+            UpdateMiningLayerRenderer();
+        }
+
         BroadcastFeedback(FString::Printf(TEXT("View layer: %+d"), GridSelection->GetActiveViewLayerOffset()));
     }
 }
@@ -799,6 +834,17 @@ void UBuildModeManager::ResetActiveViewLayer()
     if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
     {
         GridSelection->ResetActiveViewLayer();
+
+        if (CurrentToolMode == EBuildToolMode::Mine)
+        {
+            if (APlayerController* PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr)
+            {
+                GridSelection->TickSelectionFromMouse(PC);
+            }
+            SyncSelectionFromGridSelection();
+            UpdateMiningLayerRenderer();
+        }
+
         BroadcastFeedback(TEXT("View layer reset to surface."));
     }
 }
@@ -820,14 +866,22 @@ void UBuildModeManager::SetDragBuildActive(bool bActive)
 
     if (!bActive)
     {
-        if (bWasDragging)
+        if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
         {
-            if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
+            if (CurrentToolMode == EBuildToolMode::Mine)
             {
-                if (GridSelection->EndDragSelection(true))
+                if (GridSelection->IsDraggingSelection() && GridSelection->EndDragSelection(true))
                 {
                     SyncSelectionFromGridSelection();
+
+                    UE_LOG(LogTemp, Log,
+                        TEXT("[CUBE-MINING-V2] Mine drag end SelectedCells=%d"),
+                        GridSelection->GetSelectedCount());
                 }
+            }
+            else if (bWasDragging && GridSelection->EndDragSelection(true))
+            {
+                SyncSelectionFromGridSelection();
             }
         }
 
@@ -850,22 +904,51 @@ void UBuildModeManager::HandlePrimaryClick()
     if (CurrentToolMode == EBuildToolMode::Mine)
     {
         bJustCommitted = false;
-        bIsDraggingBuild = true;
-        bHasDragStart = true;
-        DragStartVoxel = CurrentHoveredVoxel;
+        bIsDraggingBuild = false;
+        bHasDragStart = false;
+        DragStartVoxel = FIntVector::ZeroValue;
         LastPlacedDragVoxel = FIntVector(INT32_MIN);
 
         if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
         {
-            if (!GridSelection->HasValidHover())
+            if (APlayerController* PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr)
             {
-                if (APlayerController* PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr)
+                GridSelection->TickSelectionFromMouse(PC);
+
+                const FIntVector RefreshedHover = GridSelection->GetHoveredVoxel();
+                UE_LOG(LogTemp, Log,
+                    TEXT("[CUBE-MINING-01] Mine pre-drag hover refreshed. HoverValid=%s Hover=(%d,%d,%d)"),
+                    GridSelection->HasValidHover() ? TEXT("true") : TEXT("false"),
+                    RefreshedHover.X,
+                    RefreshedHover.Y,
+                    RefreshedHover.Z);
+
+                if (GridSelection->HasValidHover())
                 {
-                    GridSelection->TickSelectionFromMouse(PC);
+                    CurrentHoveredVoxel = RefreshedHover;
+                    CurrentOverlayVoxel = RefreshedHover;
+                    CurrentHoveredCell = FIntPoint(RefreshedHover.X, RefreshedHover.Y);
+                    CurrentHoveredTerrainZ = GridSelection->GetHoveredTerrainZ();
+                    LastHitZ = CurrentHoveredTerrainZ;
+                    LastValidVoxel = RefreshedHover;
+                    bHasLastValidVoxel = true;
+                    bHoveredCellValid = true;
                 }
             }
 
-            if (!GridSelection->BeginDragSelection())
+            if (GridSelection->BeginDragSelection())
+            {
+                bIsDraggingBuild = true;
+                bHasDragStart = true;
+                DragStartVoxel = CurrentHoveredVoxel;
+
+                UE_LOG(LogTemp, Log,
+                    TEXT("[CUBE-MINING-V2] Mine drag start Hover=(%d,%d,%d)"),
+                    CurrentHoveredVoxel.X,
+                    CurrentHoveredVoxel.Y,
+                    CurrentHoveredVoxel.Z);
+            }
+            else
             {
                 GridSelection->ToggleHoveredSelection();
                 SyncSelectionFromGridSelection();
@@ -1101,6 +1184,24 @@ void UBuildModeManager::HandlePrimaryClick()
             SelectedCells3D.Num()
         );
 
+        // Verify hover cell == confirm cell. After the Patch 1 fix these should
+        // always match. Log if they don't so regressions are caught immediately.
+        UE_LOG(LogTemp, Verbose,
+            TEXT("[MouseGrid] ConfirmCell=(%d,%d,%d) OverlayCell=(%d,%d,%d) Match=%s"),
+            CurrentHoveredVoxel.X, CurrentHoveredVoxel.Y, CurrentHoveredVoxel.Z,
+            CurrentOverlayVoxel.X, CurrentOverlayVoxel.Y, CurrentOverlayVoxel.Z,
+            (CurrentHoveredVoxel == CurrentOverlayVoxel) ? TEXT("YES") : TEXT("NO"));
+
+        if (CurrentHoveredVoxel != CurrentOverlayVoxel)
+        {
+            UE_LOG(LogTemp, Warning,
+                TEXT("[MouseGrid] MISMATCH: ConfirmCell≠OverlayCell. "
+                    "Confirm=(%d,%d,%d) Overlay=(%d,%d,%d) — "
+                    "player saw hover on wrong tile."),
+                CurrentHoveredVoxel.X, CurrentHoveredVoxel.Y, CurrentHoveredVoxel.Z,
+                CurrentOverlayVoxel.X, CurrentOverlayVoxel.Y, CurrentOverlayVoxel.Z);
+        }
+
         OnCellCountChanged.Broadcast(
             CurrentToolMode == EBuildToolMode::Farm
             ? FarmPaintedWorldCells.Num()
@@ -1216,9 +1317,26 @@ void UBuildModeManager::HandleRotate(bool bClockwise)
 
 void UBuildModeManager::HandleConfirm()
 {
+    int32 GridSelectedCountForLog = 0;
+    if (UGridSelectionSubsystem* GridSelectionForLog = GetGridSelectionSubsystem())
+    {
+        TArray<FGridSelectionCell> GridCellsForLog;
+        GridSelectionForLog->GetSelectedCells(GridCellsForLog);
+        GridSelectedCountForLog = GridCellsForLog.Num();
+    }
+
+    UE_LOG(LogTemp, Warning,
+        TEXT("[CUBE-MINING-V2] HandleConfirm entered. ToolMode=%d CurrentMode=%d bJustCommitted=%s SelectedCells=%d SelectedCells3D=%d GridSelected=%d"),
+        static_cast<int32>(CurrentToolMode),
+        static_cast<int32>(CurrentMode),
+        bJustCommitted ? TEXT("true") : TEXT("false"),
+        SelectedCells.Num(),
+        SelectedCells3D.Num(),
+        GridSelectedCountForLog);
+
     if (bJustCommitted)
     {
-        UE_LOG(LogTemp, Verbose, TEXT("[BuildMode] HandleConfirm ignored: just committed."));
+        UE_LOG(LogTemp, Warning, TEXT("[CUBE-MINING-V2] HandleConfirm blocked by bJustCommitted."));
         return;
     }
 
@@ -1238,16 +1356,10 @@ void UBuildModeManager::HandleConfirm()
 
     if (CurrentToolMode == EBuildToolMode::Mine)
     {
+        UE_LOG(LogTemp, Warning, TEXT("[CUBE-MINING-V2] HandleConfirm dispatching Mine commit."));
+
         if (CommitMineDesignations())
         {
-            if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
-            {
-                GridSelection->CommitSelectedCellsToConfirmedOverlay(EGridDesignationType::Mine);
-                GridSelection->ClearPreviewCells();
-                GridSelection->ClearSelectedCells();
-                GridSelection->EndSelectionTool(false);
-            }
-
             bJustCommitted = true;
             bIsDraggingBuild = false;
             LastPlacedDragVoxel = FIntVector(INT32_MIN);
@@ -1255,12 +1367,9 @@ void UBuildModeManager::HandleConfirm()
             DragStartVoxel = FIntVector::ZeroValue;
             bDragStartedFromBlock = false;
 
-            SelectedCells.Empty();
-            SelectedCells3D.Empty();
-            FarmPaintedWorldCells.Empty();
-
             OnCellCountChanged.Broadcast(0);
             UpdateGridOverlay();
+            UpdateMiningLayerRenderer();
         }
         return;
     }
@@ -1347,11 +1456,41 @@ void UBuildModeManager::HandleConfirm()
 
     if (CurrentMode == EBuildMode::CustomDraw)
     {
+        // Patch 2D: Capture cells from GridSelection BEFORE CommitCustomBuild.
+        // CommitCustomBuild empties SelectedCells3D internally on success.
+        // GetSelectedCells reads GridSelectionSubsystem::SelectedCells — the same source
+        // CommitSelectedCellsToConfirmedOverlay uses, so coord match is guaranteed.
+        TArray<FGridSelectionCell> BuildCellsSnapshot;
+        if (UGridSelectionSubsystem* GridSelectionSnap = GetGridSelectionSubsystem())
+        {
+            GridSelectionSnap->GetSelectedCells(BuildCellsSnapshot);
+        }
+
         if (CommitCustomBuild())
         {
             if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
             {
                 GridSelection->CommitSelectedCellsToConfirmedOverlay(EGridDesignationType::Build);
+
+                // Patch 2D: Remove confirmed build overlay per cell — build is committed.
+                UE_LOG(LogTemp, Log,
+                    TEXT("[BuildMode] [2D] Custom build committed. Removing confirmed overlay for %d cells."),
+                    BuildCellsSnapshot.Num());
+
+                for (const FGridSelectionCell& SnapCell : BuildCellsSnapshot)
+                {
+                    const bool bRemoved = GridSelection->RemoveConfirmedDesignationCell(
+                        SnapCell.VoxelCoord,
+                        EGridDesignationType::Build);
+
+                    UE_LOG(LogTemp, Log,
+                        TEXT("[BuildMode] [2D] Build overlay removal. Voxel=(%d,%d,%d) Removed=%s"),
+                        SnapCell.VoxelCoord.X,
+                        SnapCell.VoxelCoord.Y,
+                        SnapCell.VoxelCoord.Z,
+                        bRemoved ? TEXT("true") : TEXT("false"));
+                }
+
                 GridSelection->ClearPreviewCells();
                 GridSelection->ClearSelectedCells();
                 GridSelection->EndSelectionTool(false);
@@ -1391,8 +1530,7 @@ void UBuildModeManager::HandleCancel()
             GridSelection->EndSelectionTool(true);
         }
         DeactivateGridOverlay();
-        RestoreMiningPresentationVisibility();
-        DestroyMiningLayerRenderer();
+        DestroyMiningLayerRenderer(TEXT("CancelMineMode"));
         DestroyGhost();
 
         if (ActiveMiningGhost)
@@ -1554,18 +1692,24 @@ void UBuildModeManager::EnterMineMode()
     {
         CurrentToolMode = EBuildToolMode::None;
         CurrentMode = EBuildMode::None;
+        ActiveMiningZ = INDEX_NONE;
+
         if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
         {
             GridSelection->EndSelectionTool(true);
+            GridSelection->ClearMiningVolumePreviewCells();
         }
+
         DeactivateGridOverlay();
-        DestroyMiningLayerRenderer();
+        DestroyMiningLayerRenderer(TEXT("ExitMineMode"));
         DestroyGhost();
+
         if (ActiveMiningGhost)
         {
             ActiveMiningGhost->Destroy();
             ActiveMiningGhost = nullptr;
         }
+
         BroadcastSelectionChanged();
         BroadcastFeedback(TEXT("Mine mode exited."));
         return;
@@ -1582,7 +1726,12 @@ void UBuildModeManager::EnterMineMode()
     SelectedCells.Empty();
     SelectedCells3D.Empty();
     FarmPaintedWorldCells.Empty();
+    CurrentHoveredCell = FIntPoint::ZeroValue;
+    CurrentHoveredVoxel = FIntVector::ZeroValue;
+    CurrentOverlayVoxel = FIntVector::ZeroValue;
     bHoveredCellValid = false;
+    LastHitZ = 0.0f;
+    CurrentHoveredTerrainZ = 0.0f;
     bJustCommitted = false;
     bHasLastValidVoxel = false;
     LastValidVoxel = FIntVector::ZeroValue;
@@ -1591,55 +1740,26 @@ void UBuildModeManager::EnterMineMode()
     bHasDragStart = false;
     DragStartVoxel = FIntVector::ZeroValue;
     bDragStartedFromBlock = false;
+    ActiveMiningZ = INDEX_NONE;
 
-    SpawnGhost();
-
-    // Spawn 3D hover ghost cube for mine mode.
-    // Shows at the hovered voxel while the player selects cells to mine.
-    if (UWorld* W = GetWorld())
+    if (UPlayerBuildContext* Ctx = GetBuildContext())
     {
-        TSubclassOf<AMiningGhostActor> ClassToSpawn = MiningGhostClass;
-        if (!ClassToSpawn)
-        {
-            static const TCHAR* CandidateGhostPaths[] =
-            {
-                TEXT("/Game/WorldForge/BluePrints/BP_MiningGhostActor.BP_MiningGhostActor_C"),
-                TEXT("/Game/WorldForge/Blueprints/BP_MiningGhostActor.BP_MiningGhostActor_C"),
-                TEXT("/Game/WorldForge/Blueprints/Player/BP_MiningGhostActor.BP_MiningGhostActor_C"),
-                TEXT("/Game/WorldForge/Player/BP_MiningGhostActor.BP_MiningGhostActor_C"),
-                TEXT("/Game/WorldForge/Build/BP_MiningGhostActor.BP_MiningGhostActor_C"),
-                TEXT("/Game/BP_MiningGhostActor.BP_MiningGhostActor_C")
-            };
-
-            for (const TCHAR* CandidatePath : CandidateGhostPaths)
-            {
-                if (UClass* LoadedClass = LoadClass<AMiningGhostActor>(nullptr, CandidatePath))
-                {
-                    ClassToSpawn = LoadedClass;
-                    UE_LOG(LogTemp, Log, TEXT("[BuildMode] Auto-loaded MiningGhostClass: %s"), CandidatePath);
-                    break;
-                }
-            }
-        }
-
-        if (!ClassToSpawn)
-        {
-            ClassToSpawn = AMiningGhostActor::StaticClass();
-            UE_LOG(LogTemp, Warning, TEXT("[BuildMode] MiningGhostClass not assigned and BP fallback was not found. Using native AMiningGhostActor."));
-        }
-        FActorSpawnParameters MineGhostParams;
-        MineGhostParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-        ActiveMiningGhost = W->SpawnActor<AMiningGhostActor>(ClassToSpawn, FTransform::Identity, MineGhostParams);
-
-        if (ActiveMiningGhost)
-        {
-            UE_LOG(LogTemp, Log, TEXT("[BuildMode] Mining ghost cube spawned."));
-        }
+        Ctx->ClearSelection();
     }
 
-    if (ULayerViewSubsystem* LayerView = GetLayerViewSubsystem())
+    // Mine mode keeps the dedicated layer renderer alive so underground cutaway
+    // has an owner for the solid cap/slice and mining ghosts.
+    DestroyGhost();
+    if (ActiveMiningGhost)
     {
-        LayerView->EnterLayerView(EBuildToolMode::Mine);
+        ActiveMiningGhost->Destroy();
+        ActiveMiningGhost = nullptr;
+    }
+    RestoreMiningPresentationVisibility();
+    InitializeMiningLayerRenderer();
+    if (MiningLayerRenderer)
+    {
+        MiningLayerRenderer->ForceNextRebuild();
     }
 
     if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
@@ -1647,30 +1767,19 @@ void UBuildModeManager::EnterMineMode()
         GridSelection->SetActiveMineSettlementID(GetEffectiveSettlementID());
         GridSelection->SetToggleSelectedCellsOnReselect(bToggleSelectedCellsOnReselect);
         GridSelection->BeginSelectionTool(EBuildToolMode::Mine, EGridSelectionShape::Rectangle);
-
-        if (ActiveMiningGhost)
-        {
-            const FLinearColor SurfaceTint = ActiveMiningGhost->ConfirmedTint;
-            const FLinearColor UndergroundTint = FLinearColor(1.0f, 0.95f, 0.05f, 1.0f);
-            GridSelection->SetMiningGhostVisualAssets(
-                ActiveMiningGhost->GetResolvedGhostCubeMesh(),
-                ActiveMiningGhost->GetResolvedGhostMaterial(),
-                SurfaceTint,
-                UndergroundTint,
-                FMath::Clamp(ActiveMiningGhost->ConfirmedOpacity, 0.45f, 0.80f),
-                0.90f,
-                0.97f);
-        }
+        GridSelection->ClearMiningVolumePreviewCells();
     }
 
-    InitializeMiningLayerRenderer();
-    UpdateMiningLayerRenderer();
-
+    UE_LOG(LogTemp, Log,
+        TEXT("[CUBE-MINING-01] EnterMineMode visual. ActiveMiningZ=UNSET SettlementID=%d Ghost=false Renderer=%s Cutaway=pending"),
+        GetEffectiveSettlementID(),
+        MiningLayerRenderer ? TEXT("true") : TEXT("false"));
     UE_LOG(LogTemp, Log, TEXT("[BuildMode] Entered Mine mode."));
     OnBuildModeChanged.Broadcast(CurrentMode);
     OnCellCountChanged.Broadcast(0);
     BroadcastSelectionChanged();
-    BroadcastFeedback(TEXT("Mine mode enabled. Click a valid block to designate mining."));
+    UpdateMiningLayerRenderer();
+    BroadcastFeedback(TEXT("Mine mode enabled. Paint mine tiles, then Confirm."));
 }
 
 void UBuildModeManager::EnterDigMode()
@@ -1825,6 +1934,8 @@ void UBuildModeManager::ExecuteMineDesignation()
         CurrentHoveredVoxel.X,
         CurrentHoveredVoxel.Y,
         CurrentHoveredVoxel.Z));
+
+    UpdateMiningLayerRenderer();
 }
 
 void UBuildModeManager::ExecuteDig()
@@ -2088,7 +2199,40 @@ void UBuildModeManager::UpdateFromMouse(APlayerController* PC)
 
             if (bUseSharedGridHover && GridSelection->HasValidHover())
             {
-                const FIntVector NewGridHover = GridSelection->GetHoveredVoxel();
+                FIntVector NewGridHover = GridSelection->GetHoveredVoxel();
+
+                if (CurrentToolMode == EBuildToolMode::Mine)
+                {
+                    ULayerViewSubsystem* LV_Hover = GetLayerViewSubsystem();
+                    if (LV_Hover && LV_Hover->HasActiveVoxelLayer() && LV_Hover->GetRelativeLayerOffset() < 0)
+                    {
+                        // Underground: authoritative Z comes from LayerView, not locked surface ActiveMiningZ.
+                        NewGridHover.Z = LV_Hover->GetActiveVoxelLayerZ();
+                    }
+                    else
+                    {
+                        if (UVoxelWorldManager* VM = GetVoxelManager())
+                        {
+                            int32 SurfaceZ = INDEX_NONE;
+                            if (VM->TryGetTerrainSurfaceVoxelZ(FIntPoint(NewGridHover.X, NewGridHover.Y), SurfaceZ))
+                            {
+                                if (ActiveMiningZ == INDEX_NONE)
+                                {
+                                    ActiveMiningZ = SurfaceZ;
+                                    UE_LOG(LogTemp, Log,
+                                        TEXT("[CUBE-MINING-01] ActiveMiningZ resolved. SurfaceZ=%d HoveredVoxel=(%d,%d,%d)"),
+                                        SurfaceZ,
+                                        NewGridHover.X,
+                                        NewGridHover.Y,
+                                        ActiveMiningZ);
+                                }
+
+                                NewGridHover.Z = ActiveMiningZ;
+                            }
+                        }
+                    }
+                }
+
                 const bool bChanged = (NewGridHover != CurrentHoveredVoxel) || !bHoveredCellValid;
 
                 CurrentHoveredVoxel = NewGridHover;
@@ -2103,29 +2247,51 @@ void UBuildModeManager::UpdateFromMouse(APlayerController* PC)
                 if (bChanged)
                 {
                     OnHoveredCellChanged.Broadcast(CurrentHoveredCell);
+
+                    if (CurrentToolMode == EBuildToolMode::Mine)
+                    {
+                        UE_LOG(LogTemp, Log,
+                            TEXT("[MineSelectionAudit] Hover XY=(%d,%d) ActiveMiningZ=%d OutVoxel=(%d,%d,%d) OverlayVoxel=(%d,%d,%d)"),
+                            CurrentHoveredCell.X,
+                            CurrentHoveredCell.Y,
+                            ActiveMiningZ,
+                            NewGridHover.X,
+                            NewGridHover.Y,
+                            NewGridHover.Z,
+                            CurrentOverlayVoxel.X,
+                            CurrentOverlayVoxel.Y,
+                            CurrentOverlayVoxel.Z);
+
+                        // CUBE-MINING-V3: this Mine hover-tick audit fires on every mine
+                        // layer and reports the live visual path before the renderer refresh
+                        // later in this tick.
+                        {
+                            ULayerViewSubsystem* LV_Tick = GetLayerViewSubsystem();
+                            const int32 RelOffsetTick =
+                                (LV_Tick && LV_Tick->HasActiveVoxelLayer()) ? LV_Tick->GetRelativeLayerOffset() : 0;
+                            const bool bUndergroundTick = RelOffsetTick < 0;
+                            UE_LOG(LogTemp, Log,
+                                TEXT("[CUBE-MINING-V3] Mine hover tick. Layer=%s ActiveMiningZ=%d Relative=%d Ghost=false Renderer=%s Clamp=%s"),
+                                bUndergroundTick ? TEXT("Underground") : TEXT("Surface"),
+                                ActiveMiningZ,
+                                RelOffsetTick,
+                                MiningLayerRenderer ? TEXT("true") : TEXT("false"),
+                                bMiningLayerAnchorValid ? TEXT("true") : TEXT("false"));
+                        }
+                    }
                 }
 
-                UpdateGhost();
-                UpdateGridOverlay();
-
-                // Mine hover visual: always use flat GridSelection tile only.
-                // The 3D cube ghost is hidden; the GridSelection hover highlight
-                // (single cell flat tile) covers the visual need at both surface
-                // and underground. The ghost actor stays alive for internal state
-                // tracking but its mesh is never shown.
-                if (CurrentToolMode == EBuildToolMode::Mine && ActiveMiningGhost)
+                if (CurrentToolMode != EBuildToolMode::Mine)
                 {
-                    ActiveMiningGhost->HideGhost();
+                    UpdateGhost();
                 }
+                UpdateGridOverlay();
 
                 if (CurrentToolMode == EBuildToolMode::Mine)
                 {
                     UpdateMiningLayerRenderer();
                 }
 
-                // For shared grid tools, GridSelectionSubsystem is now the authoritative
-                // X/Y + tool-layer Z hover source. Returning here prevents legacy terrain
-                // hover logic from snapping the target back to surface Z.
                 return;
             }
         }
@@ -2154,16 +2320,6 @@ void UBuildModeManager::UpdateFromMouse(APlayerController* PC)
     if (CurrentToolMode == EBuildToolMode::Mine)
     {
         bHoveredCellValid = false;
-
-        if (ActiveMiningGhost)
-        {
-            ActiveMiningGhost->HideGhost();
-        }
-
-        if (GhostActor)
-        {
-            GhostActor->SetGhostState(EBuildGhostState::Invalid);
-        }
 
         UpdateGridOverlay();
         UpdateMiningLayerRenderer();
@@ -2213,14 +2369,23 @@ void UBuildModeManager::UpdateFromMouse(APlayerController* PC)
         return;
     }
 
-    // True voxel-space coordinate for the visual grid overlay.
-    CurrentOverlayVoxel = WorldToVoxel(HitLocation, 100.0f);
     CurrentHoveredTerrainZ = HitLocation.Z;
 
     // Gameplay/tool coordinate path. Build, mine, dig, and farm claim checks all
     // operate on exact voxel XY, then SettlementManager converts that voxel cell
     // to the strategic world-map tile.
+    //
+    // NOTE: CurrentOverlayVoxel is intentionally NOT set here from WorldToVoxel().
+    // WorldToVoxel uses FloorToInt while VM->WorldToGrid3D uses round-to-nearest
+    // (FloorToInt with +0.5 bias). Near tile edges they diverge by ±1, causing the
+    // hover tile and confirm cell to mismatch. CurrentOverlayVoxel is synced to
+    // NewVoxel below, after block-face and stacking adjustments are applied.
     FIntVector NewVoxel = VM->WorldToGrid3D(HitLocation);
+
+    UE_LOG(LogTemp, Verbose,
+        TEXT("[MouseGrid] RawHit=(%.1f,%.1f,%.1f) InitialGridCell=(%d,%d,%d)"),
+        HitLocation.X, HitLocation.Y, HitLocation.Z,
+        NewVoxel.X, NewVoxel.Y, NewVoxel.Z);
 
     if (bHitPlacedBlock)
     {
@@ -2308,9 +2473,24 @@ void UBuildModeManager::UpdateFromMouse(APlayerController* PC)
 
     CurrentHoveredVoxel = NewVoxel;
     CurrentHoveredCell = FIntPoint(NewVoxel.X, NewVoxel.Y);
+    // Sync overlay voxel to the final gameplay voxel so the hover tile shown to the
+    // player is always the exact cell that a confirm/click will act on.
+    // This must happen AFTER block-face offset and stacking adjustments are applied
+    // to NewVoxel so all three cases (terrain, placed-block face, stacking) agree.
+    CurrentOverlayVoxel = NewVoxel;
     bHoveredCellValid = true;
     LastHitZ = HitLocation.Z;
     CurrentHoveredTerrainZ = HitLocation.Z;
+
+    UE_LOG(LogTemp, Verbose,
+        TEXT("[MouseGrid] HoverSnap Raw=(%.1f,%.1f,%.1f) HoverVoxel=(%d,%d,%d) OverlayVoxel=(%d,%d,%d) SnappedWorld=(%.1f,%.1f,%.1f) Match=%s"),
+        HitLocation.X, HitLocation.Y, HitLocation.Z,
+        CurrentHoveredVoxel.X, CurrentHoveredVoxel.Y, CurrentHoveredVoxel.Z,
+        CurrentOverlayVoxel.X, CurrentOverlayVoxel.Y, CurrentOverlayVoxel.Z,
+        (static_cast<float>(NewVoxel.X) + 0.5f) * 100.0f,
+        (static_cast<float>(NewVoxel.Y) + 0.5f) * 100.0f,
+        (static_cast<float>(NewVoxel.Z) + 0.5f) * 100.0f,
+        (CurrentOverlayVoxel == CurrentHoveredVoxel) ? TEXT("YES") : TEXT("NO"));
 
     if (bChanged)
     {
@@ -2584,6 +2764,20 @@ bool UBuildModeManager::RaycastToTerrain(
         TerrainParams.AddIgnoredActor(ActiveDigGhost);
     }
 
+    // Ignore mine-mode ghost cube and the grid overlay actor. Both have NoCollision
+    // on all components, so traces cannot hit them in practice. Explicit exclusion
+    // is belt-and-suspenders against future material/mesh changes that might re-enable
+    // collision, and makes intent clear.
+    if (ActiveMiningGhost)
+    {
+        TerrainParams.AddIgnoredActor(ActiveMiningGhost);
+    }
+
+    if (GridOverlay)
+    {
+        TerrainParams.AddIgnoredActor(GridOverlay);
+    }
+
     for (TActorIterator<AActor> It(W); It; ++It)
     {
         AActor* Actor = *It;
@@ -2615,6 +2809,16 @@ bool UBuildModeManager::RaycastToTerrain(
         FullParams.AddIgnoredActor(ActiveDigGhost);
     }
 
+    if (ActiveMiningGhost)
+    {
+        FullParams.AddIgnoredActor(ActiveMiningGhost);
+    }
+
+    if (GridOverlay)
+    {
+        FullParams.AddIgnoredActor(GridOverlay);
+    }
+
     FHitResult FullHit;
     const bool bHitFull = W->LineTraceSingleByChannel(
         FullHit,
@@ -2632,6 +2836,12 @@ bool UBuildModeManager::RaycastToTerrain(
             OutSupportBlockVoxel = VM->WorldToGrid3D(FullHit.GetActor()->GetActorLocation());
             OutHitLocation = FullHit.ImpactPoint;
             OutHitNormal = FullHit.ImpactNormal;
+            UE_LOG(LogTemp, Verbose,
+                TEXT("[MouseGrid] RaycastToTerrain → PlacedBlock Actor=%s Comp=%s Raw=(%.1f,%.1f,%.1f) SupportVoxel=(%d,%d,%d)"),
+                FullHit.GetActor() ? *FullHit.GetActor()->GetName() : TEXT("None"),
+                FullHit.GetComponent() ? *FullHit.GetComponent()->GetName() : TEXT("None"),
+                FullHit.ImpactPoint.X, FullHit.ImpactPoint.Y, FullHit.ImpactPoint.Z,
+                OutSupportBlockVoxel.X, OutSupportBlockVoxel.Y, OutSupportBlockVoxel.Z);
             return true;
         }
 
@@ -2641,6 +2851,11 @@ bool UBuildModeManager::RaycastToTerrain(
             OutSupportBlockVoxel = VM->WorldToGrid3D(FullHit.GetComponent()->GetComponentLocation());
             OutHitLocation = FullHit.ImpactPoint;
             OutHitNormal = FullHit.ImpactNormal;
+            UE_LOG(LogTemp, Verbose,
+                TEXT("[MouseGrid] RaycastToTerrain → PendingGhostSupport Comp=%s Raw=(%.1f,%.1f,%.1f) SupportVoxel=(%d,%d,%d)"),
+                FullHit.GetComponent() ? *FullHit.GetComponent()->GetName() : TEXT("None"),
+                FullHit.ImpactPoint.X, FullHit.ImpactPoint.Y, FullHit.ImpactPoint.Z,
+                OutSupportBlockVoxel.X, OutSupportBlockVoxel.Y, OutSupportBlockVoxel.Z);
             return true;
         }
     }
@@ -2649,9 +2864,17 @@ bool UBuildModeManager::RaycastToTerrain(
     {
         OutHitLocation = TerrainHit.ImpactPoint;
         OutHitNormal = TerrainHit.ImpactNormal;
+        const FIntVector SnapVoxel = VM->WorldToGrid3D(TerrainHit.ImpactPoint);
+        UE_LOG(LogTemp, Verbose,
+            TEXT("[MouseGrid] RaycastToTerrain → Terrain Actor=%s Comp=%s Raw=(%.1f,%.1f,%.1f) SnapVoxel=(%d,%d,%d)"),
+            TerrainHit.GetActor() ? *TerrainHit.GetActor()->GetName() : TEXT("None"),
+            TerrainHit.GetComponent() ? *TerrainHit.GetComponent()->GetName() : TEXT("None"),
+            TerrainHit.ImpactPoint.X, TerrainHit.ImpactPoint.Y, TerrainHit.ImpactPoint.Z,
+            SnapVoxel.X, SnapVoxel.Y, SnapVoxel.Z);
         return true;
     }
 
+    UE_LOG(LogTemp, Verbose, TEXT("[MouseGrid] RaycastToTerrain → No hit."));
     return false;
 }
 
@@ -2832,6 +3055,12 @@ bool UBuildModeManager::CommitDataTableBuildPiecePlacement()
 
     MeshComp->SetMobility(EComponentMobility::Movable);
     MeshComp->SetStaticMesh(DataTablePreviewMesh);
+    // Placed actor intentionally keeps the mesh's real materials — no ghost override.
+    UE_LOG(LogTemp, Log,
+        TEXT("[BuildMode] Temporary placed actor spawned with real materials: SourceID=%s Mesh=%s Location=%s"),
+        *DataTablePreviewSourceID.ToString(),
+        *DataTablePreviewMesh->GetName(),
+        *PlacementTransform.GetLocation().ToString());
     MeshComp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
     MeshComp->SetCollisionResponseToAllChannels(ECR_Ignore);
     MeshComp->SetGenerateOverlapEvents(false);
@@ -2853,6 +3082,27 @@ bool UBuildModeManager::CommitDataTableBuildPiecePlacement()
         *PlacementTransform.GetLocation().ToString(),
         *PlacementTransform.Rotator().ToString());
     BroadcastFeedback(FString::Printf(TEXT("Placed build piece: %s"), *DataTablePreviewSourceID.ToString()));
+
+    // Patch 2D: Remove confirmed build overlay for this voxel.
+    // The DataTable placement path in HandleConfirm returns early before calling
+    // CommitSelectedCellsToConfirmedOverlay, so no confirmed cell is typically present here.
+    // The call is included so removal fires correctly if the overlay is ever added to this path,
+    // and to produce a consistent log regardless.
+    {
+        UGridSelectionSubsystem* GridSS = World ? World->GetSubsystem<UGridSelectionSubsystem>() : nullptr;
+        const bool bOverlayRemoved = GridSS
+            ? GridSS->RemoveConfirmedDesignationCell(CurrentHoveredVoxel, EGridDesignationType::Build)
+            : false;
+
+        UE_LOG(LogTemp, Log,
+            TEXT("[BuildMode] [2D] DataTable build placement overlay removal. SourceID=%s Mesh=%s Voxel=(%d,%d,%d) Removed=%s"),
+            *DataTablePreviewSourceID.ToString(),
+            *DataTablePreviewMesh->GetName(),
+            CurrentHoveredVoxel.X,
+            CurrentHoveredVoxel.Y,
+            CurrentHoveredVoxel.Z,
+            bOverlayRemoved ? TEXT("true") : TEXT("false"));
+    }
 
     return true;
 }
@@ -3584,6 +3834,7 @@ void UBuildModeManager::InitializeMiningLayerRenderer()
     UWorld* W = GetWorld();
     if (!W)
     {
+        UE_LOG(LogTemp, Warning, TEXT("[CUBE-MINING-VISUAL] RendererInit Result=NoWorld"));
         return;
     }
 
@@ -3597,22 +3848,39 @@ void UBuildModeManager::InitializeMiningLayerRenderer()
 
     if (MiningLayerRenderer)
     {
-        MiningLayerRenderer->SetCellSizeUU(100.0f);
+        // Option D / Option V: the renderer is a TRUE 200uu voxel-space drawer. Use the
+        // live gameplay voxel size (GetRenderVoxelSize, normally 200) so cap tiles and
+        // ghosts are placed in the same space the cap terrain query samples. The old
+        // hardcoded 100 placed everything at half scale.
+        float RendererCellSizeUU = 200.0f;
+        if (UWorld* CW = GetWorld())
+        {
+            if (const UVoxelWorldManager* VM = CW->GetSubsystem<UVoxelWorldManager>())
+            {
+                const float RVS = VM->GetRenderVoxelSize();
+                if (RVS > KINDA_SMALL_NUMBER)
+                {
+                    RendererCellSizeUU = RVS;
+                }
+            }
+        }
+        MiningLayerRenderer->SetCellSizeUU(RendererCellSizeUU);
         MiningLayerRenderer->SetRendererVisible(false);
-        UE_LOG(LogTemp, Log, TEXT("[BuildMode] MiningLayerRenderer spawned."));
+        UE_LOG(LogTemp, Log, TEXT("[CUBE-MINING-VISUAL] RendererInit Result=Spawned CellSizeUU=%.1f"), RendererCellSizeUU);
     }
     else
     {
-        UE_LOG(LogTemp, Error, TEXT("[BuildMode] Failed to spawn MiningLayerRenderer."));
+        UE_LOG(LogTemp, Error, TEXT("[CUBE-MINING-VISUAL] RendererInit Result=Failed"));
     }
 }
 
-void UBuildModeManager::DestroyMiningLayerRenderer()
+void UBuildModeManager::DestroyMiningLayerRenderer(const TCHAR* Reason)
 {
     RestoreMiningPresentationVisibility();
 
     if (MiningLayerRenderer)
     {
+        MiningLayerRenderer->ClearLayer();
         MiningLayerRenderer->Destroy();
         MiningLayerRenderer = nullptr;
     }
@@ -3620,13 +3888,16 @@ void UBuildModeManager::DestroyMiningLayerRenderer()
     bMiningLayerAnchorValid = false;
     MiningLayerAnchorVoxel = FIntVector::ZeroValue;
     MiningLayerAnchorZ = MIN_int32;
+    MiningLayerAnchorWorldXY = FVector2D::ZeroVector;
+    bLastMiningVisualProofLogValid = false;
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[CUBE-MINING-VISUAL] RendererClear Reason=%s"),
+        Reason ? Reason : TEXT("Unknown"));
 }
 
 void UBuildModeManager::UpdateMiningLayerRenderer()
 {
-    // Camera bounds are clamped every call regardless of state-change deduplication.
-    // This prevents the player from panning outside the diorama walls and seeing the
-    // underlying grass terrain that bleeds through the clip plane.
     if (CurrentToolMode == EBuildToolMode::Mine && bMiningLayerAnchorValid)
     {
         ClampCameraToMineRegion();
@@ -3644,6 +3915,8 @@ void UBuildModeManager::UpdateMiningLayerRenderer()
         bMiningLayerAnchorValid = false;
         MiningLayerAnchorVoxel = FIntVector::ZeroValue;
         MiningLayerAnchorZ = MIN_int32;
+        MiningLayerAnchorWorldXY = FVector2D::ZeroVector;
+        bLastMiningVisualProofLogValid = false;
         return;
     }
 
@@ -3653,57 +3926,68 @@ void UBuildModeManager::UpdateMiningLayerRenderer()
         return;
     }
 
+    ULayerViewSubsystem* LayerView = GetLayerViewSubsystem();
+    const int32 ActiveZ = GetActiveVoxelLayerZ();
+    const int32 Relative = (LayerView && LayerView->HasActiveVoxelLayer())
+        ? LayerView->GetRelativeLayerOffset()
+        : 0;
+    const bool bUnderground = Relative < 0;
+
     if (!bHoveredCellValid && !bHasLastValidVoxel && !bMiningLayerAnchorValid)
     {
         MiningLayerRenderer->ClearLayer();
+        if (!bLastMiningVisualProofLogValid)
+        {
+            UE_LOG(LogTemp, Log, TEXT("[CUBE-MINING-VISUAL] RendererClear Reason=NoAnchor"));
+            bLastMiningVisualProofLogValid = true;
+        }
         return;
     }
 
-    const int32 ActiveZ = GetActiveVoxelLayerZ();
-
-    // ─── Anchor policy ───────────────────────────────────────────────────────────
-    //
-    // The anchor is SET once when first going underground (or when the layer
-    // changes) using the current hover position as the center. After that it
-    // is FROZEN — it only moves when the dynamic radius expansion logic (below)
-    // determines confirmed mine cells have grown beyond the wall edge.
-    //
-    // Removing per-frame cursor drift eliminates the two main visual problems:
-    //   1. Flickering: every anchor move triggered ForceNextRebuild → full HISM
-    //      clear+rebuild every frame while the cursor was near the edge.
-    //   2. Box jitter: anchor visibly sliding around while just hovering.
-    //
-    // If the player wants to mine in a completely different area they should exit
-    // and re-enter mine mode, which re-anchors to the new cursor position.
-    // ─────────────────────────────────────────────────────────────────────────────
     const int32 DioramaRadiusCells = 10;
-    const bool bLayerChanged = !bMiningLayerAnchorValid || MiningLayerAnchorZ != ActiveZ;
+    const bool bHadMiningLayerAnchor = bMiningLayerAnchorValid;
+    const bool bLayerChanged = !bHadMiningLayerAnchor || MiningLayerAnchorZ != ActiveZ;
 
     if (bLayerChanged || !bMiningLayerAnchorValid)
     {
-        // Set anchor from current cursor position on initial entry or layer change.
         FIntVector NewAnchor = bHoveredCellValid
             ? CurrentHoveredVoxel
             : (bHasLastValidVoxel ? LastValidVoxel : MiningLayerAnchorVoxel);
         NewAnchor.Z = ActiveZ;
 
         MiningLayerAnchorVoxel = NewAnchor;
-        MiningLayerAnchorZ     = ActiveZ;
+        MiningLayerAnchorZ = ActiveZ;
         bMiningLayerAnchorValid = true;
 
-        if (MiningLayerRenderer)
+        FVector CamLoc = FVector::ZeroVector;
+        if (UWorld* AnchorWorld = GetWorld())
         {
-            MiningLayerRenderer->ForceNextRebuild();
+            if (APlayerController* AnchorPC = AnchorWorld->GetFirstPlayerController())
+            {
+                if (APawn* AnchorPawn = AnchorPC->GetPawn())
+                {
+                    CamLoc = AnchorPawn->GetActorLocation();
+                }
+            }
         }
+        MiningLayerAnchorWorldXY = FVector2D(CamLoc.X, CamLoc.Y);
+
+        MiningLayerRenderer->ForceNextRebuild();
 
         UE_LOG(LogTemp, Log,
             TEXT("[BuildMode] Mining diorama anchor SET. Anchor=(%d,%d,%d) ActiveZ=%d Reason=%s"),
             MiningLayerAnchorVoxel.X, MiningLayerAnchorVoxel.Y, MiningLayerAnchorVoxel.Z,
             ActiveZ,
-            !bMiningLayerAnchorValid ? TEXT("InitialEntry") : TEXT("LayerChanged"));
-    }
-    // Anchor does NOT drift with cursor hover — only dynamic radius expansion moves the wall.
+            bHadMiningLayerAnchor ? TEXT("LayerChanged") : TEXT("InitialEntry"));
 
+        UE_LOG(LogTemp, Log,
+            TEXT("[MineModeCameraAudit] AnchorSet VoxelXY=(%d,%d) AnchorWorldXY=(%.1f,%.1f)"),
+            MiningLayerAnchorVoxel.X, MiningLayerAnchorVoxel.Y,
+            MiningLayerAnchorWorldXY.X, MiningLayerAnchorWorldXY.Y);
+    }
+
+    // MiningLayerAnchorVoxel is already true 200uu voxel space. The renderer,
+    // selected cells, and confirmed cells all use that same coordinate space.
     FIntVector CenterVoxel = MiningLayerAnchorVoxel;
     CenterVoxel.Z = ActiveZ;
 
@@ -3724,30 +4008,21 @@ void UBuildModeManager::UpdateMiningLayerRenderer()
         }
     }
 
-    // ─── Dynamic radius expansion ────────────────────────────────────────────────
-    //
-    // If a confirmed (active) mine designation sits within EdgeBufferCells of the
-    // current diorama edge, expand VisibleRadius to keep all designations at least
-    // 5 voxels inside the wall. This preserves the diorama illusion when the player
-    // is mining outward from the initial area.
-    //
-    // Expansion cap: DioramaRadiusCells + 20 to prevent unbounded growth.
-    // ─────────────────────────────────────────────────────────────────────────────
     if (MiningLayerRenderer && ConfirmedMineCells.Num() > 0)
     {
-        const int32 BaseRadius  = DioramaRadiusCells;
-        const int32 MaxRadius   = BaseRadius + 20;
-        const int32 ExpandBuffer = 5; // keep designations this far inside the wall
+        const int32 BaseRadius = DioramaRadiusCells;
+        const int32 MaxRadius = BaseRadius + 20;
+        const int32 ExpandBuffer = 5;
 
         int32 DesiredRadius = MiningLayerRenderer->VisibleRadius;
 
         for (const FIntVector& Cell : ConfirmedMineCells)
         {
             if (Cell.Z != ActiveZ) { continue; }
-            const int32 DX = FMath::Abs(Cell.X - MiningLayerAnchorVoxel.X);
-            const int32 DY = FMath::Abs(Cell.Y - MiningLayerAnchorVoxel.Y);
+            // Option V: ConfirmedMineCells and CenterVoxel are both true voxel space.
+            const int32 DX = FMath::Abs(Cell.X - CenterVoxel.X);
+            const int32 DY = FMath::Abs(Cell.Y - CenterVoxel.Y);
             const int32 MaxDist = FMath::Max(DX, DY);
-            // If this designation would be within ExpandBuffer of the wall, push the wall out
             if (MaxDist >= DesiredRadius - ExpandBuffer)
             {
                 DesiredRadius = MaxDist + ExpandBuffer;
@@ -3767,53 +4042,35 @@ void UBuildModeManager::UpdateMiningLayerRenderer()
         }
     }
 
-    // ─── End dynamic expansion ───────────────────────────────────────────────────
-
-    // ─── Anchor nudge for lateral mining ────────────────────────────────────────
-    //
-    // Radius expansion above handles outward mining in all directions from center.
-    // But when the player mines laterally (one direction only), the anchor stays
-    // fixed and the far edge stays at radius+20 while the near edge drifts away.
-    // This nudge slides the anchor toward confirmed mine cells that are within 2
-    // voxels of the current wall edge, keeping the work area centered.
-    //
-    // Key difference from the old cursor-based drift we removed: this only fires
-    // when confirmed designations change, not every hover tick — no flicker.
-    // ─────────────────────────────────────────────────────────────────────────────
     if (bMiningLayerAnchorValid && ConfirmedMineCells.Num() > 0)
     {
         const int32 CurrentRadius = MiningLayerRenderer
             ? MiningLayerRenderer->VisibleRadius
             : DioramaRadiusCells;
-
-        // Nudge when a confirmed cell is within 2 voxels of the wall edge.
         const int32 NudgeTrigger = CurrentRadius - 2;
-
         FIntVector NudgeOffset = FIntVector::ZeroValue;
 
         for (const FIntVector& Cell : ConfirmedMineCells)
         {
             if (Cell.Z != ActiveZ) { continue; }
-            const int32 DX = Cell.X - MiningLayerAnchorVoxel.X;
-            const int32 DY = Cell.Y - MiningLayerAnchorVoxel.Y;
+            // Option V: voxel-space distance from the voxel-space center.
+            const int32 DX = Cell.X - CenterVoxel.X;
+            const int32 DY = Cell.Y - CenterVoxel.Y;
 
-            // X axis
-            if      (DX >  NudgeTrigger) NudgeOffset.X = FMath::Max(NudgeOffset.X,  DX - NudgeTrigger);
-            else if (DX < -NudgeTrigger) NudgeOffset.X = FMath::Min(NudgeOffset.X,  DX + NudgeTrigger);
+            if (DX > NudgeTrigger) NudgeOffset.X = FMath::Max(NudgeOffset.X, DX - NudgeTrigger);
+            else if (DX < -NudgeTrigger) NudgeOffset.X = FMath::Min(NudgeOffset.X, DX + NudgeTrigger);
 
-            // Y axis
-            if      (DY >  NudgeTrigger) NudgeOffset.Y = FMath::Max(NudgeOffset.Y,  DY - NudgeTrigger);
-            else if (DY < -NudgeTrigger) NudgeOffset.Y = FMath::Min(NudgeOffset.Y,  DY + NudgeTrigger);
+            if (DY > NudgeTrigger) NudgeOffset.Y = FMath::Max(NudgeOffset.Y, DY - NudgeTrigger);
+            else if (DY < -NudgeTrigger) NudgeOffset.Y = FMath::Min(NudgeOffset.Y, DY + NudgeTrigger);
         }
 
         if (NudgeOffset.X != 0 || NudgeOffset.Y != 0)
         {
-            MiningLayerAnchorVoxel.X += NudgeOffset.X;
-            MiningLayerAnchorVoxel.Y += NudgeOffset.Y;
-
-            // CenterVoxel is computed from anchor before this block — re-sync it.
-            CenterVoxel.X = MiningLayerAnchorVoxel.X;
-            CenterVoxel.Y = MiningLayerAnchorVoxel.Y;
+            // NudgeOffset is in voxels and the persisted anchor is also voxel-space.
+            CenterVoxel.X += NudgeOffset.X;
+            CenterVoxel.Y += NudgeOffset.Y;
+            MiningLayerAnchorVoxel = CenterVoxel;
+            MiningLayerAnchorVoxel.Z = ActiveZ;
 
             if (MiningLayerRenderer)
             {
@@ -3822,28 +4079,97 @@ void UBuildModeManager::UpdateMiningLayerRenderer()
 
             UE_LOG(LogTemp, Log,
                 TEXT("[BuildMode] Diorama anchor nudged (%+d,%+d) for lateral mining. "
-                     "NewAnchor=(%d,%d,%d) Radius=%d"),
+                    "NewAnchor=(%d,%d,%d) Radius=%d"),
                 NudgeOffset.X, NudgeOffset.Y,
                 MiningLayerAnchorVoxel.X, MiningLayerAnchorVoxel.Y, MiningLayerAnchorVoxel.Z,
                 CurrentRadius);
         }
     }
 
-    // ─── End anchor nudge ────────────────────────────────────────────────────────
+    TArray<FIntVector> SelectedPreviewCells;
+    if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
+    {
+        // Selected Mine cells are already true 200uu voxels. Filter to the active
+        // layer for this frame before handing them to the renderer.
+        TArray<FIntVector> SelectedVoxels;
+        GridSelection->GetSelectedVoxelsForRender(SelectedVoxels);
+        SelectedPreviewCells.Reserve(SelectedVoxels.Num() + SelectedCells3D.Num());
 
-    // Selection preview is owned by TileGridOverlayActor:
-    //   surface     = flat marker tiles
-    //   underground = M_WF_MiningGhost cube instances
-    // MiningLayerRenderer should only draw the underground cap/floor and confirmed designations.
-    const bool bUnderground = GetLayerViewSubsystem() && GetLayerViewSubsystem()->GetRelativeLayerOffset() < 0;
+        for (const FIntVector& V : SelectedVoxels)
+        {
+            if (V.Z == ActiveZ)
+            {
+                SelectedPreviewCells.AddUnique(V);
+            }
+        }
+    }
+
+    for (const FIntVector& SelectedCell : SelectedCells3D)
+    {
+        if (SelectedCell.Z == ActiveZ)
+        {
+            SelectedPreviewCells.AddUnique(SelectedCell);
+        }
+    }
+
     UpdateMiningPresentationVisibility(CenterVoxel, ActiveZ, bUnderground);
 
-    const TArray<FIntVector> NoSelectedPreviewCells;
     MiningLayerRenderer->SetLayerState(
         CenterVoxel,
         ActiveZ,
-        NoSelectedPreviewCells,
+        SelectedPreviewCells,
         ConfirmedMineCells);
+
+    const int32 CapTerrain = MiningLayerRenderer->GetLastTerrainInstanceCount();
+    const int32 SelectedGhost = MiningLayerRenderer->GetLastSelectedGhostInstanceCount();
+    const int32 ConfirmedGhost = MiningLayerRenderer->GetLastConfirmedGhostInstanceCount();
+    const int32 OverlaySelected = SelectedPreviewCells.Num();
+    const int32 VolumeGhost = bUnderground ? SelectedPreviewCells.Num() : 0;
+    const bool bRendererReady = MiningLayerRenderer != nullptr;
+    const bool bCutawayActive = bUnderground;
+
+    const bool bProofChanged =
+        !bLastMiningVisualProofLogValid ||
+        LastMiningVisualProofActiveZ != ActiveZ ||
+        LastMiningVisualProofRelative != Relative ||
+        LastMiningVisualProofCapTerrain != CapTerrain ||
+        LastMiningVisualProofSelectedGhost != SelectedGhost ||
+        LastMiningVisualProofConfirmedGhost != ConfirmedGhost ||
+        LastMiningVisualProofOverlaySelected != OverlaySelected ||
+        LastMiningVisualProofVolumeGhost != VolumeGhost ||
+        bLastMiningVisualProofCutaway != bCutawayActive ||
+        bLastMiningVisualProofRenderer != bRendererReady;
+
+    if (bProofChanged)
+    {
+        UE_LOG(LogTemp, Log,
+            TEXT("[CUBE-MINING-VISUAL] RendererUpdate ActiveZ=%d Relative=%d"),
+            ActiveZ,
+            Relative);
+
+        UE_LOG(LogTemp, Log,
+            TEXT("[CUBE-MINING-VISUAL] ActiveZ=%d Relative=%d Cutaway=%s Renderer=%s CapTerrain=%d SelectedGhost=%d ConfirmedGhost=%d OverlaySelected=%d VolumeGhost=%d"),
+            ActiveZ,
+            Relative,
+            bCutawayActive ? TEXT("true") : TEXT("false"),
+            bRendererReady ? TEXT("true") : TEXT("false"),
+            CapTerrain,
+            SelectedGhost,
+            ConfirmedGhost,
+            OverlaySelected,
+            VolumeGhost);
+
+        bLastMiningVisualProofLogValid = true;
+        LastMiningVisualProofActiveZ = ActiveZ;
+        LastMiningVisualProofRelative = Relative;
+        LastMiningVisualProofCapTerrain = CapTerrain;
+        LastMiningVisualProofSelectedGhost = SelectedGhost;
+        LastMiningVisualProofConfirmedGhost = ConfirmedGhost;
+        LastMiningVisualProofOverlaySelected = OverlaySelected;
+        LastMiningVisualProofVolumeGhost = VolumeGhost;
+        bLastMiningVisualProofCutaway = bCutawayActive;
+        bLastMiningVisualProofRenderer = bRendererReady;
+    }
 }
 
 void UBuildModeManager::ClampCameraToMineRegion()
@@ -3864,13 +4190,25 @@ void UBuildModeManager::ClampCameraToMineRegion()
     // tip (camera eye) stays inside or at most in the extended dark-earth floor ring,
     // never in the visible grass terrain beyond radius 25.
     // Z is unconstrained — pitch/zoom govern vertical perspective.
-    const float CellSizeUU = 100.0f;
-    const float HalfBound  = static_cast<float>(MiningLayerRenderer->VisibleRadius / 2 + 1) * CellSizeUU;
+    // Option V: VisibleRadius is in true voxels now; use the live 200uu voxel size so the
+    // camera bound matches the voxel-space diorama (was a stale 100).
+    float CellSizeUU = 200.0f;
+    if (UWorld* CW = GetWorld())
+    {
+        if (const UVoxelWorldManager* VM = CW->GetSubsystem<UVoxelWorldManager>())
+        {
+            const float RVS = VM->GetRenderVoxelSize();
+            if (RVS > KINDA_SMALL_NUMBER) { CellSizeUU = RVS; }
+        }
+    }
+    const float HalfBound = static_cast<float>(MiningLayerRenderer->VisibleRadius / 2 + 1) * CellSizeUU;
 
-    const float AnchorWorldX = (static_cast<float>(MiningLayerAnchorVoxel.X) + 0.5f) * CellSizeUU;
-    const float AnchorWorldY = (static_cast<float>(MiningLayerAnchorVoxel.Y) + 0.5f) * CellSizeUU;
+    const float AnchorWorldX = MiningLayerAnchorWorldXY.X;
+    const float AnchorWorldY = MiningLayerAnchorWorldXY.Y;
 
     FVector Loc = CamPawn->GetActorLocation();
+    const float OriginalX = Loc.X;
+    const float OriginalY = Loc.Y;
     const float ClampedX = FMath::Clamp(Loc.X, AnchorWorldX - HalfBound, AnchorWorldX + HalfBound);
     const float ClampedY = FMath::Clamp(Loc.Y, AnchorWorldY - HalfBound, AnchorWorldY + HalfBound);
 
@@ -3880,6 +4218,15 @@ void UBuildModeManager::ClampCameraToMineRegion()
         Loc.Y = ClampedY;
         CamPawn->SetActorLocation(Loc, false, nullptr, ETeleportType::TeleportPhysics);
     }
+
+    UE_LOG(LogTemp, Warning,
+        TEXT("[MineModeCameraAudit] CameraClamp PawnBefore=(%.1f,%.1f) AnchorWorld=(%.1f,%.1f) PawnAfter=(%.1f,%.1f)"),
+        OriginalX,
+        OriginalY,
+        AnchorWorldX,
+        AnchorWorldY,
+        ClampedX,
+        ClampedY);
 }
 
 void UBuildModeManager::InitializeGridOverlay()
@@ -3914,48 +4261,48 @@ void UBuildModeManager::InitializeGridOverlay()
     // Build / CustomDraw / Prefab — blue + hammer
     {
         FGridOverlayStyle Style;
-        Style.TileColor        = FLinearColor(0.15f, 0.4f, 0.9f, 0.30f);
-        Style.BorderColor      = FLinearColor(0.3f,  0.6f, 1.0f, 0.75f);
-        Style.HoverColor       = FLinearColor(0.5f,  0.7f, 1.0f, 0.55f);
-        Style.DragPreviewColor = FLinearColor(0.4f,  0.5f, 0.9f, 0.20f);
-        Style.IconTexture      = BuildIconTexture;
-        Style.IconScale        = 0.45f;
+        Style.TileColor = FLinearColor(0.15f, 0.4f, 0.9f, 0.30f);
+        Style.BorderColor = FLinearColor(0.3f, 0.6f, 1.0f, 0.75f);
+        Style.HoverColor = FLinearColor(0.5f, 0.7f, 1.0f, 0.55f);
+        Style.DragPreviewColor = FLinearColor(0.4f, 0.5f, 0.9f, 0.20f);
+        Style.IconTexture = BuildIconTexture;
+        Style.IconScale = 0.45f;
         GridOverlay->RegisterModeStyle(EBuildToolMode::Place, Style);
     }
 
     // Farm — green + wheat
     {
         FGridOverlayStyle Style;
-        Style.TileColor        = FLinearColor(0.2f,  0.7f, 0.15f, 0.30f);
-        Style.BorderColor      = FLinearColor(0.3f,  0.85f, 0.2f, 0.75f);
-        Style.HoverColor       = FLinearColor(0.4f,  0.9f,  0.3f, 0.55f);
-        Style.DragPreviewColor = FLinearColor(0.3f,  0.8f,  0.2f, 0.20f);
-        Style.IconTexture      = FarmIconTexture;
-        Style.IconScale        = 0.45f;
+        Style.TileColor = FLinearColor(0.2f, 0.7f, 0.15f, 0.30f);
+        Style.BorderColor = FLinearColor(0.3f, 0.85f, 0.2f, 0.75f);
+        Style.HoverColor = FLinearColor(0.4f, 0.9f, 0.3f, 0.55f);
+        Style.DragPreviewColor = FLinearColor(0.3f, 0.8f, 0.2f, 0.20f);
+        Style.IconTexture = FarmIconTexture;
+        Style.IconScale = 0.45f;
         GridOverlay->RegisterModeStyle(EBuildToolMode::Farm, Style);
     }
 
     // Mine — grey + pickaxe
     {
         FGridOverlayStyle Style;
-        Style.TileColor        = FLinearColor(0.5f,  0.5f, 0.5f, 0.30f);
-        Style.BorderColor      = FLinearColor(0.65f, 0.65f, 0.65f, 0.75f);
-        Style.HoverColor       = FLinearColor(0.8f,  0.8f, 0.7f, 0.55f);
-        Style.DragPreviewColor = FLinearColor(0.6f,  0.6f, 0.5f, 0.20f);
-        Style.IconTexture      = MineIconTexture;
-        Style.IconScale        = 0.40f;
+        Style.TileColor = FLinearColor(0.5f, 0.5f, 0.5f, 0.30f);
+        Style.BorderColor = FLinearColor(0.65f, 0.65f, 0.65f, 0.75f);
+        Style.HoverColor = FLinearColor(0.8f, 0.8f, 0.7f, 0.55f);
+        Style.DragPreviewColor = FLinearColor(0.6f, 0.6f, 0.5f, 0.20f);
+        Style.IconTexture = MineIconTexture;
+        Style.IconScale = 0.40f;
         GridOverlay->RegisterModeStyle(EBuildToolMode::Mine, Style);
     }
 
     // Dig — orange, no icon (dig ghost handles its own visuals)
     {
         FGridOverlayStyle Style;
-        Style.TileColor        = FLinearColor(0.9f, 0.6f, 0.1f, 0.30f);
-        Style.BorderColor      = FLinearColor(1.0f, 0.7f, 0.2f, 0.75f);
-        Style.HoverColor       = FLinearColor(1.0f, 0.8f, 0.3f, 0.55f);
+        Style.TileColor = FLinearColor(0.9f, 0.6f, 0.1f, 0.30f);
+        Style.BorderColor = FLinearColor(1.0f, 0.7f, 0.2f, 0.75f);
+        Style.HoverColor = FLinearColor(1.0f, 0.8f, 0.3f, 0.55f);
         Style.DragPreviewColor = FLinearColor(0.9f, 0.7f, 0.2f, 0.20f);
-        Style.IconTexture      = PrefabIconTexture; // optional, nullptr OK
-        Style.IconScale        = 0.0f;
+        Style.IconTexture = PrefabIconTexture; // optional, nullptr OK
+        Style.IconScale = 0.0f;
         GridOverlay->RegisterModeStyle(EBuildToolMode::Dig, Style);
     }
 
@@ -3984,6 +4331,12 @@ void UBuildModeManager::UpdateGridOverlay()
     // Push hover state.
     if (bHoveredCellValid)
     {
+        UE_LOG(LogTemp, Verbose,
+            TEXT("[MouseGrid] GridOverlay hover → OverlayVoxel=(%d,%d,%d) HoverVoxel=(%d,%d,%d) TerrainZ=%.1f Match=%s"),
+            CurrentOverlayVoxel.X, CurrentOverlayVoxel.Y, CurrentOverlayVoxel.Z,
+            CurrentHoveredVoxel.X, CurrentHoveredVoxel.Y, CurrentHoveredVoxel.Z,
+            CurrentHoveredTerrainZ,
+            (CurrentOverlayVoxel == CurrentHoveredVoxel) ? TEXT("YES") : TEXT("NO"));
         GridOverlay->SetHoveredCell(CurrentOverlayVoxel, CurrentHoveredTerrainZ);
     }
     else
@@ -4026,7 +4379,13 @@ void UBuildModeManager::UpdateMiningPresentationVisibility(const FIntVector& Cen
         return;
     }
 
-    const float CellSize = 100.0f;
+    // Option V: CenterVoxel is true voxel space; use the live 200uu voxel size (was 100).
+    float CellSize = 200.0f;
+    if (const UVoxelWorldManager* VM = World->GetSubsystem<UVoxelWorldManager>())
+    {
+        const float RVS = VM->GetRenderVoxelSize();
+        if (RVS > KINDA_SMALL_NUMBER) { CellSize = RVS; }
+    }
     const float CenterWorldX = (static_cast<float>(CenterVoxel.X) + 0.5f) * CellSize;
     const float CenterWorldY = (static_cast<float>(CenterVoxel.Y) + 0.5f) * CellSize;
     const float ActiveWorldZ = static_cast<float>(ActiveVoxelZ) * CellSize;
@@ -4153,7 +4512,7 @@ void UBuildModeManager::UpdateMiningPresentationVisibility(const FIntVector& Cen
 
         const FVector Loc = CropActor->GetActorLocation();
         const bool bAboveSlice = Loc.Z > (ActiveWorldZ + AboveLayerBufferUU);
-        const bool bOutsideXY  =
+        const bool bOutsideXY =
             FMath::Abs(Loc.X - CenterWorldX) > VisibleRadiusUU ||
             FMath::Abs(Loc.Y - CenterWorldY) > VisibleRadiusUU;
         const bool bShouldHide = bAboveSlice || bOutsideXY;
@@ -4266,6 +4625,11 @@ void UBuildModeManager::SyncSelectionFromGridSelection()
     UVoxelWorldManager* VM = GetVoxelManager();
     TSet<FIntVector> FarmClaimedSelectionVoxels;
     int32 FarmUnclaimedPreviewCount = 0;
+    const int32 ActiveMineZ = (ActiveMiningZ != INDEX_NONE) ? ActiveMiningZ : GetActiveVoxelLayerZ();
+
+    ULayerViewSubsystem* LayerView = GetLayerViewSubsystem();
+    const bool bIsUGMine = (CurrentToolMode == EBuildToolMode::Mine) &&
+        LayerView && LayerView->HasActiveVoxelLayer() && LayerView->GetRelativeLayerOffset() < 0;
 
     for (const FGridSelectionCell& GridCell : GridCells)
     {
@@ -4310,10 +4674,16 @@ void UBuildModeManager::SyncSelectionFromGridSelection()
             }
         }
 
-        if (CurrentToolMode == EBuildToolMode::Mine && GetMiningHeightMode() == EWFMiningHeightMode::TwoVoxelColumn)
+        if (CurrentToolMode == EBuildToolMode::Mine)
         {
-            SelectedCells3D.AddUnique(GridCell.VoxelCoord);
-            SelectedCells3D.AddUnique(FIntVector(GridCell.VoxelCoord.X, GridCell.VoxelCoord.Y, GridCell.VoxelCoord.Z - 1));
+            if (bIsUGMine)
+            {
+                SelectedCells3D.AddUnique(GridCell.VoxelCoord);
+            }
+            else
+            {
+                SelectedCells3D.AddUnique(FIntVector(GridCell.VoxelCoord.X, GridCell.VoxelCoord.Y, ActiveMineZ));
+            }
         }
         else
         {
@@ -4346,22 +4716,41 @@ void UBuildModeManager::SyncSelectionFromGridSelection()
 
     if (CurrentToolMode == EBuildToolMode::Mine)
     {
-        // Visual preview should show the cells the player directly marked.
-        // CommitMineDesignations may expand to a two-voxel column, but previewing
-        // both layers at the surface creates confusing stacked markers.
-        TArray<FIntVector> VisualMineCells;
-        VisualMineCells.Reserve(GridCells.Num());
-        for (const FGridSelectionCell& GridCell : GridCells)
+        if (bIsUGMine)
         {
-            VisualMineCells.AddUnique(GridCell.VoxelCoord);
-        }
+            ActiveMiningZ = LayerView->GetActiveVoxelLayerZ();
+            GridSelection->SetMiningVolumePreviewCells(SelectedCells3D);
 
-        GridSelection->SetMiningVolumePreviewCells(VisualMineCells);
-        UpdateMiningLayerRenderer();
+            const FIntVector FirstGrid = GridCells.Num() > 0 ? GridCells[0].VoxelCoord : FIntVector::ZeroValue;
+            const FIntVector FirstManager = SelectedCells3D.Num() > 0 ? SelectedCells3D[0] : FIntVector::ZeroValue;
+            UE_LOG(LogTemp, Log,
+                TEXT("[CUBE-MINING-V2-UG] SyncPreserveUG GridSelected=%d ManagerSelected=%d LayerActiveZ=%d FirstGrid=(%d,%d,%d) FirstManager=(%d,%d,%d)"),
+                GridCells.Num(),
+                SelectedCells3D.Num(),
+                ActiveMiningZ,
+                FirstGrid.X, FirstGrid.Y, FirstGrid.Z,
+                FirstManager.X, FirstManager.Y, FirstManager.Z);
+        }
+        else
+        {
+            // Surface Mine shows flat tiles; volume cubes are for underground only.
+            GridSelection->ClearMiningVolumePreviewCells();
+            const FIntVector FirstSelected = SelectedCells3D.Num() > 0 ? SelectedCells3D[0] : FIntVector::ZeroValue;
+            UE_LOG(LogTemp, Log,
+                TEXT("[MineSelectionAudit] SyncSelected Count=%d ActiveZ=%d First=(%d,%d,%d)"),
+                SelectedCells3D.Num(),
+                ActiveMineZ,
+                FirstSelected.X, FirstSelected.Y, FirstSelected.Z);
+        }
     }
     else
     {
         GridSelection->ClearMiningVolumePreviewCells();
+    }
+
+    if (CurrentToolMode == EBuildToolMode::Mine)
+    {
+        UpdateMiningLayerRenderer();
     }
 
     UE_LOG(LogTemp, Log,
@@ -4398,6 +4787,11 @@ void UBuildModeManager::ClearTileSelectionState()
     }
 
     OnCellCountChanged.Broadcast(0);
+
+    if (CurrentToolMode == EBuildToolMode::Mine)
+    {
+        UpdateMiningLayerRenderer();
+    }
 }
 
 void UBuildModeManager::AddOrToggleCurrentTileSelection(bool bToggleExisting)
@@ -4467,22 +4861,102 @@ void UBuildModeManager::AddOrToggleCurrentTileSelection(bool bToggleExisting)
 
     UpdateGhost();
     UpdateGridOverlay();
+
+    if (CurrentToolMode == EBuildToolMode::Mine)
+    {
+        UpdateMiningLayerRenderer();
+    }
 }
 
 bool UBuildModeManager::CommitMineDesignations()
 {
+    UE_LOG(LogTemp, Log, TEXT("[CUBE-MINING-01-STEP1I] CommitMineDesignations active."));
+
     if (CurrentToolMode != EBuildToolMode::Mine)
     {
         return false;
     }
 
-    if (SelectedCells3D.Num() == 0 && bHoveredCellValid)
+    UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem();
+    if (!GridSelection)
     {
-        AddOrToggleCurrentTileSelection(false);
+        BroadcastFeedback(TEXT("Grid selection unavailable."));
+        return false;
     }
 
-    if (SelectedCells3D.Num() == 0)
+    TArray<FGridSelectionCell> GridCells;
+
+    // CUBE-MINING-V3-FLOOD: confirm the FULL persistent multi-layer plan, not just the
+    // current active layer's SelectedCells. GetSelectedCells returns only the layer the
+    // player is viewing, which is wiped on every layer change — so committing it created
+    // designations for one layer only (the Z=16 surface cells seen in the logs) and the
+    // painted Z=15/Z=14/Z=13 stack was silently dropped. The persistent plan carries
+    // every committed cell across all layers. Fall back to the active-layer selection
+    // only if the persistent plan is empty (e.g. a pure single-layer surface mine that
+    // never crossed a layer boundary and so never populated the persistent set).
+    GridSelection->GetPersistentMinePlanCells(GridCells);
+    const int32 PersistentPlanCount = GridCells.Num();
+
+    int32 ActiveLayerSelectedCount = 0;
     {
+        TArray<FGridSelectionCell> ActiveLayerCells;
+        GridSelection->GetSelectedCells(ActiveLayerCells);
+        ActiveLayerSelectedCount = ActiveLayerCells.Num();
+
+        if (GridCells.Num() == 0)
+        {
+            GridCells = MoveTemp(ActiveLayerCells);
+        }
+        else
+        {
+            // Merge any current-layer cells the player just painted but that have not yet
+            // been folded into the persistent set. De-duplicated by voxel coordinate.
+            TSet<FIntVector> Seen;
+            Seen.Reserve(GridCells.Num());
+            for (const FGridSelectionCell& C : GridCells)
+            {
+                Seen.Add(C.VoxelCoord);
+            }
+            for (const FGridSelectionCell& C : ActiveLayerCells)
+            {
+                if (!Seen.Contains(C.VoxelCoord))
+                {
+                    GridCells.Add(C);
+                    Seen.Add(C.VoxelCoord);
+                }
+            }
+        }
+    }
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[CUBE-MINING-V3-FLOOD] CommitSource PersistentPlanCells=%d CurrentLayerSelected=%d TotalToCommit=%d"),
+        PersistentPlanCount, ActiveLayerSelectedCount, GridCells.Num());
+
+    {
+        ULayerViewSubsystem* LV_Commit = GetLayerViewSubsystem();
+        const bool bIsUGCommit = LV_Commit && LV_Commit->HasActiveVoxelLayer() && LV_Commit->GetRelativeLayerOffset() < 0;
+        if (bIsUGCommit)
+        {
+            ActiveMiningZ = LV_Commit->GetActiveVoxelLayerZ();
+            const FIntVector FirstSelected = GridCells.Num() > 0 ? GridCells[0].VoxelCoord : FIntVector::ZeroValue;
+            UE_LOG(LogTemp, Log,
+                TEXT("[CUBE-MINING-V2-UG] ConfirmUGZ ActiveZ=%d FirstSelected=(%d,%d,%d)"),
+                ActiveMiningZ,
+                FirstSelected.X, FirstSelected.Y, FirstSelected.Z);
+        }
+    }
+
+    const int32 SettlementID = GetEffectiveSettlementID();
+    UE_LOG(LogTemp, Log,
+        TEXT("[CUBE-MINING-01] CommitMine fired. SelectedCells=%d ActiveMiningZ=%d SettlementID=%d"),
+        GridCells.Num(),
+        ActiveMiningZ,
+        SettlementID);
+
+    if (GridCells.Num() == 0)
+    {
+        UE_LOG(LogTemp, Log,
+            TEXT("[CUBE-MINING-01] CommitMine done. Created=0 SkippedDuplicate=0 SkippedUnclaimed=0 SkippedInvalid=0"));
         BroadcastFeedback(TEXT("No mine tiles selected."));
         return false;
     }
@@ -4490,98 +4964,233 @@ bool UBuildModeManager::CommitMineDesignations()
     UMiningSubsystem* MiningSub = GetMiningSubsystem();
     if (!MiningSub)
     {
+        UE_LOG(LogTemp, Log,
+            TEXT("[CUBE-MINING-01] CommitMine done. Created=0 SkippedDuplicate=0 SkippedUnclaimed=0 SkippedInvalid=%d"),
+            GridCells.Num());
         BroadcastFeedback(TEXT("Mining system unavailable."));
         return false;
     }
 
-    TSet<FIntVector> RequestedMineVoxels;
-    RequestedMineVoxels.Reserve(SelectedCells3D.Num() * 2);
-
-    for (const FIntVector& MineVoxel : SelectedCells3D)
+    if (SettlementID == INDEX_NONE)
     {
-        RequestedMineVoxels.Add(MineVoxel);
-
-        if (GetMiningHeightMode() == EWFMiningHeightMode::TwoVoxelColumn)
-        {
-            RequestedMineVoxels.Add(FIntVector(MineVoxel.X, MineVoxel.Y, MineVoxel.Z - 1));
-        }
-    }
-
-    TSet<FIntVector> ClaimedMineVoxels;
-    ClaimedMineVoxels.Reserve(RequestedMineVoxels.Num());
-
-    int32 SkippedUnclaimedCount = 0;
-    for (const FIntVector& MineVoxel : RequestedMineVoxels)
-    {
-        if (IsMineVoxelInsidePlayerClaim(MineVoxel))
-        {
-            ClaimedMineVoxels.Add(MineVoxel);
-            continue;
-        }
-
-        ++SkippedUnclaimedCount;
-        UE_LOG(LogTemp, Warning,
-            TEXT("[BuildMode] Mine designation skipped: unclaimed land. Voxel=(%d,%d,%d)"),
-            MineVoxel.X,
-            MineVoxel.Y,
-            MineVoxel.Z);
-    }
-
-    if (ClaimedMineVoxels.Num() == 0)
-    {
-        UE_LOG(LogTemp, Warning,
-            TEXT("[BuildMode] Mine designation blocked: no selected cells inside claimed land."));
-        BroadcastFeedback(TEXT("Cannot mine here. This land is not claimed by your colony."));
+        UE_LOG(LogTemp, Log,
+            TEXT("[CUBE-MINING-01] CommitMine done. Created=0 SkippedDuplicate=0 SkippedUnclaimed=0 SkippedInvalid=%d"),
+            GridCells.Num());
+        BroadcastFeedback(TEXT("Cannot mine yet. Player settlement is unavailable."));
         return false;
     }
 
-    if (SkippedUnclaimedCount > 0)
+    UVoxelWorldManager* VM = GetVoxelManager();
+    UWorldMapSubsystem* WorldMap = GetWorld() ? GetWorld()->GetSubsystem<UWorldMapSubsystem>() : nullptr;
+
+    TArray<FMiningDesignation> ExistingDesignations;
+    MiningSub->GetAllDesignations(SettlementID, ExistingDesignations);
+
+    TSet<FIntVector> ExistingMineVoxels;
+    ExistingMineVoxels.Reserve(ExistingDesignations.Num());
+    for (const FMiningDesignation& Designation : ExistingDesignations)
     {
-        if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
+        if (Designation.State == EMiningDesignationState::Cancelled ||
+            Designation.State == EMiningDesignationState::Failed)
         {
-            GridSelection->RetainSelectedCells(ClaimedMineVoxels);
+            continue;
         }
+
+        ExistingMineVoxels.Add(Designation.GridPosition);
+        ExistingMineVoxels.Add(Designation.OriginalGridPosition);
     }
 
+    TSet<FIntVector> SeenTargets;
+    TMap<FIntVector, float> CreatedOverlayCells;
+    TSet<int32> CreatedLayers;
     int32 CreatedCount = 0;
-    for (const FIntVector& MineVoxel : ClaimedMineVoxels)
+    int32 SkippedDuplicateCount = 0;
+    int32 SkippedUnclaimedCount = 0;
+    int32 SkippedInvalidCount = 0;
+    const int32 Step = 0;
+
+    for (const FGridSelectionCell& Cell : GridCells)
     {
+        // CUBE-MINING-V2-CONFIRM-GRID-TARGET:
+        // GridSelection now stores the exact voxel/grid cell the player painted.
+        // Do NOT convert X/Y back into strategic terrain-tile coordinates for the
+        // final mining target. Terrain tiles are larger than voxel cells, so that
+        // collapse caused multi-cell mine selections to become one duplicate target.
+        const FIntVector TargetVoxel = Cell.VoxelCoord;
+
+        FVector CellWorldPos = FVector::ZeroVector;
+        FIntPoint TerrainTile(INDEX_NONE, INDEX_NONE);
+        bool bHasTerrainTile = false;
+
+        if (VM)
+        {
+            CellWorldPos = VM->GridToWorld(FIntPoint(TargetVoxel.X, TargetVoxel.Y), TargetVoxel.Z);
+        }
+
+        if (WorldMap)
+        {
+            int32 TerrainTileX = INDEX_NONE;
+            int32 TerrainTileY = INDEX_NONE;
+            if (WorldMap->WorldPositionToTileXY(CellWorldPos, TerrainTileX, TerrainTileY))
+            {
+                TerrainTile = FIntPoint(TerrainTileX, TerrainTileY);
+                bHasTerrainTile = true;
+            }
+        }
+
+        int32 SurfaceZForLog = INDEX_NONE;
+        if (VM)
+        {
+            VM->TryGetTerrainSurfaceVoxelZ(FIntPoint(TargetVoxel.X, TargetVoxel.Y), SurfaceZForLog);
+        }
+
+        UE_LOG(LogTemp, Log,
+            TEXT("[CUBE-MINING-V2] MineConfirmGridTarget VisualGrid=(%d,%d,%d) World=(%.1f,%.1f,%.1f) TerrainTile=(%d,%d) HasTerrainTile=%s SurfaceZForLog=%d FinalVoxel=(%d,%d,%d)"),
+            Cell.VoxelCoord.X, Cell.VoxelCoord.Y, Cell.VoxelCoord.Z,
+            CellWorldPos.X, CellWorldPos.Y, CellWorldPos.Z,
+            TerrainTile.X, TerrainTile.Y,
+            bHasTerrainTile ? TEXT("true") : TEXT("false"),
+            SurfaceZForLog,
+            TargetVoxel.X, TargetVoxel.Y, TargetVoxel.Z);
+
+        if (SeenTargets.Contains(TargetVoxel) || ExistingMineVoxels.Contains(TargetVoxel))
+        {
+            ++SkippedDuplicateCount;
+            UE_LOG(LogTemp, Verbose,
+                TEXT("[CUBE-MINING-V2] MineConfirmGridTarget skipped duplicate. FinalVoxel=(%d,%d,%d)"),
+                TargetVoxel.X, TargetVoxel.Y, TargetVoxel.Z);
+            continue;
+        }
+        SeenTargets.Add(TargetVoxel);
+
+        // CUBE-MINING-V2-CLAIM-TILE:
+        // Do not pre-check settlement claim here using TargetVoxel.X/Y.
+        // Surface Mine targets are voxel/grid cells, while settlement ownership is
+        // validated against the resolved world-map tile inside MiningSubsystem.
+        // Keeping the old pre-check here would reject valid CubePrototype selections
+        // before CreateMiningDesignation can perform the correct tile-space claim check.
+
         int32 OutDesignationID = INDEX_NONE;
-        const bool bCreated = MiningSub->CreateMiningDesignation(
-            GetEffectiveSettlementID(),
-            MineVoxel,
-            0,
-            OutDesignationID);
+        EMineDesignationResult CreateResult = EMineDesignationResult::CreateFailed;
+        const bool bCreated = MiningSub->CreateMiningDesignationEx(
+            SettlementID,
+            TargetVoxel,
+            Step,
+            OutDesignationID,
+            CreateResult);
 
         if (bCreated && OutDesignationID != INDEX_NONE)
         {
             ++CreatedCount;
+            CreatedOverlayCells.Add(TargetVoxel, Cell.TerrainZ);
+            CreatedLayers.Add(TargetVoxel.Z);
+            UE_LOG(LogTemp, Log,
+                TEXT("[CUBE-MINING-01] Designation created. Voxel=(%d,%d,%d) DesignationID=%d"),
+                TargetVoxel.X,
+                TargetVoxel.Y,
+                TargetVoxel.Z,
+                OutDesignationID);
+        }
+        else
+        {
+            // CUBE-MINING-V3-CLAIM: bucket the failure by its real reason instead of
+            // counting every failure as "invalid" (which previously hid unclaimed-land
+            // rejections).
+            switch (CreateResult)
+            {
+            case EMineDesignationResult::Unclaimed:
+                ++SkippedUnclaimedCount;
+                break;
+            case EMineDesignationResult::Duplicate:
+                ++SkippedDuplicateCount;
+                break;
+            case EMineDesignationResult::InvalidTarget:
+            case EMineDesignationResult::CreateFailed:
+            default:
+                ++SkippedInvalidCount;
+                break;
+            }
+
+            UE_LOG(LogTemp, Warning,
+                TEXT("[CUBE-MINING-V2] MineConfirmGridTarget create failed. FinalVoxel=(%d,%d,%d) Reason=%d"),
+                TargetVoxel.X,
+                TargetVoxel.Y,
+                TargetVoxel.Z,
+                static_cast<int32>(CreateResult));
         }
     }
 
     UE_LOG(LogTemp, Log,
-        TEXT("[BuildMode] Mine designations committed. Created=%d Requested=%d Claimed=%d SkippedUnclaimed=%d Settlement=%d"),
+        TEXT("[CUBE-MINING-01] CommitMine done. Created=%d SkippedDuplicate=%d SkippedUnclaimed=%d SkippedInvalid=%d"),
         CreatedCount,
-        RequestedMineVoxels.Num(),
-        ClaimedMineVoxels.Num(),
+        SkippedDuplicateCount,
         SkippedUnclaimedCount,
-        GetEffectiveSettlementID());
+        SkippedInvalidCount);
 
-    if (SkippedUnclaimedCount > 0)
+    // CUBE-MINING-V3-FLOOD: single proof line separating the three concepts so a log
+    // reader can confirm the FULL plan committed, not just the active layer.
+    UE_LOG(LogTemp, Log,
+        TEXT("[CUBE-MINING-V3-FLOOD] ConfirmMinePlan CurrentLayerSelected=%d PersistentPlanCells=%d Created=%d SkippedDuplicate=%d SkippedUnclaimed=%d SkippedInvalid=%d"),
+        ActiveLayerSelectedCount,
+        PersistentPlanCount,
+        CreatedCount,
+        SkippedDuplicateCount,
+        SkippedUnclaimedCount,
+        SkippedInvalidCount);
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[BuildMode] Mine designations committed. Created=%d Selected=%d SkippedDuplicate=%d SkippedUnclaimed=%d SkippedInvalid=%d Settlement=%d"),
+        CreatedCount,
+        GridCells.Num(),
+        SkippedDuplicateCount,
+        SkippedUnclaimedCount,
+        SkippedInvalidCount,
+        SettlementID);
+
+    if (CreatedCount <= 0)
     {
-        BroadcastFeedback(FString::Printf(
-            TEXT("Mining designated: %d voxel(s). Skipped %d unclaimed voxel(s)."),
-            CreatedCount,
-            SkippedUnclaimedCount));
-    }
-    else
-    {
-        BroadcastFeedback(FString::Printf(
-            TEXT("Mining designated: %d voxel(s)."),
-            CreatedCount));
+        BroadcastFeedback(TEXT("No mining designations created."));
+        return false;
     }
 
-    return CreatedCount > 0;
+    if (GridOverlay && CreatedOverlayCells.Num() > 0)
+    {
+        GridOverlay->SetConfirmedDesignationCells(EGridDesignationType::Mine, CreatedOverlayCells);
+        UE_LOG(LogTemp, Log,
+            TEXT("[CUBE-MINING-01] Overlay confirmed. ConfirmedCells=%d"),
+            CreatedOverlayCells.Num());
+    }
+
+    if (GridSelection)
+    {
+        GridSelection->ClearSelectedCells();
+        GridSelection->ClearPreviewCells();
+        GridSelection->ClearMiningVolumePreviewCells();
+        // CUBE-MINING-V3-FLOOD: the whole multi-layer plan is now backend designations,
+        // so retire the planning anchors. Without this the next mine session would
+        // inherit every cell from this one as a phantom anchor.
+        GridSelection->ClearMinePlan();
+    }
+
+    const int32 DistinctLayerCount = CreatedLayers.Num();
+
+    SelectedCells.Empty();
+    SelectedCells3D.Empty();
+    FarmPaintedWorldCells.Empty();
+
+    if (UPlayerBuildContext* Ctx = GetBuildContext())
+    {
+        Ctx->ClearSelection();
+    }
+
+    BroadcastFeedback(FString::Printf(
+        TEXT("Mining designated: %d voxel(s) across %d layer(s)."),
+        CreatedCount,
+        DistinctLayerCount));
+
+    UpdateMiningLayerRenderer();
+
+    return true;
 }
 
 void UBuildModeManager::BroadcastSelectionChanged()

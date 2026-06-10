@@ -146,7 +146,56 @@ void AWorldForgeColonist::ApplyVisualDefinition(const FWorldForgeColonistVisualR
             FVector(VisualDefinition.DebugColor.R, VisualDefinition.DebugColor.G, VisualDefinition.DebugColor.B));
     }
 
-    ApplyVisualForCurrentAgentState();
+    const bool bAppliedVisualAsset = ApplyVisualForCurrentAgentState();
+
+    FIntPoint ExpectedWorldCell = CurrentGridCell;
+    if (const UWorld* World = GetWorld())
+    {
+        if (const USettlementManager* SettlementManager = World->GetSubsystem<USettlementManager>())
+        {
+            if (const FSettlementState* Settlement = SettlementManager->GetSettlement(SettlementID))
+            {
+                ExpectedWorldCell = Settlement->WorldOrigin + CurrentGridCell;
+            }
+        }
+    }
+
+    const UPaperFlipbook* CurrentFlipbook = VisualFlipbook ? VisualFlipbook->GetFlipbook() : nullptr;
+    const FVector SpriteRelLoc = SpriteVisual ? SpriteVisual->GetRelativeLocation() : FVector::ZeroVector;
+    const FVector SpriteRelScale = SpriteVisual ? SpriteVisual->GetRelativeScale3D() : FVector::ZeroVector;
+    const FVector FlipbookWorldLoc = VisualFlipbook ? VisualFlipbook->GetComponentLocation() : FVector::ZeroVector;
+    const FVector BoundsOrigin = VisualFlipbook ? VisualFlipbook->Bounds.Origin : FVector::ZeroVector;
+    const FVector BoundsExtent = VisualFlipbook ? VisualFlipbook->Bounds.BoxExtent : FVector::ZeroVector;
+
+    UE_LOG(
+        LogTemp,
+        Log,
+        TEXT("[ColonistVisibilityAudit] AgentID=%d SettlementID=%d Actor=%s Hidden=%s ActorLoc=%s ActorScale=%s TerrainZOffset=%.1f FlipbookVisible=%s FlipbookHidden=%s Flipbook=%s DebugMeshVisible=%s DebugMeshHidden=%s SpriteRelLoc=%s SpriteRelScale=%s FlipbookWorldLoc=%s BoundsOrigin=%s BoundsExtent=%s VisualRow='%s' Race=%s CurrentGridPos=(%d,%d) ExpectedWorldCell=(%d,%d) ResolvedLocation=%s ApplyVisualAsset=%s"),
+        AgentID,
+        SettlementID,
+        *GetNameSafe(this),
+        IsHidden() ? TEXT("true") : TEXT("false"),
+        *GetActorLocation().ToString(),
+        *GetActorScale3D().ToString(),
+        TerrainZOffset,
+        (VisualFlipbook && VisualFlipbook->IsVisible()) ? TEXT("true") : TEXT("false"),
+        (!VisualFlipbook || VisualFlipbook->bHiddenInGame) ? TEXT("true") : TEXT("false"),
+        *GetNameSafe(CurrentFlipbook),
+        (DebugMesh && DebugMesh->IsVisible()) ? TEXT("true") : TEXT("false"),
+        (!DebugMesh || DebugMesh->bHiddenInGame) ? TEXT("true") : TEXT("false"),
+        *SpriteRelLoc.ToString(),
+        *SpriteRelScale.ToString(),
+        *FlipbookWorldLoc.ToString(),
+        *BoundsOrigin.ToString(),
+        *BoundsExtent.ToString(),
+        *ActiveVisualDefinition.DisplayName.ToString(),
+        bHasLastAgentData ? *LastAgentData.RaceTag.ToString() : TEXT("<unknown>"),
+        CurrentGridCell.X,
+        CurrentGridCell.Y,
+        ExpectedWorldCell.X,
+        ExpectedWorldCell.Y,
+        *TargetWorldPos.ToString(),
+        bAppliedVisualAsset ? TEXT("true") : TEXT("false"));
 }
 
 void AWorldForgeColonist::SetSpriteVisualComponent(USpriteCharacterComponent* InSpriteVisual)
@@ -206,6 +255,32 @@ FVector AWorldForgeColonist::ResolveWorldLocationFromAgentData(const FAgentData&
                 }
 
                 return BaseWorldLocation + FVector(0.f, 0.f, TerrainZOffset);
+            }
+
+            FVector DirectCellSnapLocation = BaseWorldLocation;
+            FIntPoint DirectResolvedCell = RequestedWorldCell;
+            if (VoxelWorldManager->TryGetNearestSpawnLocationForTerrainCell(
+                RequestedWorldCell,
+                DirectCellSnapLocation,
+                DirectResolvedCell,
+                8,
+                TerrainZOffset))
+            {
+                UE_LOG(
+                    LogTemp,
+                    Log,
+                    TEXT("[CubeTerrainSnap] Colonist cell snap succeeded for AgentID=%d LocalCell=(%d,%d) WorldCell=(%d,%d) ResolvedCell=(%d,%d) Location=%s"),
+                    Data.AgentID,
+                    Data.CurrentGridPos.X,
+                    Data.CurrentGridPos.Y,
+                    RequestedWorldCell.X,
+                    RequestedWorldCell.Y,
+                    DirectResolvedCell.X,
+                    DirectResolvedCell.Y,
+                    *DirectCellSnapLocation.ToString()
+                );
+
+                return DirectCellSnapLocation;
             }
 
             FVector SnappedLocation = BaseWorldLocation;

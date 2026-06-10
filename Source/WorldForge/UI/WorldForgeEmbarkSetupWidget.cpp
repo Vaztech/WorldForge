@@ -2,6 +2,7 @@
 
 #include "UI/WorldForgeEmbarkationManager.h"
 #include "UI/WorldForgeEmbarkLoadoutWidget.h"
+#include "Visual/ColonistVisualManager.h"
 
 #include "Blueprint/UserWidget.h"
 #include "Blueprint/WidgetTree.h"
@@ -18,9 +19,13 @@
 #include "Components/VerticalBoxSlot.h"
 #include "Components/Widget.h"
 #include "Engine/GameInstance.h"
+#include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 #include "HAL/PlatformTime.h"
 #include "Kismet/GameplayStatics.h"
+#include "PaperFlipbook.h"
+#include "PaperSprite.h"
+#include "Styling/SlateBrush.h"
 #include "Styling/SlateTypes.h"
 #include "UObject/UnrealType.h"
 
@@ -241,6 +246,36 @@ FString RaceDataAssetPathForTag(FGameplayTag RaceTag)
 		return TEXT("/Game/WorldForge/Races/DA_Race_HighElf.DA_Race_HighElf");
 	}
 
+	if (RaceLeaf.Equals(RaceConstructFolk, ESearchCase::IgnoreCase))
+	{
+		return TEXT("/Game/WorldForge/Races/DA_Race_ConstructFolk.DA_Race_ConstructFolk");
+	}
+
+	if (RaceLeaf.Equals(RaceNamekian, ESearchCase::IgnoreCase))
+	{
+		return TEXT("/Game/WorldForge/Races/DA_Race_Namekian.DA_Race_Namekian");
+	}
+
+	if (RaceLeaf.Equals(RaceFaeKin, ESearchCase::IgnoreCase))
+	{
+		return TEXT("/Game/WorldForge/Races/DA_Race_FaeKin.DA_Race_FaeKin");
+	}
+
+	if (RaceLeaf.Equals(RaceTidecaller, ESearchCase::IgnoreCase))
+	{
+		return TEXT("/Game/WorldForge/Races/DA_Race_Tidecaller.DA_Race_Tidecaller");
+	}
+
+	if (RaceLeaf.Equals(RaceOni, ESearchCase::IgnoreCase))
+	{
+		return TEXT("/Game/WorldForge/Races/DA_Race_Oni.DA_Race_Oni");
+	}
+
+	if (RaceLeaf.Equals(RaceDarkElf, ESearchCase::IgnoreCase))
+	{
+		return TEXT("/Game/WorldForge/Races/DA_Race_DarkElf.DA_Race_DarkElf");
+	}
+
 	return FString();
 }
 
@@ -391,6 +426,28 @@ UObject* LoadRaceDataAsset(FGameplayTag RaceTag)
 {
 	const FString AssetPath = RaceDataAssetPathForTag(RaceTag);
 	return AssetPath.IsEmpty() ? nullptr : StaticLoadObject(UObject::StaticClass(), nullptr, *AssetPath);
+}
+
+bool ResolveRaceIdleVisualDefinition(const UWorld* World, FGameplayTag RaceTag, FWorldForgeColonistVisualRow& OutDefinition)
+{
+	if (!World || !RaceTag.IsValid())
+	{
+		return false;
+	}
+
+	const UColonistVisualManager* VisualManager = World->GetSubsystem<UColonistVisualManager>();
+	return VisualManager && VisualManager->GetVisualDefinitionForRace(RaceTag, NAME_None, OutDefinition);
+}
+
+FString ResolveRaceIdleVisualAssetPath(const UWorld* World, FGameplayTag RaceTag)
+{
+	FWorldForgeColonistVisualRow VisualDefinition;
+	if (ResolveRaceIdleVisualDefinition(World, RaceTag, VisualDefinition) && !VisualDefinition.IdleVisualAsset.IsNull())
+	{
+		return VisualDefinition.IdleVisualAsset.ToSoftObjectPath().ToString();
+	}
+
+	return IdlePreviewAssetPathForTag(RaceTag);
 }
 
 double ReadNumericProperty(const UObject* Object, const FName PropertyName, const double DefaultValue = 1.0)
@@ -560,6 +617,86 @@ FString BuildTraitsText(const UObject* RaceData)
 
 	return Lines.Num() > 0 ? FString::Join(Lines, TEXT("\n")) : TEXT("Traits pending.");
 }
+
+FString BuildColonistSkillsText(const FWorldForgeEmbarkColonist& Colonist)
+{
+	if (Colonist.Skills.Num() == 0)
+	{
+		return TEXT("None");
+	}
+
+	TArray<FName> SkillNames;
+	Colonist.Skills.GetKeys(SkillNames);
+	SkillNames.Sort([](const FName& Left, const FName& Right)
+	{
+		return Left.ToString() < Right.ToString();
+	});
+
+	TArray<FString> Lines;
+	Lines.Reserve(SkillNames.Num());
+	for (const FName& SkillName : SkillNames)
+	{
+		const int32* SkillValue = Colonist.Skills.Find(SkillName);
+		Lines.Add(FString::Printf(TEXT("%s: %d"), *SkillName.ToString(), SkillValue ? *SkillValue : 0));
+	}
+
+	return FString::Join(Lines, TEXT("\n"));
+}
+
+FString BuildColonistTraitsText(const FWorldForgeEmbarkColonist& Colonist)
+{
+	if (Colonist.Traits.Num() == 0)
+	{
+		return TEXT("None");
+	}
+
+	TArray<FString> Traits = Colonist.Traits;
+	Traits.Sort();
+	return FString::Join(Traits, TEXT(", "));
+}
+
+FString ColonistRaceDisplayString(FGameplayTag RaceTag)
+{
+	return RaceTag.IsValid()
+		? RaceDisplayNameFromTag(RaceTag).ToString()
+		: FString(TEXT("Unknown"));
+}
+
+void SetTextBlockString(UTextBlock* TextBlock, const FString& Text)
+{
+	if (TextBlock)
+	{
+		TextBlock->SetText(FText::FromString(Text));
+	}
+}
+
+void SetButtonLabelText(UButton* Button, UTextBlock* BoundTextBlock, const FText& Label)
+{
+	UTextBlock* LabelText = BoundTextBlock;
+	if (!LabelText && Button)
+	{
+		LabelText = Cast<UTextBlock>(Button->GetContent());
+	}
+
+	if (LabelText)
+	{
+		LabelText->SetText(Label);
+	}
+}
+}
+
+void UWorldForgeEmbarkColonistRowClickProxy::Initialize(UWorldForgeEmbarkSetupWidget* InOwnerWidget, const int32 InColonistIndex)
+{
+	OwnerWidget = InOwnerWidget;
+	ColonistIndex = InColonistIndex;
+}
+
+void UWorldForgeEmbarkColonistRowClickProxy::HandleClicked()
+{
+	if (UWorldForgeEmbarkSetupWidget* Widget = OwnerWidget.Get())
+	{
+		Widget->SelectStartingColonist(ColonistIndex);
+	}
 }
 
 void UWorldForgeEmbarkSetupWidget::NativeOnInitialized()
@@ -578,6 +715,10 @@ void UWorldForgeEmbarkSetupWidget::NativeConstruct()
 	ApplyStableTabLayout();
 	NormalizeInitialSeedDisplay();
 	BindControls();
+	if (BTN_RerollSelectedColonist)
+	{
+		BTN_RerollSelectedColonist->SetIsEnabled(false);
+	}
 	SetActiveEmbarkTab(EEmbarkSetupTab::World);
 	DisableLegacyNextButton();
 	InitializeRaceDisplay();
@@ -702,6 +843,31 @@ void UWorldForgeEmbarkSetupWidget::BindControls()
 		BTN_Race_DarkElf->OnClicked.RemoveDynamic(this, &UWorldForgeEmbarkSetupWidget::HandleRaceDarkElfClicked);
 		BTN_Race_DarkElf->OnClicked.AddDynamic(this, &UWorldForgeEmbarkSetupWidget::HandleRaceDarkElfClicked);
 	}
+
+	if (BTN_ColonistPlaceholder_01)
+	{
+		BTN_ColonistPlaceholder_01->OnClicked.RemoveDynamic(this, &UWorldForgeEmbarkSetupWidget::HandleColonist01Clicked);
+		BTN_ColonistPlaceholder_01->OnClicked.AddDynamic(this, &UWorldForgeEmbarkSetupWidget::HandleColonist01Clicked);
+	}
+
+	if (BTN_ColonistPlaceholder_02)
+	{
+		BTN_ColonistPlaceholder_02->OnClicked.RemoveDynamic(this, &UWorldForgeEmbarkSetupWidget::HandleColonist02Clicked);
+		BTN_ColonistPlaceholder_02->OnClicked.AddDynamic(this, &UWorldForgeEmbarkSetupWidget::HandleColonist02Clicked);
+	}
+
+	if (BTN_ColonistPlaceholder_03)
+	{
+		BTN_ColonistPlaceholder_03->OnClicked.RemoveDynamic(this, &UWorldForgeEmbarkSetupWidget::HandleColonist03Clicked);
+		BTN_ColonistPlaceholder_03->OnClicked.AddDynamic(this, &UWorldForgeEmbarkSetupWidget::HandleColonist03Clicked);
+	}
+
+	if (BTN_RerollSelectedColonist)
+	{
+		BTN_RerollSelectedColonist->OnClicked.RemoveDynamic(this, &UWorldForgeEmbarkSetupWidget::HandleRerollSelectedColonistClicked);
+		BTN_RerollSelectedColonist->OnClicked.AddDynamic(this, &UWorldForgeEmbarkSetupWidget::HandleRerollSelectedColonistClicked);
+		BTN_RerollSelectedColonist->SetIsEnabled(false);
+	}
 }
 
 void UWorldForgeEmbarkSetupWidget::LogBindingStatus() const
@@ -716,6 +882,13 @@ void UWorldForgeEmbarkSetupWidget::LogBindingStatus() const
 	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] PNL_TabWorld=%s"), BindingStatus(PNL_TabWorld));
 	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] PNL_TabColony=%s"), BindingStatus(PNL_TabColony));
 	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] PNL_TabColonists=%s"), BindingStatus(PNL_TabColonists));
+	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] PNL_StartingColonists=%s"), BindingStatus(PNL_StartingColonists));
+	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] PNL_ColonistList=%s"), BindingStatus(PNL_ColonistList));
+	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] VB_ColonistList=%s"), BindingStatus(VB_ColonistList));
+	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] BTN_ColonistPlaceholder_01=%s"), BindingStatus(BTN_ColonistPlaceholder_01));
+	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] BTN_ColonistPlaceholder_02=%s"), BindingStatus(BTN_ColonistPlaceholder_02));
+	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] BTN_ColonistPlaceholder_03=%s"), BindingStatus(BTN_ColonistPlaceholder_03));
+	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] BTN_RerollSelectedColonist=%s"), BindingStatus(BTN_RerollSelectedColonist));
 	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] PNL_RaceDetails=%s"), BindingStatus(PNL_RaceDetails));
 	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] BTN_MixedColony=%s"), BindingStatus(BTN_MixedColony));
 	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] BTN_SingleRaceColony=%s"), BindingStatus(BTN_SingleRaceColony));
@@ -743,6 +916,23 @@ void UWorldForgeEmbarkSetupWidget::ApplyInputAndLayoutStyle()
 	if (WorldSizeDropdown)
 	{
 		SetSlateColorProperty(WorldSizeDropdown, TEXT("ForegroundColor"), FSlateColor(FLinearColor(0.015f, 0.018f, 0.022f, 1.0f)));
+
+		if (WorldSizeDropdown->GetOptionCount() == 0)
+		{
+			WorldSizeDropdown->AddOption(TEXT("Small"));
+			WorldSizeDropdown->AddOption(TEXT("Medium"));
+			WorldSizeDropdown->AddOption(TEXT("Large"));
+			WorldSizeDropdown->AddOption(TEXT("OMG"));
+		}
+
+		SetNumericProperty(WorldSizeDropdown, TEXT("MinDesiredWidth"), static_cast<double>(EmbarkInputWidth));
+
+		if (WorldSizeDropdown->GetSelectedOption().IsEmpty())
+		{
+			WorldSizeDropdown->SetSelectedOption(TEXT("Medium"));
+			ApplyWorldSizeSelection(TEXT("Medium"));
+		}
+
 		WorldSizeDropdown->SynchronizeProperties();
 	}
 }
@@ -846,6 +1036,9 @@ void UWorldForgeEmbarkSetupWidget::ApplyStableTabLayout()
 	ApplyTextWrap(TXT_RaceWeaknesses, RaceDetailsWrapWidth);
 	ApplyTextWrap(TXT_RaceTraits, RaceDetailsWrapWidth);
 	ApplyTextWrap(TXT_RacePreviewStatus, RacePreviewStatusWrapWidth, true);
+	ApplyTextWrap(TXT_ColonistBackstory, RaceDetailsWrapWidth);
+	ApplyTextWrap(TXT_ColonistSkills, RaceDetailsWrapWidth);
+	ApplyTextWrap(TXT_ColonistTraits, RaceDetailsWrapWidth);
 }
 
 void UWorldForgeEmbarkSetupWidget::NormalizeInitialSeedDisplay()
@@ -995,6 +1188,11 @@ void UWorldForgeEmbarkSetupWidget::SetActiveEmbarkTab(const EEmbarkSetupTab Acti
 	}
 
 	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetupWidget] Tab changed: %s"), ActiveTabName);
+
+	if (bColonistsActive)
+	{
+		OpenColonistsTab();
+	}
 }
 
 void UWorldForgeEmbarkSetupWidget::InitializeRaceDisplay()
@@ -1043,6 +1241,221 @@ void UWorldForgeEmbarkSetupWidget::ConfigureRaceButton(UButton* Button, const FT
 		LabelText->SetText(Label);
 		LabelText->SetColorAndOpacity(FSlateColor(FLinearColor(0.98f, 0.99f, 1.0f, 1.0f)));
 	}
+}
+
+void UWorldForgeEmbarkSetupWidget::OpenColonistsTab()
+{
+	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetupWidget] Colonists tab opened."));
+
+	UWorldForgeEmbarkationManager* Manager = GetEmbarkationManager();
+	TArray<FWorldForgeEmbarkColonist> Colonists;
+	if (Manager)
+	{
+		Manager->EnsureStartingColonistsGenerated();
+		Colonists = Manager->GetStartingColonists();
+
+		if (Colonists.Num() == 0)
+		{
+			Manager->GenerateStartingColonists();
+			Colonists = Manager->GetStartingColonists();
+		}
+	}
+
+	const int32 ColonistCount = Colonists.Num();
+
+	RebuildColonistList(Colonists);
+	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetupWidget] Displayed starting colonists. Count=%d"), ColonistCount);
+
+	if (ColonistCount <= 0)
+	{
+		SelectedColonistIndex = INDEX_NONE;
+		RefreshSelectedColonistDetails();
+		return;
+	}
+
+	if (!Colonists.IsValidIndex(SelectedColonistIndex))
+	{
+		SelectStartingColonist(0);
+		return;
+	}
+
+	RefreshSelectedColonistDetails();
+}
+
+UPanelWidget* UWorldForgeEmbarkSetupWidget::GetColonistListPanel() const
+{
+	if (PNL_ColonistList)
+	{
+		return PNL_ColonistList;
+	}
+
+	if (VB_ColonistList)
+	{
+		return VB_ColonistList;
+	}
+
+	if (!WidgetTree)
+	{
+		return nullptr;
+	}
+
+	if (UPanelWidget* Panel = Cast<UPanelWidget>(WidgetTree->FindWidget(TEXT("PNL_ColonistList"))))
+	{
+		return Panel;
+	}
+
+	return Cast<UPanelWidget>(WidgetTree->FindWidget(TEXT("VB_ColonistList")));
+}
+
+void UWorldForgeEmbarkSetupWidget::RebuildColonistList(const TArray<FWorldForgeEmbarkColonist>& Colonists)
+{
+	UPanelWidget* ColonistListPanel = GetColonistListPanel();
+	if (!ColonistListPanel)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[EmbarkSetupWidget] Colonist list panel is not available."));
+		return;
+	}
+
+	ColonistRowClickProxies.Reset();
+	ColonistListPanel->ClearChildren();
+
+	if (TXT_ColonistListHeader)
+	{
+		TXT_ColonistListHeader->SetText(FText::FromString(TEXT("Starting Colonists")));
+		ColonistListPanel->AddChild(TXT_ColonistListHeader);
+
+		if (UVerticalBoxSlot* HeaderSlot = Cast<UVerticalBoxSlot>(TXT_ColonistListHeader->Slot))
+		{
+			HeaderSlot->SetPadding(FMargin(0.0f, 0.0f, 0.0f, 8.0f));
+			HeaderSlot->SetHorizontalAlignment(HAlign_Left);
+		}
+	}
+
+	for (int32 ColonistIndex = 0; ColonistIndex < Colonists.Num(); ++ColonistIndex)
+	{
+		if (UButton* RowButton = CreateColonistRowButton(ColonistIndex, Colonists[ColonistIndex]))
+		{
+			ColonistListPanel->AddChild(RowButton);
+
+			if (UVerticalBoxSlot* RowSlot = Cast<UVerticalBoxSlot>(RowButton->Slot))
+			{
+				RowSlot->SetPadding(FMargin(0.0f, 0.0f, 0.0f, 6.0f));
+				RowSlot->SetHorizontalAlignment(HAlign_Fill);
+			}
+		}
+	}
+}
+
+UButton* UWorldForgeEmbarkSetupWidget::CreateColonistRowButton(const int32 ColonistIndex, const FWorldForgeEmbarkColonist& Colonist)
+{
+	if (!WidgetTree)
+	{
+		return nullptr;
+	}
+
+	UButton* RowButton = WidgetTree->ConstructWidget<UButton>(
+		UButton::StaticClass(),
+		*FString::Printf(TEXT("BTN_StartingColonist_%d_Runtime"), ColonistIndex));
+	UTextBlock* RowText = WidgetTree->ConstructWidget<UTextBlock>(
+		UTextBlock::StaticClass(),
+		*FString::Printf(TEXT("TXT_StartingColonist_%d_Runtime"), ColonistIndex));
+	if (!RowButton || !RowText)
+	{
+		return RowButton;
+	}
+
+	const FString RoleDisplay = Colonist.RoleId.IsNone()
+		? FString(TEXT("Unassigned"))
+		: HumanizeIdentifier(Colonist.RoleId.ToString());
+	const FString RowLabel = FString::Printf(
+		TEXT("%s\n%s | %s"),
+		*Colonist.Name,
+		*ColonistRaceDisplayString(Colonist.RaceTag),
+		*RoleDisplay);
+	const bool bSelected = ColonistIndex == SelectedColonistIndex;
+
+	RowText->SetText(FText::FromString(RowLabel));
+	RowText->SetJustification(ETextJustify::Left);
+	RowText->SetAutoWrapText(true);
+	RowText->SetColorAndOpacity(FSlateColor(FLinearColor(0.98f, 0.99f, 1.0f, 1.0f)));
+
+	RowButton->SetBackgroundColor(
+		bSelected
+			? FLinearColor(0.32f, 0.38f, 0.48f, 1.0f)
+			: FLinearColor(0.12f, 0.135f, 0.155f, 1.0f));
+	RowButton->SetContent(RowText);
+
+	UWorldForgeEmbarkColonistRowClickProxy* ClickProxy = NewObject<UWorldForgeEmbarkColonistRowClickProxy>(this);
+	ClickProxy->Initialize(this, ColonistIndex);
+	RowButton->OnClicked.AddDynamic(ClickProxy, &UWorldForgeEmbarkColonistRowClickProxy::HandleClicked);
+	ColonistRowClickProxies.Add(ClickProxy);
+
+	return RowButton;
+}
+
+void UWorldForgeEmbarkSetupWidget::RefreshColonistButtons()
+{
+	const UWorldForgeEmbarkationManager* Manager = GetEmbarkationManager();
+	const TArray<FWorldForgeEmbarkColonist> Colonists = Manager
+		? Manager->GetStartingColonists()
+		: TArray<FWorldForgeEmbarkColonist>();
+	RebuildColonistList(Colonists);
+}
+
+void UWorldForgeEmbarkSetupWidget::RefreshColonistButton(const int32 ColonistIndex)
+{
+	RefreshColonistButtons();
+}
+
+void UWorldForgeEmbarkSetupWidget::SelectStartingColonist(const int32 ColonistIndex)
+{
+	FWorldForgeEmbarkColonist Colonist;
+	const UWorldForgeEmbarkationManager* Manager = GetEmbarkationManager();
+	if (!Manager || !Manager->GetStartingColonist(ColonistIndex, Colonist))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[EmbarkSetupWidget] Selected colonist index=%d failed; colonist unavailable."), ColonistIndex);
+		return;
+	}
+
+	SelectedColonistIndex = ColonistIndex;
+	RefreshColonistButtons();
+	RefreshSelectedColonistDetails();
+
+	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetupWidget] Selected colonist Index=%d Name=%s"),
+		SelectedColonistIndex,
+		*Colonist.Name);
+}
+
+void UWorldForgeEmbarkSetupWidget::RefreshSelectedColonistDetails()
+{
+	FWorldForgeEmbarkColonist Colonist;
+	const UWorldForgeEmbarkationManager* Manager = GetEmbarkationManager();
+	if (!Manager || !Manager->GetStartingColonist(SelectedColonistIndex, Colonist))
+	{
+		SetTextBlockString(TXT_ColonistName, FString(TEXT("Name:")));
+		SetTextBlockString(TXT_ColonistRace, FString(TEXT("Race:")));
+		SetTextBlockString(TXT_ColonistAge, FString(TEXT("Age:")));
+		SetTextBlockString(TXT_ColonistBackstory, FString(TEXT("Backstory:")));
+		SetTextBlockString(TXT_ColonistSkills, FString(TEXT("Skills:")));
+		SetTextBlockString(TXT_ColonistTraits, FString(TEXT("Traits:")));
+		if (BTN_RerollSelectedColonist)
+		{
+			BTN_RerollSelectedColonist->SetIsEnabled(false);
+		}
+		return;
+	}
+
+	if (BTN_RerollSelectedColonist)
+	{
+		BTN_RerollSelectedColonist->SetIsEnabled(true);
+	}
+
+	SetTextBlockString(TXT_ColonistName, FString::Printf(TEXT("Name: %s"), *Colonist.Name));
+	SetTextBlockString(TXT_ColonistRace, FString::Printf(TEXT("Race: %s"), *ColonistRaceDisplayString(Colonist.RaceTag)));
+	SetTextBlockString(TXT_ColonistAge, FString::Printf(TEXT("Age: %d"), Colonist.Age));
+	SetTextBlockString(TXT_ColonistBackstory, FString::Printf(TEXT("Backstory: %s"), *Colonist.Backstory));
+	SetTextBlockString(TXT_ColonistSkills, FString::Printf(TEXT("Skills:\n%s"), *BuildColonistSkillsText(Colonist)));
+	SetTextBlockString(TXT_ColonistTraits, FString::Printf(TEXT("Traits: %s"), *BuildColonistTraitsText(Colonist)));
 }
 
 void UWorldForgeEmbarkSetupWidget::HandleWorldNameTextChanged(const FText& InText)
@@ -1124,10 +1537,52 @@ void UWorldForgeEmbarkSetupWidget::HandleSingleRaceColonyClicked()
 	}
 }
 
+void UWorldForgeEmbarkSetupWidget::SetPreviousWidget(UUserWidget* InWidget)
+{
+	PreviousWidget = InWidget;
+}
+
+void UWorldForgeEmbarkSetupWidget::RestorePreviousWidget()
+{
+	UUserWidget* Widget = PreviousWidget.Get();
+	if (!Widget)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[EmbarkSetup] No previous widget registered; nothing to restore."));
+		return;
+	}
+
+	Widget->SetVisibility(ESlateVisibility::Visible);
+	Widget->SetIsEnabled(true);
+
+	if (UCommonActivatableWidget* CommonWidget = Cast<UCommonActivatableWidget>(Widget))
+	{
+		CommonWidget->ActivateWidget();
+	}
+
+	APlayerController* PlayerController = GetOwningPlayer();
+	if (!PlayerController && GetWorld())
+	{
+		PlayerController = GetWorld()->GetFirstPlayerController();
+	}
+
+	if (PlayerController)
+	{
+		FInputModeUIOnly InputMode;
+		InputMode.SetWidgetToFocus(Widget->TakeWidget());
+		InputMode.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock);
+		PlayerController->SetInputMode(InputMode);
+		PlayerController->bShowMouseCursor = true;
+	}
+
+	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] Restored previous widget: %s"), *Widget->GetName());
+}
+
 void UWorldForgeEmbarkSetupWidget::HandleBackClicked()
 {
 	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] Back clicked."));
+	RestorePreviousWidget();
 	DeactivateWidget();
+	RemoveFromParent();
 }
 
 void UWorldForgeEmbarkSetupWidget::HandleContinueClicked()
@@ -1207,6 +1662,49 @@ void UWorldForgeEmbarkSetupWidget::HandleRaceDarkElfClicked()
 	SelectRaceByName(RaceDarkElf);
 }
 
+void UWorldForgeEmbarkSetupWidget::HandleColonist01Clicked()
+{
+	SelectStartingColonist(0);
+}
+
+void UWorldForgeEmbarkSetupWidget::HandleColonist02Clicked()
+{
+	SelectStartingColonist(1);
+}
+
+void UWorldForgeEmbarkSetupWidget::HandleColonist03Clicked()
+{
+	SelectStartingColonist(2);
+}
+
+void UWorldForgeEmbarkSetupWidget::HandleRerollSelectedColonistClicked()
+{
+	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetupWidget] Reroll selected colonist clicked. Index=%d"), SelectedColonistIndex);
+
+	if (SelectedColonistIndex == INDEX_NONE)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[EmbarkSetupWidget] Reroll failed. No colonist selected."));
+		return;
+	}
+
+	UWorldForgeEmbarkationManager* Manager = GetEmbarkationManager();
+	if (!Manager)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[EmbarkSetupWidget] Reroll failed. Index=%d"), SelectedColonistIndex);
+		return;
+	}
+
+	const int32 ColonistIndex = SelectedColonistIndex;
+	if (!Manager->RerollStartingColonist(ColonistIndex))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[EmbarkSetupWidget] Reroll failed. Index=%d"), ColonistIndex);
+		return;
+	}
+
+	RefreshColonistButton(ColonistIndex);
+	RefreshSelectedColonistDetails();
+}
+
 void UWorldForgeEmbarkSetupWidget::SelectRaceByName(const TCHAR* RaceName)
 {
 	const FGameplayTag RaceTag = RequestRaceTag(RaceName);
@@ -1242,8 +1740,8 @@ void UWorldForgeEmbarkSetupWidget::UpdateRaceDetails(FGameplayTag RaceTag)
 		RaceTag = RequestRaceTag(RaceDwarf);
 	}
 
+	const FString RaceDataAssetPath = RaceDataAssetPathForTag(RaceTag);
 	UObject* RaceData = LoadRaceDataAsset(RaceTag);
-	const FString IdlePreviewAssetPath = IdlePreviewAssetPathForTag(RaceTag);
 
 	if (TXT_RaceName)
 	{
@@ -1270,26 +1768,134 @@ void UWorldForgeEmbarkSetupWidget::UpdateRaceDetails(FGameplayTag RaceTag)
 		TXT_RaceTraits->SetText(FText::FromString(BuildTraitsText(RaceData)));
 	}
 
+	UpdateRacePreviewForTag(RaceTag);
+
+	if (RaceData)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[EmbarkSetupWidget] RaceData resolved. Race=%s Asset=%s"), *RaceTag.ToString(), *RaceDataAssetPath);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[EmbarkSetupWidget] RaceData missing. Race=%s"), *RaceTag.ToString());
+	}
+}
+
+void UWorldForgeEmbarkSetupWidget::UpdateRacePreviewForTag(FGameplayTag RaceTag)
+{
+	if (!RaceTag.IsValid())
+	{
+		RaceTag = RequestRaceTag(RaceDwarf);
+	}
+
+	const FString ResolvedAssetPath = ResolveRaceIdleVisualAssetPath(GetWorld(), RaceTag);
+	const FString RaceName = RaceDisplayNameFromTag(RaceTag).ToString();
+
 	if (IMG_RacePreview)
 	{
+		FSlateBrush PlaceholderBrush = IMG_RacePreview->GetBrush();
+		PlaceholderBrush.SetResourceObject(nullptr);
+		PlaceholderBrush.ImageSize = FVector2D(220.0f, 180.0f);
+		IMG_RacePreview->SetBrush(PlaceholderBrush);
 		IMG_RacePreview->SetBrushSize(FVector2D(220.0f, 180.0f));
 		IMG_RacePreview->SetColorAndOpacity(FLinearColor(0.08f, 0.09f, 0.105f, 1.0f));
+		IMG_RacePreview->SetVisibility(ESlateVisibility::Visible);
 	}
 
 	if (TXT_RacePreviewStatus)
 	{
-		const FString PreviewStatus = IdlePreviewAssetPath.IsEmpty()
-			? TEXT("Preview pending. No idle visual asset found.")
-			: FString::Printf(TEXT("Preview asset found. Flipbook UMG preview pending custom widget/material.\n%s"), *IdlePreviewAssetPath);
-		TXT_RacePreviewStatus->SetText(FText::FromString(PreviewStatus));
 		TXT_RacePreviewStatus->SetColorAndOpacity(FSlateColor(FLinearColor(0.82f, 0.86f, 0.9f, 1.0f)));
 	}
 
-	UE_LOG(LogTemp, Log,
-		TEXT("[EmbarkSetupWidget] Race details updated: %s RaceData=%s IdlePreviewAsset=%s"),
-		*RaceTag.ToString(),
-		RaceData ? TEXT("OK") : TEXT("NULL"),
-		IdlePreviewAssetPath.IsEmpty() ? TEXT("None") : *IdlePreviewAssetPath);
+	UPaperFlipbook* IdleFlipbook = nullptr;
+	const bool bResolvedFlipbook = ResolveIdleFlipbookForRace(RaceTag, IdleFlipbook);
+	const bool bAppliedStaticPreview = bResolvedFlipbook && ApplyStaticFlipbookPreview(IdleFlipbook);
+
+	if (!ResolvedAssetPath.IsEmpty())
+	{
+		UE_LOG(LogTemp, Log, TEXT("[EmbarkSetupWidget] Race preview resolved. Race=%s Asset=%s"), *RaceTag.ToString(), *ResolvedAssetPath);
+	}
+
+	if (bAppliedStaticPreview)
+	{
+		if (TXT_RacePreviewStatus)
+		{
+			TXT_RacePreviewStatus->SetText(FText::FromString(FString::Printf(TEXT("Preview: %s idle frame"), *RaceName)));
+		}
+
+		UE_LOG(LogTemp, Log, TEXT("[EmbarkSetupWidget] Race preview static frame applied. Race=%s"), *RaceTag.ToString());
+		return;
+	}
+
+	const FString FallbackReason = ResolvedAssetPath.IsEmpty()
+		? TEXT("No idle visual asset found.")
+		: TEXT("Static PaperFlipbook preview requires follow-up support for unsupported or missing first-frame sprite data.");
+
+	if (TXT_RacePreviewStatus)
+	{
+		const FString PreviewStatus = ResolvedAssetPath.IsEmpty()
+			? TEXT("Preview pending. No idle visual asset found.")
+			: FString::Printf(TEXT("Preview asset found: %s"), *ResolvedAssetPath);
+		TXT_RacePreviewStatus->SetText(FText::FromString(PreviewStatus));
+	}
+
+	UE_LOG(LogTemp, Warning, TEXT("[EmbarkSetupWidget] Race preview fallback placeholder. Reason=%s"), *FallbackReason);
+}
+
+bool UWorldForgeEmbarkSetupWidget::ResolveIdleFlipbookForRace(FGameplayTag RaceTag, UPaperFlipbook*& OutFlipbook) const
+{
+	OutFlipbook = nullptr;
+
+	if (!RaceTag.IsValid())
+	{
+		return false;
+	}
+
+	FWorldForgeColonistVisualRow VisualDefinition;
+	if (ResolveRaceIdleVisualDefinition(GetWorld(), RaceTag, VisualDefinition) && !VisualDefinition.IdleVisualAsset.IsNull())
+	{
+		if (UObject* LoadedObject = VisualDefinition.IdleVisualAsset.LoadSynchronous())
+		{
+			OutFlipbook = Cast<UPaperFlipbook>(LoadedObject);
+			if (OutFlipbook)
+			{
+				return true;
+			}
+		}
+	}
+
+	const FString FallbackAssetPath = IdlePreviewAssetPathForTag(RaceTag);
+	if (FallbackAssetPath.IsEmpty())
+	{
+		return false;
+	}
+
+	OutFlipbook = LoadObject<UPaperFlipbook>(nullptr, *FallbackAssetPath);
+	return OutFlipbook != nullptr;
+}
+
+bool UWorldForgeEmbarkSetupWidget::ApplyStaticFlipbookPreview(UPaperFlipbook* Flipbook)
+{
+	if (!IMG_RacePreview || !Flipbook || Flipbook->GetNumFrames() <= 0)
+	{
+		return false;
+	}
+
+	UPaperSprite* FirstFrameSprite = Flipbook->GetSpriteAtFrame(0);
+	ISlateTextureAtlasInterface* AtlasInterfaceObject = Cast<ISlateTextureAtlasInterface>(FirstFrameSprite);
+	if (!FirstFrameSprite || !AtlasInterfaceObject)
+	{
+		return false;
+	}
+
+	TScriptInterface<ISlateTextureAtlasInterface> AtlasInterface;
+	AtlasInterface.SetObject(FirstFrameSprite);
+	AtlasInterface.SetInterface(AtlasInterfaceObject);
+
+	IMG_RacePreview->SetBrushFromAtlasInterface(AtlasInterface, false);
+	IMG_RacePreview->SetBrushSize(FVector2D(220.0f, 180.0f));
+	IMG_RacePreview->SetColorAndOpacity(FLinearColor::White);
+	IMG_RacePreview->SetVisibility(ESlateVisibility::Visible);
+	return true;
 }
 
 UWorldForgeEmbarkationManager* UWorldForgeEmbarkSetupWidget::GetEmbarkationManager() const

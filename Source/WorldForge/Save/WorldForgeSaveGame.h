@@ -77,6 +77,8 @@ public:
     // ====================================================================
     // SAVE METADATA
     // ====================================================================
+    UPROPERTY(SaveGame) FString WorldName;
+    UPROPERTY(SaveGame) FString ColonyName;
     UPROPERTY(SaveGame) FString SlotName;
     UPROPERTY(SaveGame) FString SaveTimestamp;
     UPROPERTY(SaveGame) int32   SaveVersion = 1;
