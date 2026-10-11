@@ -134,11 +134,12 @@ public:
 
     /**
      * World-units per voxel layer.
-     * Must match VoxelPlugin's rendered voxel size (default 100 UU for Transvoxel).
+     * Uses VoxelWorldManager::GetRenderVoxelSize when available; this fallback must
+     * match the CubePrototype/render voxel size.
      */
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|Cutaway|Config",
         meta = (ClampMin = "1.0"))
-    float VoxelLayerHeightUU = 100.0f;
+    float VoxelLayerHeightUU = 200.0f;
 
     /**
      * Small upward bias applied to the clip edge to avoid z-fighting where smooth
@@ -177,6 +178,8 @@ private:
     // -------------------------------------------------------------------------
     // Internal helpers
     // -------------------------------------------------------------------------
+
+    float GetVoxelLayerHeightUU() const;
 
     /**
      * Computes the clip Z value for the current layer offset.

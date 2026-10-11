@@ -115,6 +115,15 @@ public:
 	/** Override voxel cell size (default 100). */
 	void SetCellSizeUU(float InSize);
 
+	/**
+	 * OPTION-D: world Z-step of one voxel LAYER (200uu), independent of CellSizeUU.
+	 * With CellSizeUU at the 1600uu macro size, channels that derive world Z from a
+	 * coordinate's Z component (the mining-volume flat overlay) would otherwise place
+	 * tiles 8x too high. X/Y placement keeps using CellSizeUU. Values <= 0 fall back
+	 * to CellSizeUU, preserving legacy behavior for callers that never set this.
+	 */
+	void SetVoxelZStepUU(float InStep);
+
 	// ── Hover ───────────────────────────────────────────────
 
 	/** Move the hover highlight to VoxelCoord. TerrainZ = world Z of surface. */
@@ -229,6 +238,12 @@ public:
 	 * @return true if the cell was found and removed; false if it did not exist for that type.
 	 */
 	bool RemoveConfirmedDesignationCell(const FIntVector& VoxelCoord, EGridDesignationType DesignationType);
+
+	/**
+	 * Finds a confirmed cell of DesignationType at the given X/Y, at any Z.
+	 * Used when the surface Z of a column changed after the cell was confirmed.
+	 */
+	bool FindConfirmedDesignationCellAtXY(const FIntPoint& CellXY, EGridDesignationType DesignationType, FIntVector& OutVoxelCoord) const;
 
 	bool HasConfirmedDesignationCells() const { return ConfirmedDesignationCells.Num() > 0; }
 
@@ -434,6 +449,15 @@ private:
 	// ── Runtime State ───────────────────────────────────────
 
 	float CellSizeUU = 200.0f;
+
+	// OPTION-D: see SetVoxelZStepUU. <= 0 means "use CellSizeUU" (legacy behavior).
+	float VoxelZStepUU = -1.0f;
+
+	// OPTION-D: effective world Z-step of one voxel layer.
+	FORCEINLINE float GetVoxelZStepUU() const
+	{
+		return VoxelZStepUU > 0.0f ? VoxelZStepUU : CellSizeUU;
+	}
 	bool  bOverlayVisible = false;
 	bool  bHoverActive = false;
 

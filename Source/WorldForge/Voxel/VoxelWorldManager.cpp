@@ -1909,10 +1909,15 @@ FVector UVoxelWorldManager::GridToWorld(FIntPoint GridCell, int32 ZLevel) const
     const FVector Origin = GetVoxelWorldOrigin();
     const float RVS = GetRenderVoxelSize();
 
+    // CUBE-BLOCKGRID-01: cube blocks occupy [Cell * RVS, (Cell + 1) * RVS] on every
+    // axis, so the cell's world position is the rendered block center. The smooth
+    // SDF grid keeps its cell-centered-on-lattice convention.
+    const float CellCenterOffset = IsCubeTerrainActive() ? 0.5f : 0.0f;
+
     const FVector Result(
-        Origin.X + (GridCell.X * RVS),
-        Origin.Y + (GridCell.Y * RVS),
-        Origin.Z + (ZLevel * RVS)
+        Origin.X + ((static_cast<float>(GridCell.X) + CellCenterOffset) * RVS),
+        Origin.Y + ((static_cast<float>(GridCell.Y) + CellCenterOffset) * RVS),
+        Origin.Z + ((static_cast<float>(ZLevel) + CellCenterOffset) * RVS)
     );
 
     if (bLogGridConversions)
@@ -1969,9 +1974,13 @@ FIntVector UVoxelWorldManager::WorldToGrid3D(FVector WorldPosition) const
     const FVector Origin = GetVoxelWorldOrigin();
     const FVector LocalPosition = WorldPosition - Origin;
 
-    const int32 GridX = FMath::FloorToInt((LocalPosition.X + (RVS * 0.5f)) / RVS);
-    const int32 GridY = FMath::FloorToInt((LocalPosition.Y + (RVS * 0.5f)) / RVS);
-    const int32 GridZ = FMath::FloorToInt((LocalPosition.Z + (RVS * 0.5f)) / RVS);
+    // CUBE-BLOCKGRID-01: inverse of GridToWorld. Cube cells span [Cell * RVS, (Cell + 1) * RVS),
+    // so the cell is the block containing the point. Smooth keeps round-to-nearest.
+    const float RoundingOffset = IsCubeTerrainActive() ? 0.0f : (RVS * 0.5f);
+
+    const int32 GridX = FMath::FloorToInt((LocalPosition.X + RoundingOffset) / RVS);
+    const int32 GridY = FMath::FloorToInt((LocalPosition.Y + RoundingOffset) / RVS);
+    const int32 GridZ = FMath::FloorToInt((LocalPosition.Z + RoundingOffset) / RVS);
 
     const FIntVector Result(GridX, GridY, GridZ);
 
@@ -1997,6 +2006,42 @@ FIntPoint UVoxelWorldManager::WorldToGrid(FVector WorldPosition) const
 {
     const FIntVector Grid3D = WorldToGrid3D(WorldPosition);
     return FIntPoint(Grid3D.X, Grid3D.Y);
+}
+
+FVector UVoxelWorldManager::GridToRenderedVoxelCenter(const FIntVector& Voxel) const
+{
+    // GridToWorld already returns the rendered block center in CubePrototype mode.
+    return GridToWorld(FIntPoint(Voxel.X, Voxel.Y), Voxel.Z);
+}
+
+bool UVoxelWorldManager::IsCubeTerrainActive() const
+{
+    return CurrentTerrainMode == ETerrainMode::CubePrototype &&
+           CubeTerrainRuntime && CubeTerrainRuntime->IsValid();
+}
+
+bool UVoxelWorldManager::TryGetCubeTileSurfaceZ(FIntPoint TileXY, int32& OutSurfaceZ) const
+{
+    OutSurfaceZ = 0;
+    if (!IsCubeTerrainActive())
+    {
+        return false;
+    }
+
+    // Read the rendered block column at the tile center so the result matches
+    // what the player sees, not the coarse tile column.
+    return CubeTerrainRuntime->TryGetGridSurfaceZ(
+        CubeTerrainRuntime->TileToCenterGridCell(TileXY), OutSurfaceZ);
+}
+
+FIntPoint UVoxelWorldManager::TerrainCellToGridCell(FIntPoint TerrainCell) const
+{
+    if (!IsCubeTerrainActive())
+    {
+        return TerrainCell;
+    }
+
+    return CubeTerrainRuntime->TileToCenterGridCell(TerrainCell);
 }
 
 FIntPoint UVoxelWorldManager::WorldToTerrainCell(FVector WorldPosition) const
@@ -2618,53 +2663,13 @@ bool UVoxelWorldManager::TryGetTerrainSurfaceVoxelZ(FIntPoint VoxelXY, int32& Ou
 {
     OutVoxelZ = 0;
 
-    if (CurrentTerrainMode == ETerrainMode::CubePrototype &&
-        CubeTerrainRuntime && CubeTerrainRuntime->IsValid())
+    // CUBE-BLOCKGRID-01: VoxelXY is a grid cell. The runtime reads the rendered
+    // block column inside the patch and the containing tile column outside it.
+    // (The old path tried VoxelXY as a world-map tile first, which returned
+    // another tile's height whenever a grid cell happened to be in tile range.)
+    if (IsCubeTerrainActive())
     {
-        const int32 GridWidth = CubeTerrainRuntime->GetGridWidth();
-        const int32 GridHeight = CubeTerrainRuntime->GetGridHeight();
-
-        auto TryResolveCubeRuntimeXY = [&](const FIntPoint& RuntimeXY) -> bool
-            {
-                if (RuntimeXY.X < 0 || RuntimeXY.Y < 0 ||
-                    RuntimeXY.X >= GridWidth || RuntimeXY.Y >= GridHeight)
-                {
-                    return false;
-                }
-
-                const int32 SurfaceZ = CubeTerrainRuntime->GetSurfaceZAt(RuntimeXY);
-                const FGameplayTag SurfaceBlockType = GetBlockTypeAt(
-                    FIntVector(RuntimeXY.X, RuntimeXY.Y, SurfaceZ));
-                if (!SurfaceBlockType.IsValid())
-                {
-                    return false;
-                }
-
-                OutVoxelZ = SurfaceZ;
-                return true;
-            };
-
-        // Preferred CubePrototype path: callers such as WorldMap/claim-aware mine
-        // selection pass absolute map tile X/Y, which matches CubeTerrainRuntime.
-        if (TryResolveCubeRuntimeXY(VoxelXY))
-        {
-            return true;
-        }
-
-        // Normal-distance selection can arrive as 100uu grid coordinates from the
-        // shared overlay ray path. Convert that grid XY back to the cube runtime's
-        // absolute tile column before giving up.
-        const int32 BlocksPerTile = FMath::Max(1, CubeTerrainRuntime->GetBlocksPerWorldTile());
-        const FIntPoint RuntimeTileXY(
-            FMath::FloorToInt((static_cast<float>(VoxelXY.X) / static_cast<float>(BlocksPerTile)) + (static_cast<float>(GridWidth) * 0.5f)),
-            FMath::FloorToInt((static_cast<float>(VoxelXY.Y) / static_cast<float>(BlocksPerTile)) + (static_cast<float>(GridHeight) * 0.5f)));
-
-        if (RuntimeTileXY != VoxelXY && TryResolveCubeRuntimeXY(RuntimeTileXY))
-        {
-            return true;
-        }
-
-        return false;
+        return CubeTerrainRuntime->TryGetGridSurfaceZ(VoxelXY, OutVoxelZ);
     }
 
     if (!HasCachedTerrainData())
@@ -3192,12 +3197,25 @@ bool UVoxelWorldManager::TryGetNearestSpawnLocationForTerrainCell(
                 const float HalfGW = static_cast<float>(CubeGridW) * 0.5f;
                 const float HalfGH = static_cast<float>(CubeGridH) * 0.5f;
 
-                const float WorldX = Origin.X + ((static_cast<float>(Cell.X) - HalfGW + 0.5f) * TileWorldSizeUU);
-                const float WorldY = Origin.Y + ((static_cast<float>(Cell.Y) - HalfGH + 0.5f) * TileWorldSizeUU);
-                // Surface block centroid is at SurfaceZ * BlockHeightUU; top of cube is
-                // +0.5 * BlockHeightUU above that. Add ZOffset on top so the pawn spawns
-                // clear of the block.
-                const float WorldZ = Origin.Z + ((static_cast<float>(SurfaceZ) + 0.5f) * BlockHeightUU) + ZOffset;
+                float WorldX = Origin.X + ((static_cast<float>(Cell.X) - HalfGW + 0.5f) * TileWorldSizeUU);
+                float WorldY = Origin.Y + ((static_cast<float>(Cell.Y) - HalfGH + 0.5f) * TileWorldSizeUU);
+
+                // CUBE-BLOCKGRID-01: stand on the rendered block at the tile center.
+                // The tile column height can differ from the blended rendered height.
+                int32 StandZ = SurfaceZ;
+                const FIntPoint CenterGridCell = CubeTerrainRuntime->TileToCenterGridCell(Cell);
+                int32 RenderedSurfaceZ = 0;
+                if (CubeTerrainRuntime->TryGetGridSurfaceZ(CenterGridCell, RenderedSurfaceZ))
+                {
+                    const FVector BlockCenter = GridToWorld(CenterGridCell, RenderedSurfaceZ);
+                    WorldX = BlockCenter.X;
+                    WorldY = BlockCenter.Y;
+                    StandZ = RenderedSurfaceZ;
+                }
+
+                // Block Z spans [Z, Z + 1] * BlockHeightUU, so its top face is at Z + 1.
+                // Add ZOffset on top so the pawn spawns clear of the block.
+                const float WorldZ = Origin.Z + ((static_cast<float>(StandZ) + 1.0f) * BlockHeightUU) + ZOffset;
 
                 return FVector(WorldX, WorldY, WorldZ);
             };
@@ -3466,7 +3484,24 @@ bool UVoxelWorldManager::GenerateTerrainFromTiles(
             // (default 16) so visible blocks and mining voxels share one 200uu cell size.
             // Previously this omitted the arg and defaulted to 8, giving 400uu render blocks
             // that did not align with the 100uu mining grid.
-            CubeTerrainRuntime->BuildFromTiles(WorldTiles, GridWidth, GridHeight, CurrentBlockHeightStep, SubdivisionsPerTile, ChunkWorldSize);
+            // CUBE-INLANDWATER-01 / CUBE-VOLCANO-01: pass the pipeline's lake basins and
+            // volcanoes (cached by Step05 via SetPipelineLakeBasins/SetPipelineVolcanoes)
+            // so inland water sits at world-map elevation and lava is crater-only.
+            CubeTerrainRuntime->BuildFromTiles(
+                WorldTiles, GridWidth, GridHeight, CurrentBlockHeightStep,
+                SubdivisionsPerTile, ChunkWorldSize,
+                &CachedLakeBasins, &CachedVolcanoes);
+
+            // CUBE-BLOCKGRID-01: grid cells (VoxelSize) must equal rendered blocks
+            // (ChunkWorldSize / SubdivisionsPerTile) for selection, mining and farming
+            // to address the block the player sees.
+            const float RenderedBlockSizeUU = ChunkWorldSize / static_cast<float>(FMath::Max(1, SubdivisionsPerTile));
+            if (!FMath::IsNearlyEqual(RenderedBlockSizeUU, VoxelSize, 0.5f))
+            {
+                UE_LOG(LogTemp, Warning,
+                    TEXT("[CubeBlockGrid] Grid cell size %.1f does not match rendered block size %.1f (ChunkWorldSize=%.1f SubdivisionsPerTile=%d). Mining and selection will target the wrong blocks."),
+                    VoxelSize, RenderedBlockSizeUU, ChunkWorldSize, SubdivisionsPerTile);
+            }
 
             // CUBE-TERRAIN-01D: Spawn the HISM prototype patch actor if build succeeded.
             if (CubeTerrainRuntime->IsValid())
@@ -4552,6 +4587,15 @@ bool UVoxelWorldManager::ApplyGlobalFoundationNative(AVoxelWorld* VoxelWorld, in
 
 bool UVoxelWorldManager::IsValidGridPosition(const FIntVector& GridPos) const
 {
+    // CUBE-BLOCKGRID-01: the smooth caches are never filled in CubePrototype mode.
+    if (IsCubeTerrainActive())
+    {
+        int32 CubeSurfaceZ = 0;
+        return GridPos.Z >= 0 &&
+               CubeTerrainRuntime->TryGetGridSurfaceZ(FIntPoint(GridPos.X, GridPos.Y), CubeSurfaceZ) &&
+               GridPos.Z <= CubeSurfaceZ;
+    }
+
     if (!HasCachedTerrainData())
     {
         return false;
@@ -4610,7 +4654,7 @@ bool UVoxelWorldManager::TryFindSurfaceBlockNearZ(
     int32 VerticalSearchRadius,
     FIntVector& OutBlock) const
 {
-    if (!HasCachedTerrainData())
+    if (!HasCachedTerrainData() && !IsCubeTerrainActive())
     {
         return false;
     }
@@ -4656,10 +4700,10 @@ bool UVoxelWorldManager::TryFindSurfaceBlockNearZ(
 FGameplayTag UVoxelWorldManager::GetBlockTypeAt(const FIntVector& GridPos) const
 {
     // CUBE-TERRAIN-04X-STEP1: CubePrototype lookups must use cube bounds, not smooth cache bounds.
-    if (CurrentTerrainMode == ETerrainMode::CubePrototype &&
-        CubeTerrainRuntime && CubeTerrainRuntime->IsValid())
+    // CUBE-BLOCKGRID-01: GridPos is a grid cell; read the rendered block volume.
+    if (IsCubeTerrainActive())
     {
-        const FGameplayTag CubeBlockType = CubeTerrainRuntime->GetBlockTypeAt(GridPos);
+        const FGameplayTag CubeBlockType = CubeTerrainRuntime->GetGridBlockTag(GridPos);
         UE_LOG(LogTemp, Verbose,
             TEXT("[CubeMiningLookupAudit] GetBlockTypeAt Mode=CubePrototype Grid=(%d,%d,%d) Tag=%s RuntimeValid=%s"),
             GridPos.X, GridPos.Y, GridPos.Z,
@@ -4757,19 +4801,38 @@ bool UVoxelWorldManager::GetTerrainMaterialLayerAtVoxel(
     OutMaterialLayer = TerrainLayer_Dirt;
     OutBlockType = FGameplayTag();
 
+    // CUBE-BLOCKGRID-01: CubePrototype reads the real block type from the rendered
+    // block volume, so dug cells are open and layers match the visible cubes.
+    if (IsCubeTerrainActive())
+    {
+        const EWorldForgeCubeBlockType CubeType = CubeTerrainRuntime->GetGridBlockRaw(GridPos);
+        switch (CubeType)
+        {
+        case EWorldForgeCubeBlockType::Sand:     OutMaterialLayer = TerrainLayer_Sand;     break;
+        case EWorldForgeCubeBlockType::Grass:    OutMaterialLayer = TerrainLayer_Grass;    break;
+        case EWorldForgeCubeBlockType::Dirt:     OutMaterialLayer = TerrainLayer_Dirt;     break;
+        case EWorldForgeCubeBlockType::Rock:     OutMaterialLayer = TerrainLayer_Rock;     break;
+        case EWorldForgeCubeBlockType::Snow:     OutMaterialLayer = TerrainLayer_Snow;     break;
+        case EWorldForgeCubeBlockType::Water:    OutMaterialLayer = TerrainLayer_Water;    break;
+        case EWorldForgeCubeBlockType::Lava:     OutMaterialLayer = TerrainLayer_Lava;     break;
+        case EWorldForgeCubeBlockType::Basalt:   OutMaterialLayer = TerrainLayer_Basalt;   break;
+        case EWorldForgeCubeBlockType::DeepRock: OutMaterialLayer = TerrainLayer_DeepRock; break;
+        case EWorldForgeCubeBlockType::Air:
+        default:
+            return false;
+        }
+
+        OutBlockType = CubeTerrainRuntime->GetGridBlockTag(GridPos);
+        return true;
+    }
+
     if (!HasCachedTerrainData())
     {
         return false;
     }
 
-    // Mining cap samples are true 200uu voxel coords, including origin-centered
-    // negative X/Y. For CubePrototype, resolve those voxel coords through the same
-    // world-map tile path used by selection/claim/mining before falling back to the
-    // raw voxel-to-runtime conversion. This avoids treating a valid underground cap
-    // window as empty when the cube runtime expects 0-based tile columns.
     const FIntPoint VoxelXY(GridPos.X, GridPos.Y);
 
-    if (CurrentTerrainMode != ETerrainMode::CubePrototype)
     {
         const FIntPoint TerrainCell = VoxelCellToChunkCell(VoxelXY);
         if (!IsValidTerrainCell(TerrainCell))
@@ -4779,29 +4842,7 @@ bool UVoxelWorldManager::GetTerrainMaterialLayerAtVoxel(
     }
 
     int32 SurfaceZ = 0;
-    bool bResolvedSurface = false;
-
-    if (CurrentTerrainMode == ETerrainMode::CubePrototype)
-    {
-        if (UWorld* World = GetWorld())
-        {
-            if (UWorldMapSubsystem* WorldMap = World->GetSubsystem<UWorldMapSubsystem>())
-            {
-                const FVector CellWorld = GridToWorld(FIntPoint(GridPos.X, GridPos.Y), GridPos.Z);
-                int32 TileX = INDEX_NONE;
-                int32 TileY = INDEX_NONE;
-                if (WorldMap->WorldPositionToTileXY(CellWorld, TileX, TileY))
-                {
-                    bResolvedSurface = TryGetTerrainSurfaceVoxelZ(FIntPoint(TileX, TileY), SurfaceZ);
-                }
-            }
-        }
-    }
-
-    if (!bResolvedSurface)
-    {
-        bResolvedSurface = TryGetTerrainSurfaceVoxelZ(VoxelXY, SurfaceZ);
-    }
+    const bool bResolvedSurface = TryGetTerrainSurfaceVoxelZ(VoxelXY, SurfaceZ);
 
     if (!bResolvedSurface)
     {
@@ -4918,6 +4959,11 @@ bool UVoxelWorldManager::RemoveBlockAt(const FIntVector& GridPos)
         TEXT("[VoxelWorldManager] RemoveBlockAt called Grid=%s"),
         *GridPos.ToString());
 
+    if (IsCubeTerrainActive())
+    {
+        return RemoveCubeGridBlock(GridPos, TEXT("RemoveBlockAt"));
+    }
+
     if (!IsValidGridPosition(GridPos))
     {
         return false;
@@ -4964,6 +5010,11 @@ bool UVoxelWorldManager::RemoveSingleVoxelAt(const FIntVector& GridPos)
         TEXT("[VoxelWorldManager] RemoveSingleVoxelAt called Grid=%s"),
         *GridPos.ToString());
 
+    if (IsCubeTerrainActive())
+    {
+        return RemoveCubeGridBlock(GridPos, TEXT("RemoveSingleVoxelAt"));
+    }
+
     if (!IsValidGridPosition(GridPos))
     {
         return false;
@@ -4996,11 +5047,10 @@ bool UVoxelWorldManager::RemoveSingleVoxelAt(const FIntVector& GridPos)
 
 bool UVoxelWorldManager::RemoveVoxelByMode(const FIntVector& GridPos, EMiningRemovalMode RemovalMode)
 {
-    // CUBE-TERRAIN-01B: Route removal to cube runtime stub when CubePrototype is active.
-    if (CurrentTerrainMode == ETerrainMode::CubePrototype &&
-        CubeTerrainRuntime && CubeTerrainRuntime->IsValid())
+    // CUBE-BLOCKGRID-01: CubePrototype removes exactly one rendered block regardless of mode.
+    if (IsCubeTerrainActive())
     {
-        return CubeTerrainRuntime->RemoveBlockAt(GridPos);
+        return RemoveCubeGridBlock(GridPos, TEXT("RemoveVoxelByMode"));
     }
 
     switch (RemovalMode)
@@ -5022,6 +5072,11 @@ bool UVoxelWorldManager::RestoreBlockAt(const FIntVector& GridPos, const FGamepl
     if (!BlockType.IsValid())
     {
         return false;
+    }
+
+    if (IsCubeTerrainActive())
+    {
+        return RestoreCubeGridBlock(GridPos);
     }
 
     const bool bHadExactVoxelRemoval = RuntimeRemovedVoxels.Remove(GridPos) > 0;
@@ -5060,6 +5115,61 @@ bool UVoxelWorldManager::RestoreBlockAt(const FIntVector& GridPos, const FGamepl
         *BlockType.ToString(),
         NumRemoved,
         TerrainSnapshot.NumDirtyChunks());
+
+    return true;
+}
+
+bool UVoxelWorldManager::RemoveCubeGridBlock(const FIntVector& GridPos, const TCHAR* Source)
+{
+    const EWorldForgeCubeBlockType RemovedType = CubeTerrainRuntime->GetGridBlockRaw(GridPos);
+    if (!CubeTerrainRuntime->RemoveGridBlock(GridPos))
+    {
+        FIntPoint PatchLocal;
+        UE_LOG(LogTemp, Warning,
+            TEXT("[CubeBlockGrid] %s rejected. Grid=%s Type=%d InPatch=%s"),
+            Source,
+            *GridPos.ToString(),
+            static_cast<int32>(RemovedType),
+            CubeTerrainRuntime->GridCellToPatchLocal(FIntPoint(GridPos.X, GridPos.Y), PatchLocal) ? TEXT("true") : TEXT("false"));
+        return false;
+    }
+
+    const bool bRemeshed =
+        IsValid(CubeTerrainActor) &&
+        CubeTerrainActor->RebuildChunksForGridCell(CubeTerrainRuntime, GridPos);
+
+    const FVector WorldPosition = GridToWorld(FIntPoint(GridPos.X, GridPos.Y), GridPos.Z);
+    OnVoxelDigged(WorldPosition);
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[CubeBlockGrid] %s removed block. Grid=%s Type=%d Remeshed=%s World=%s"),
+        Source,
+        *GridPos.ToString(),
+        static_cast<int32>(RemovedType),
+        bRemeshed ? TEXT("true") : TEXT("false"),
+        *WorldPosition.ToString());
+
+    return true;
+}
+
+bool UVoxelWorldManager::RestoreCubeGridBlock(const FIntVector& GridPos)
+{
+    if (!CubeTerrainRuntime->RestoreGridBlock(GridPos))
+    {
+        UE_LOG(LogTemp, Log,
+            TEXT("[CubeBlockGrid] RestoreBlockAt: nothing to restore. Grid=%s"),
+            *GridPos.ToString());
+        return false;
+    }
+
+    const bool bRemeshed =
+        IsValid(CubeTerrainActor) &&
+        CubeTerrainActor->RebuildChunksForGridCell(CubeTerrainRuntime, GridPos);
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[CubeBlockGrid] RestoreBlockAt restored block. Grid=%s Remeshed=%s"),
+        *GridPos.ToString(),
+        bRemeshed ? TEXT("true") : TEXT("false"));
 
     return true;
 }
@@ -5186,11 +5296,12 @@ bool UVoxelWorldManager::ApplyRuntimeBrush(const FSDFBrush& Brush)
 
 int32 UVoxelWorldManager::GetSurfaceZAt(const FIntPoint& GridXY) const
 {
-    // CUBE-TERRAIN-01B: Route to cube runtime stub when CubePrototype is active.
-    if (CurrentTerrainMode == ETerrainMode::CubePrototype &&
-        CubeTerrainRuntime && CubeTerrainRuntime->IsValid())
+    // CUBE-BLOCKGRID-01: GridXY is a grid cell; read the rendered block column.
+    if (IsCubeTerrainActive())
     {
-        return CubeTerrainRuntime->GetSurfaceZAt(GridXY);
+        int32 CubeSurfaceZ = 0;
+        CubeTerrainRuntime->TryGetGridSurfaceZ(GridXY, CubeSurfaceZ);
+        return CubeSurfaceZ;
     }
 
     int32 SurfaceZ = 0;
@@ -5205,11 +5316,10 @@ int32 UVoxelWorldManager::GetSurfaceZAt(const FIntPoint& GridXY) const
 
 int32 UVoxelWorldManager::GetTerrainDepthAt(const FIntPoint& GridXY) const
 {
-    // CUBE-TERRAIN-01B: Route to cube runtime stub when CubePrototype is active.
-    if (CurrentTerrainMode == ETerrainMode::CubePrototype &&
-        CubeTerrainRuntime && CubeTerrainRuntime->IsValid())
+    // CUBE-BLOCKGRID-01: GridXY is a grid cell; read the rendered block column.
+    if (IsCubeTerrainActive())
     {
-        return CubeTerrainRuntime->GetTerrainDepthAt(GridXY);
+        return CubeTerrainRuntime->GetGridTerrainDepth(GridXY);
     }
 
     const int32 SurfaceZ = GetSurfaceZAt(GridXY);

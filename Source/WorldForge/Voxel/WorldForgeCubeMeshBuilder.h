@@ -108,8 +108,19 @@ struct FWorldForgeCubePatchMeshData
 class FWorldForgeCubeMeshBuilder
 {
 public:
+    // Builds the patch block volume, stores it on the runtime
+    // (UCubeTerrainRuntime::SetPatchBlockVolume), then meshes every chunk from it.
     static bool BuildPatchMesh(
         UCubeTerrainRuntime* Runtime,
         const FWorldForgeCubePatchMeshSettings& Settings,
         FWorldForgeCubePatchMeshData& OutPatchData);
+
+    // CUBE-BLOCKGRID-01: Re-meshes one chunk from the runtime's current patch volume.
+    // Used after mining edits the volume. Settings must be the ones used by BuildPatchMesh.
+    // OutChunkData may legitimately have no geometry if the chunk was dug out.
+    static bool BuildChunkMesh(
+        const UCubeTerrainRuntime* Runtime,
+        const FWorldForgeCubePatchMeshSettings& Settings,
+        const FIntPoint& ChunkCoord,
+        FWorldForgeCubeChunkMeshData& OutChunkData);
 };

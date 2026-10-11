@@ -582,6 +582,101 @@ namespace
         }
     }
 
+    // World-space min X/Y of every local block column in the patch.
+    void BuildBlockMinArrays(
+        const FWorldForgeCubePatchMeshSettings& Settings,
+        int32 LocalGridWidth,
+        int32 LocalGridHeight,
+        TArray<float>& OutBlockMinX,
+        TArray<float>& OutBlockMinY)
+    {
+        const int32 BlocksPerTile = FMath::Max(1, Settings.BlocksPerWorldTile);
+        const float BlockSizeXY   = Settings.TileWorldSizeUU / static_cast<float>(BlocksPerTile);
+        const float HalfBPT       = static_cast<float>(BlocksPerTile - 1) * 0.5f;
+        const float HalfBlockSize = BlockSizeXY * 0.5f;
+
+        OutBlockMinX.SetNum(LocalGridWidth);
+        OutBlockMinY.SetNum(LocalGridHeight);
+
+        for (int32 LocalX = 0; LocalX < LocalGridWidth; ++LocalX)
+        {
+            const int32 TileOffsetX = LocalX / BlocksPerTile;
+            const int32 SubBlockX   = LocalX % BlocksPerTile;
+            const int32 TileX       = Settings.PatchMinTile.X + TileOffsetX;
+            const FVector TileCenter = BuildTileCenterWorld(Settings, TileX, Settings.PatchMinTile.Y);
+            const float OffsetX     = (static_cast<float>(SubBlockX) - HalfBPT) * BlockSizeXY;
+            OutBlockMinX[LocalX]    = TileCenter.X + OffsetX - HalfBlockSize;
+        }
+
+        for (int32 LocalY = 0; LocalY < LocalGridHeight; ++LocalY)
+        {
+            const int32 TileOffsetY = LocalY / BlocksPerTile;
+            const int32 SubBlockY   = LocalY % BlocksPerTile;
+            const int32 TileY       = Settings.PatchMinTile.Y + TileOffsetY;
+            const FVector TileCenter = BuildTileCenterWorld(Settings, Settings.PatchMinTile.X, TileY);
+            const float OffsetY     = (static_cast<float>(SubBlockY) - HalfBPT) * BlockSizeXY;
+            OutBlockMinY[LocalY]    = TileCenter.Y + OffsetY - HalfBlockSize;
+        }
+    }
+
+    // Meshes one chunk of an already-built patch volume.
+    void BuildChunkFromVolume(
+        FWorldForgeCubeChunkMeshData& ChunkData,
+        const FIntPoint& ChunkCoord,
+        const TArray<uint8>& Volume,
+        int32 LocalGridWidth,
+        int32 LocalGridHeight,
+        int32 MaxSolidZ,
+        const TArray<float>& BlockMinX,
+        const TArray<float>& BlockMinY,
+        const FWorldForgeCubePatchMeshSettings& Settings,
+        int32& OutSuppressedBorderFaces)
+    {
+        const int32 BlocksPerTile = FMath::Max(1, Settings.BlocksPerWorldTile);
+        const int32 ChunkSize     = FMath::Max(1, Settings.ChunkSizeInBlocks);
+        const float BlockSizeXY   = Settings.TileWorldSizeUU / static_cast<float>(BlocksPerTile);
+
+        ChunkData = FWorldForgeCubeChunkMeshData();
+        ChunkData.ChunkCoord = ChunkCoord;
+        ChunkData.SectionData.SetNum(UE_ARRAY_COUNT(CubeSectionOrder));
+        for (int32 SectionIdx = 0; SectionIdx < UE_ARRAY_COUNT(CubeSectionOrder); ++SectionIdx)
+        {
+            ChunkData.SectionData[SectionIdx].BlockType = CubeSectionOrder[SectionIdx];
+        }
+
+        const int32 MinLocalX = ChunkCoord.X * ChunkSize;
+        const int32 MinLocalY = ChunkCoord.Y * ChunkSize;
+        const int32 MaxLocalX = FMath::Min(MinLocalX + ChunkSize, LocalGridWidth);
+        const int32 MaxLocalY = FMath::Min(MinLocalY + ChunkSize, LocalGridHeight);
+
+        GreedyBuildChunkFaces(
+            ChunkData,
+            Volume,
+            LocalGridWidth,
+            LocalGridHeight,
+            MaxSolidZ,
+            BlockMinX,
+            BlockMinY,
+            Settings.TerrainOrigin.Z,
+            BlockSizeXY,
+            Settings.BlockHeightUU,
+            MinLocalX, MaxLocalX,
+            MinLocalY, MaxLocalY,
+            Settings.bDebugDisableGreedySideFaces,
+            Settings.bDebugSuppressOuterPatchBorderFaces,
+            OutSuppressedBorderFaces);
+
+        for (const FWorldForgeCubeMeshSectionData& Section : ChunkData.SectionData)
+        {
+            if (!Section.HasGeometry())
+            {
+                continue;
+            }
+            ++ChunkData.Sections;
+            ChunkData.Triangles += Section.GetTriangleCount();
+        }
+    }
+
 } // namespace
 
 bool FWorldForgeCubeMeshBuilder::BuildPatchMesh(
@@ -619,8 +714,6 @@ bool FWorldForgeCubeMeshBuilder::BuildPatchMesh(
     const int32 LocalGridWidth  = PatchTilesX * BlocksPerTile;
     const int32 LocalGridHeight = PatchTilesY * BlocksPerTile;
     const int32 MaxSolidZ       = FMath::Max(0, Runtime->GetMaxSurfaceZ());
-    const float BlockSizeXY     = Settings.TileWorldSizeUU / static_cast<float>(BlocksPerTile);
-    const float HalfBPT         = static_cast<float>(BlocksPerTile - 1) * 0.5f;
 
     TArray<FTileColumnSample> TileSamples;
     TileSamples.SetNum(PatchTilesX * PatchTilesY);
@@ -650,29 +743,7 @@ bool FWorldForgeCubeMeshBuilder::BuildPatchMesh(
 
     TArray<float> BlockMinX;
     TArray<float> BlockMinY;
-    BlockMinX.SetNum(LocalGridWidth);
-    BlockMinY.SetNum(LocalGridHeight);
-
-    const float HalfBlockSize = BlockSizeXY * 0.5f;
-    for (int32 LocalX = 0; LocalX < LocalGridWidth; ++LocalX)
-    {
-        const int32 TileOffsetX = LocalX / BlocksPerTile;
-        const int32 SubBlockX   = LocalX % BlocksPerTile;
-        const int32 TileX       = Settings.PatchMinTile.X + TileOffsetX;
-        const FVector TileCenter = BuildTileCenterWorld(Settings, TileX, Settings.PatchMinTile.Y);
-        const float OffsetX     = (static_cast<float>(SubBlockX) - HalfBPT) * BlockSizeXY;
-        BlockMinX[LocalX]       = TileCenter.X + OffsetX - HalfBlockSize;
-    }
-
-    for (int32 LocalY = 0; LocalY < LocalGridHeight; ++LocalY)
-    {
-        const int32 TileOffsetY = LocalY / BlocksPerTile;
-        const int32 SubBlockY   = LocalY % BlocksPerTile;
-        const int32 TileY       = Settings.PatchMinTile.Y + TileOffsetY;
-        const FVector TileCenter = BuildTileCenterWorld(Settings, Settings.PatchMinTile.X, TileY);
-        const float OffsetY     = (static_cast<float>(SubBlockY) - HalfBPT) * BlockSizeXY;
-        BlockMinY[LocalY]       = TileCenter.Y + OffsetY - HalfBlockSize;
-    }
+    BuildBlockMinArrays(Settings, LocalGridWidth, LocalGridHeight, BlockMinX, BlockMinY);
 
     TArray<uint8> Volume;
     Volume.Init(
@@ -980,6 +1051,22 @@ bool FWorldForgeCubeMeshBuilder::BuildPatchMesh(
     OutPatchData.LocalGridHeight   = LocalGridHeight;
     OutPatchData.ChunkSizeInBlocks = ChunkSize;
 
+    // CUBE-BLOCKGRID-01: the volume becomes the authoritative block data for the
+    // patch. Mining edits it in place and BuildChunkMesh re-meshes from it.
+    Runtime->SetPatchBlockVolume(
+        FIntPoint(Settings.PatchMinTile.X * BlocksPerTile, Settings.PatchMinTile.Y * BlocksPerTile),
+        LocalGridWidth,
+        LocalGridHeight,
+        MaxSolidZ,
+        MoveTemp(Volume));
+
+    if (!Runtime->HasPatchBlockVolume())
+    {
+        return false;
+    }
+
+    const TArray<uint8>& StoredVolume = Runtime->GetPatchBlockVolume();
+
     const int32 ChunkCountX = FMath::DivideAndRoundUp(LocalGridWidth,  ChunkSize);
     const int32 ChunkCountY = FMath::DivideAndRoundUp(LocalGridHeight, ChunkSize);
 
@@ -1001,48 +1088,21 @@ bool FWorldForgeCubeMeshBuilder::BuildPatchMesh(
         for (int32 ChunkX = 0; ChunkX < ChunkCountX; ++ChunkX)
         {
             FWorldForgeCubeChunkMeshData ChunkData;
-            ChunkData.ChunkCoord = FIntPoint(ChunkX, ChunkY);
-            ChunkData.SectionData.SetNum(UE_ARRAY_COUNT(CubeSectionOrder));
-            for (int32 SectionIdx = 0; SectionIdx < UE_ARRAY_COUNT(CubeSectionOrder); ++SectionIdx)
-            {
-                ChunkData.SectionData[SectionIdx].BlockType = CubeSectionOrder[SectionIdx];
-            }
-
-            const int32 MinLocalX = ChunkX * ChunkSize;
-            const int32 MinLocalY = ChunkY * ChunkSize;
-            const int32 MaxLocalX = FMath::Min(MinLocalX + ChunkSize, LocalGridWidth);
-            const int32 MaxLocalY = FMath::Min(MinLocalY + ChunkSize, LocalGridHeight);
-
             int32 ChunkSuppressedBorderFaces = 0;
 
-            GreedyBuildChunkFaces(
+            BuildChunkFromVolume(
                 ChunkData,
-                Volume,
+                FIntPoint(ChunkX, ChunkY),
+                StoredVolume,
                 LocalGridWidth,
                 LocalGridHeight,
                 MaxSolidZ,
                 BlockMinX,
                 BlockMinY,
-                Settings.TerrainOrigin.Z,
-                BlockSizeXY,
-                Settings.BlockHeightUU,
-                MinLocalX, MaxLocalX,
-                MinLocalY, MaxLocalY,
-                Settings.bDebugDisableGreedySideFaces,
-                Settings.bDebugSuppressOuterPatchBorderFaces,
+                Settings,
                 ChunkSuppressedBorderFaces);
 
             TotalSuppressedBorderFaces += ChunkSuppressedBorderFaces;
-
-            for (const FWorldForgeCubeMeshSectionData& Section : ChunkData.SectionData)
-            {
-                if (!Section.HasGeometry())
-                {
-                    continue;
-                }
-                ++ChunkData.Sections;
-                ChunkData.Triangles += Section.GetTriangleCount();
-            }
 
             if (!ChunkData.HasGeometry())
             {
@@ -1122,4 +1182,59 @@ bool FWorldForgeCubeMeshBuilder::BuildPatchMesh(
         VisualSandSofteningCandidates > 0 ? VisualSandSofteningMinSourceSurfaceZ : INDEX_NONE);
 
     return OutPatchData.Faces > 0;
+}
+
+bool FWorldForgeCubeMeshBuilder::BuildChunkMesh(
+    const UCubeTerrainRuntime* Runtime,
+    const FWorldForgeCubePatchMeshSettings& Settings,
+    const FIntPoint& ChunkCoord,
+    FWorldForgeCubeChunkMeshData& OutChunkData)
+{
+    OutChunkData = FWorldForgeCubeChunkMeshData();
+
+    if (!IsValid(Runtime) || !Runtime->HasPatchBlockVolume())
+    {
+        return false;
+    }
+
+    const int32 BlocksPerTile   = FMath::Max(1, Settings.BlocksPerWorldTile);
+    const int32 ChunkSize       = FMath::Max(1, Settings.ChunkSizeInBlocks);
+    const int32 LocalGridWidth  = Runtime->GetPatchBlocksX();
+    const int32 LocalGridHeight = Runtime->GetPatchBlocksY();
+
+    if (LocalGridWidth != Settings.PatchTileCount.X * BlocksPerTile ||
+        LocalGridHeight != Settings.PatchTileCount.Y * BlocksPerTile)
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[CubeBlockGrid] BuildChunkMesh: settings do not match the stored patch. Stored=%dx%d Settings=%dx%d"),
+            LocalGridWidth, LocalGridHeight,
+            Settings.PatchTileCount.X * BlocksPerTile, Settings.PatchTileCount.Y * BlocksPerTile);
+        return false;
+    }
+
+    if (ChunkCoord.X < 0 || ChunkCoord.Y < 0 ||
+        ChunkCoord.X * ChunkSize >= LocalGridWidth ||
+        ChunkCoord.Y * ChunkSize >= LocalGridHeight)
+    {
+        return false;
+    }
+
+    TArray<float> BlockMinX;
+    TArray<float> BlockMinY;
+    BuildBlockMinArrays(Settings, LocalGridWidth, LocalGridHeight, BlockMinX, BlockMinY);
+
+    int32 SuppressedBorderFaces = 0;
+    BuildChunkFromVolume(
+        OutChunkData,
+        ChunkCoord,
+        Runtime->GetPatchBlockVolume(),
+        LocalGridWidth,
+        LocalGridHeight,
+        Runtime->GetPatchMaxZ(),
+        BlockMinX,
+        BlockMinY,
+        Settings,
+        SuppressedBorderFaces);
+
+    return true;
 }

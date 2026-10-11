@@ -2,6 +2,7 @@
 
 #include "Visual/TerrainCutawaySubsystem.h"
 #include "Kismet/KismetMaterialLibrary.h"
+#include "Voxel/VoxelWorldManager.h"
 #include "Materials/MaterialParameterCollection.h"
 #include "Engine/World.h"
 
@@ -151,7 +152,7 @@ void UTerrainCutawaySubsystem::SetAbsoluteClipLayerWorldZ(float LayerWorldZ, boo
 
 void UTerrainCutawaySubsystem::SetAbsoluteClipLayerVoxelZ(int32 VoxelZ)
 {
-    SetAbsoluteClipLayerWorldZ(static_cast<float>(VoxelZ) * VoxelLayerHeightUU);
+    SetAbsoluteClipLayerWorldZ(static_cast<float>(VoxelZ) * GetVoxelLayerHeightUU());
 }
 
 void UTerrainCutawaySubsystem::ExitCutawayMode()
@@ -199,7 +200,7 @@ void UTerrainCutawaySubsystem::AdjustViewLayer(int32 Delta)
 
     if (bUseAbsoluteClipLayer)
     {
-        AbsoluteClipWorldZ += static_cast<float>(Delta) * VoxelLayerHeightUU;
+        AbsoluteClipWorldZ += static_cast<float>(Delta) * GetVoxelLayerHeightUU();
         SurfaceWorldZ = AbsoluteClipWorldZ;
         ApplyClipPlane();
 
@@ -297,6 +298,23 @@ void UTerrainCutawaySubsystem::ResetViewLayer()
 // Internal helpers
 // =============================================================================
 
+float UTerrainCutawaySubsystem::GetVoxelLayerHeightUU() const
+{
+    if (const UWorld* World = GetWorld())
+    {
+        if (const UVoxelWorldManager* VM = World->GetSubsystem<UVoxelWorldManager>())
+        {
+            const float RenderVoxelSize = VM->GetRenderVoxelSize();
+            if (RenderVoxelSize > KINDA_SMALL_NUMBER)
+            {
+                return RenderVoxelSize;
+            }
+        }
+    }
+
+    return FMath::Max(1.0f, VoxelLayerHeightUU);
+}
+
 float UTerrainCutawaySubsystem::ComputeClipWorldZ() const
 {
     if (!bCutawayActive)
@@ -319,7 +337,7 @@ float UTerrainCutawaySubsystem::ComputeClipWorldZ() const
 
     // Underground view. See header for the layer math.
     const float LayerShift =
-        static_cast<float>(ActiveViewLayerOffset + 1) * VoxelLayerHeightUU;
+        static_cast<float>(ActiveViewLayerOffset + 1) * GetVoxelLayerHeightUU();
 
     return SurfaceWorldZ + LayerShift + ClipEdgeBiasUU;
 }

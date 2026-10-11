@@ -1,13 +1,15 @@
 // Source/WorldForge/Grid/LayerViewSubsystem.cpp
 
 #include "Grid/LayerViewSubsystem.h"
+#include "Engine/World.h"
+#include "Voxel/VoxelWorldManager.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogLayerView, Log, All);
 
 void ULayerViewSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
     Super::Initialize(Collection);
-    UE_LOG(LogLayerView, Log, TEXT("[LayerView] Initialized."));
+    UE_LOG(LogLayerView, Log, TEXT("[LayerView] Initialized. LayerHeightUU=%.1f"), GetVoxelLayerHeightUU());
 }
 
 void ULayerViewSubsystem::Deinitialize()
@@ -41,6 +43,33 @@ void ULayerViewSubsystem::ExitLayerView()
     UE_LOG(LogLayerView, Log, TEXT("[LayerView] Exited."));
 }
 
+float ULayerViewSubsystem::GetVoxelLayerHeightUU() const
+{
+    if (const UWorld* World = GetWorld())
+    {
+        if (const UVoxelWorldManager* VM = World->GetSubsystem<UVoxelWorldManager>())
+        {
+            const float RenderVoxelSize = VM->GetRenderVoxelSize();
+            if (RenderVoxelSize > KINDA_SMALL_NUMBER)
+            {
+                return RenderVoxelSize;
+            }
+        }
+    }
+
+    return FMath::Max(1.0f, VoxelLayerHeightUU);
+}
+
+float ULayerViewSubsystem::GetActiveLayerWorldZ() const
+{
+    return VoxelLayerToWorldZ(ActiveVoxelLayerZ);
+}
+
+float ULayerViewSubsystem::VoxelLayerToWorldZ(int32 VoxelZ) const
+{
+    return static_cast<float>(VoxelZ) * GetVoxelLayerHeightUU();
+}
+
 void ULayerViewSubsystem::SetSurfaceVoxelLayerZ(int32 InSurfaceVoxelZ)
 {
     SurfaceVoxelLayerZ = FMath::Clamp(InSurfaceVoxelZ, MinVoxelLayerZ, MaxVoxelLayerZ);
@@ -52,11 +81,20 @@ void ULayerViewSubsystem::SetActiveVoxelLayerZ(int32 InVoxelZ)
     ActiveVoxelLayerZ = FMath::Clamp(InVoxelZ, MinVoxelLayerZ, MaxVoxelLayerZ);
     bHasActiveVoxelLayer = true;
 
+    const float LayerHeightUU = GetVoxelLayerHeightUU();
+    const float ActiveWorldZ = GetActiveLayerWorldZ();
+
     UE_LOG(LogLayerView, Log,
         TEXT("[LayerView] ActiveVoxelLayerZ=%d WorldZ=%.1f Relative=%+d"),
         ActiveVoxelLayerZ,
-        GetActiveLayerWorldZ(),
+        ActiveWorldZ,
         GetRelativeLayerOffset());
+
+    UE_LOG(LogLayerView, Log,
+        TEXT("[CUBE-MINING-LAYER] LayerHeightUU=%.0f ActiveZ=%d ActiveWorldZ=%.1f"),
+        LayerHeightUU,
+        ActiveVoxelLayerZ,
+        ActiveWorldZ);
 }
 
 void ULayerViewSubsystem::InitializeFromSurfaceVoxelZ(int32 InSurfaceVoxelZ, int32 InitialOffset)

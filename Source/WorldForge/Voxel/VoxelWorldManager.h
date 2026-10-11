@@ -110,6 +110,11 @@ public:
     FVector GridToWorld(FIntPoint GridCell, int32 ZLevel = 0) const;
 
     UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
+    FVector GridToRenderedVoxelCenter(
+        const FIntVector& Voxel
+    ) const;
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
     FIntPoint WorldToGrid(FVector WorldPosition) const;
 
     UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
@@ -291,8 +296,21 @@ public:
     UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
     bool TryGetSurfaceWorldLocation(FIntPoint GridCell, FVector& OutWorldLocation, float ZOffset = 0.0f) const;
 
+    // Surface block Z of a grid cell column (selection/mining/farming coordinates).
+    // CubePrototype: VoxelXY is always a grid cell, never a world-map tile. Use
+    // TryGetCubeTileSurfaceZ for world-map tile coordinates.
     UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
     bool TryGetTerrainSurfaceVoxelZ(FIntPoint VoxelXY, int32& OutVoxelZ) const;
+
+    // CUBE-BLOCKGRID-01: true when the CubePrototype runtime is the active terrain.
+    bool IsCubeTerrainActive() const;
+
+    // CUBE-BLOCKGRID-01: surface Z of a world-map tile column in CubePrototype mode.
+    bool TryGetCubeTileSurfaceZ(FIntPoint TileXY, int32& OutSurfaceZ) const;
+
+    // CUBE-BLOCKGRID-01: grid cell at the center of a world-map tile.
+    // CubePrototype only; other modes return TerrainCell unchanged.
+    FIntPoint TerrainCellToGridCell(FIntPoint TerrainCell) const;
 
     UFUNCTION(BlueprintPure, Category = "WorldForge|Voxel")
     bool IsSpawnableTerrainCell(FIntPoint GridCell) const;
@@ -745,6 +763,11 @@ private:
     TSubclassOf<AWFCubeTerrainActor> CubeTerrainActorClass;
 
     FWorldForgeTerrainSnapshot TerrainSnapshot;
+
+    // CUBE-BLOCKGRID-01: CubePrototype block removal/restore. Edits the runtime
+    // patch volume, re-meshes the affected chunks and fires OnVoxelDigged.
+    bool RemoveCubeGridBlock(const FIntVector& GridPos, const TCHAR* Source);
+    bool RestoreCubeGridBlock(const FIntVector& GridPos);
 
     // ── v5.0: SDF brush helpers for the Hybrid Chunking Modification Path ──
     FSDFBrush MakeDigBrush(const FIntVector& GridPos) const;

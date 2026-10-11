@@ -1609,7 +1609,7 @@ void UWorldGenPipeline::Step03_RunTectonics()
                     }
                 }
 
-                const int32 LakeIndex = LocalPath.Pop(false);
+                const int32 LakeIndex = LocalPath.Pop(EAllowShrinking::No);
                 EndPoint = FIntPoint(LakeIndex % GridWidth, LakeIndex / GridWidth);
                 TerminalIndex = LakeIndex;
                 OutletKind = ERiverOutletKind::LakeEndpoint;
@@ -1620,7 +1620,7 @@ void UWorldGenPipeline::Step03_RunTectonics()
             if ((OutletKind == ERiverOutletKind::None || OutletKind == ERiverOutletKind::Loop)
                 && !LocalPath.IsEmpty())
             {
-                const int32 LakeIndex = LocalPath.Pop(false);
+                const int32 LakeIndex = LocalPath.Pop(EAllowShrinking::No);
                 EndPoint = FIntPoint(LakeIndex % GridWidth, LakeIndex / GridWidth);
                 TerminalIndex = LakeIndex;
                 OutletKind = ERiverOutletKind::LakeEndpoint;

@@ -88,7 +88,7 @@ const FSettingsControlDisplayRow ReadOnlyControlDisplayRows[] =
 	{ TEXT("Pause/Menu"), TEXT("Space Bar") }
 };
 
-const TCHAR* BindingStatus(const UObject* Widget)
+const TCHAR* SettingsBindingStatus(const UObject* Widget)
 {
 	return Widget ? TEXT("OK") : TEXT("NULL");
 }
@@ -778,7 +778,7 @@ void UWorldForgeSettingsWidget::NativeConstruct()
 	InitializeSettingsState();
 
 	UE_LOG(LogTemp, Log, TEXT("[Settings] Constructed. BTN_Back=%s BTN_Apply=%s BTN_Reset=%s"),
-		BindingStatus(BTN_Back), BindingStatus(BTN_Apply), BindingStatus(BTN_Reset));
+		SettingsBindingStatus(BTN_Back), SettingsBindingStatus(BTN_Apply), SettingsBindingStatus(BTN_Reset));
 }
 
 void UWorldForgeSettingsWidget::SetPreviousWidget(UUserWidget* InWidget)
@@ -1176,10 +1176,10 @@ void UWorldForgeSettingsWidget::EnsureAccessibilityFoundationWidgets()
 	}
 
 	UE_LOG(LogTemp, Log, TEXT("[Settings] Accessibility foundation initialized: HighContrast=%s Colorblind=%s ReduceMotion=%s LargeText=%s"),
-		BindingStatus(CHK_HighContrastMode),
-		BindingStatus(CHK_ColorblindAssist),
-		BindingStatus(GetReduceMotionCheckbox()),
-		BindingStatus(CHK_LargeTextMode));
+		SettingsBindingStatus(CHK_HighContrastMode),
+		SettingsBindingStatus(CHK_ColorblindAssist),
+		SettingsBindingStatus(GetReduceMotionCheckbox()),
+		SettingsBindingStatus(CHK_LargeTextMode));
 	bAccessibilityFoundationCreated = true;
 }
 

@@ -62,10 +62,13 @@ public:
     int32 GetRelativeLayerOffset() const { return bHasSurfaceVoxelLayer ? ActiveVoxelLayerZ - SurfaceVoxelLayerZ : 0; }
 
     UFUNCTION(BlueprintPure, Category = "WorldForge|LayerView")
-    float GetActiveLayerWorldZ() const { return static_cast<float>(ActiveVoxelLayerZ) * VoxelLayerHeightUU; }
+    float GetVoxelLayerHeightUU() const;
 
     UFUNCTION(BlueprintPure, Category = "WorldForge|LayerView")
-    float VoxelLayerToWorldZ(int32 VoxelZ) const { return static_cast<float>(VoxelZ) * VoxelLayerHeightUU; }
+    float GetActiveLayerWorldZ() const;
+
+    UFUNCTION(BlueprintPure, Category = "WorldForge|LayerView")
+    float VoxelLayerToWorldZ(int32 VoxelZ) const;
 
     UFUNCTION(BlueprintCallable, Category = "WorldForge|LayerView|Mining")
     void SetMiningHeightMode(EWFMiningHeightMode NewMode);
@@ -83,7 +86,7 @@ public:
     int32 GetMiningHeightVoxelCount() const { return MiningHeightMode == EWFMiningHeightMode::TwoVoxelColumn ? 2 : 1; }
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|LayerView|Config", meta = (ClampMin = "1.0"))
-    float VoxelLayerHeightUU = 100.0f;
+    float VoxelLayerHeightUU = 200.0f;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WorldForge|LayerView|Config", meta = (ClampMin = "1"))
     int32 MinVoxelLayerZ = -512;

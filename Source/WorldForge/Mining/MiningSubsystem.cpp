@@ -160,6 +160,11 @@ bool UMiningSubsystem::ResolveMineTarget(
 	// surface height of its column. Resolve the column surface via the same proven chain
 	// the access filter uses: per-voxel cell -> world tile (VoxelCellToChunkCell, the
 	// project's blessed conversion) -> preferred branch of TryGetTerrainSurfaceVoxelZ.
+	//
+	// CUBE-BLOCKGRID-01: CubePrototype GetBlockTypeAt now reads the rendered block
+	// volume with grid cells, so the checks above are authoritative. Skipping this
+	// fallback there stops already-dug (air) cells below the surface being accepted.
+	if (!VM->IsCubeTerrainActive())
 	{
 		// CUBE-VOXEL-SCALE FIX: resolve the column surface through the SAME chain the
 		// confirm side uses (GridToWorld -> WorldPositionToTileXY -> TryGetTerrainSurfaceVoxelZ).
@@ -357,7 +362,9 @@ bool UMiningSubsystem::CreateMiningDesignationEx(
 			{
 				// CUBE-VOXEL-SCALE FIX: same world-tile chain as ResolveMineTarget, not
 				// VoxelCellToChunkCell (which broke after the 200uu scale change).
-				const UWorldMapSubsystem* WorldMap_Entry = World->GetSubsystem<UWorldMapSubsystem>();
+				// CUBE-BLOCKGRID-01: CubePrototype uses the per-voxel lookup directly.
+				const UWorldMapSubsystem* WorldMap_Entry =
+					VM_Surface->IsCubeTerrainActive() ? nullptr : World->GetSubsystem<UWorldMapSubsystem>();
 				int32 ColumnSurfaceZ = 0;
 				bool bHasSurface = false;
 

@@ -610,7 +610,10 @@ bool UCivilizationActivitySubsystem::FindMiningCandidateNearSettlement(
     const int32 LocalX = (Wrapped % Diameter) - Radius;
     const int32 LocalY = (Wrapped / Diameter) - Radius;
 
-    const FIntPoint CandidateCell = Settlement.WorldOrigin + FIntPoint(LocalX, LocalY);
+    // CUBE-BLOCKGRID-01: Settlement.WorldOrigin is a world-map tile. Mining works in
+    // grid cells, so start from the tile's center cell (unchanged outside CubePrototype).
+    const FIntPoint CandidateCell =
+        VoxelWorldManager->TerrainCellToGridCell(Settlement.WorldOrigin) + FIntPoint(LocalX, LocalY);
 
     int32 SurfaceZ = 0;
     if (!VoxelWorldManager->TryGetTerrainSurfaceVoxelZ(CandidateCell, SurfaceZ))

@@ -39,6 +39,117 @@ namespace
 		Style.IconScale = 0.15f;
 		return Style;
 	}
+
+	static constexpr float WF_MineOverlayFootprintUU = 200.0f;
+
+	struct FMineMeshScaleCache
+	{
+		const UStaticMesh* Mesh = nullptr;
+		FVector BoundsSize = FVector(100.0f, 100.0f, 100.0f);
+		FVector AppliedScale = FVector(2.0f, 2.0f, 1.0f);
+	};
+
+	static FVector GetMeshBoundsSizeUU(const UStaticMesh* Mesh)
+	{
+		if (!Mesh)
+		{
+			return FVector(100.0f, 100.0f, 100.0f);
+		}
+
+		const FBoxSphereBounds Bounds = Mesh->GetBounds();
+		return FVector(
+			FMath::Max(Bounds.BoxExtent.X * 2.0f, KINDA_SMALL_NUMBER),
+			FMath::Max(Bounds.BoxExtent.Y * 2.0f, KINDA_SMALL_NUMBER),
+			FMath::Max(Bounds.BoxExtent.Z * 2.0f, KINDA_SMALL_NUMBER));
+	}
+
+	static FVector ResolveMineOverlayScale(const UStaticMesh* Mesh)
+	{
+		static FMineMeshScaleCache Cache;
+		if (Cache.Mesh != Mesh)
+		{
+			Cache.Mesh = Mesh;
+			Cache.BoundsSize = GetMeshBoundsSizeUU(Mesh);
+			Cache.AppliedScale = FVector(
+				WF_MineOverlayFootprintUU / Cache.BoundsSize.X,
+				WF_MineOverlayFootprintUU / Cache.BoundsSize.Y,
+				1.0f);
+
+			UE_LOG(LogGridOverlay, Log,
+				TEXT("[CUBE-MINING-ALIGN-MESH] BoundsXY=(%.2f,%.2f) Desired=(200,200) AppliedScale=(%.4f,%.4f) FinalWorldSize=(%.2f,%.2f)"),
+				Cache.BoundsSize.X,
+				Cache.BoundsSize.Y,
+				Cache.AppliedScale.X,
+				Cache.AppliedScale.Y,
+				Cache.BoundsSize.X * Cache.AppliedScale.X,
+				Cache.BoundsSize.Y * Cache.AppliedScale.Y);
+		}
+
+		return Cache.AppliedScale;
+	}
+
+	static FVector ResolveMineCubeScale(const UStaticMesh* Mesh, float DesiredSizeUU)
+	{
+		const FVector BoundsSize = GetMeshBoundsSizeUU(Mesh);
+		return FVector(
+			DesiredSizeUU / BoundsSize.X,
+			DesiredSizeUU / BoundsSize.Y,
+			DesiredSizeUU / BoundsSize.Z);
+	}
+
+	static bool TryGetRenderedVoxelCenterForMine(
+		const AActor* ContextActor,
+		const FIntVector& VoxelCoord,
+		FVector& OutRenderedCenter,
+		float& OutCellSizeUU)
+	{
+		UWorld* World = ContextActor ? ContextActor->GetWorld() : nullptr;
+		const UVoxelWorldManager* VM = World ? World->GetSubsystem<UVoxelWorldManager>() : nullptr;
+		if (!VM)
+		{
+			return false;
+		}
+
+		OutRenderedCenter = VM->GridToRenderedVoxelCenter(VoxelCoord);
+		OutCellSizeUU = FMath::Max(KINDA_SMALL_NUMBER, VM->GetRenderVoxelSize());
+		return true;
+	}
+
+	static FTransform MakeMineOverlayTransform(
+		const AActor* ContextActor,
+		const FIntVector& VoxelCoord,
+		float TerrainZ,
+		float ZOffset,
+		const UStaticMesh* OverlayMesh)
+	{
+		FVector RenderedCenter = FVector::ZeroVector;
+		float RenderCellSizeUU = WF_MineOverlayFootprintUU;
+		if (!TryGetRenderedVoxelCenterForMine(ContextActor, VoxelCoord, RenderedCenter, RenderCellSizeUU))
+		{
+			UE_LOG(LogGridOverlay, Warning,
+				TEXT("[CUBE-MINING-ALIGN] Voxel=(%d,%d,%d) RenderedCenter=(0.0,0.0,0.0) OverlayCenter=(0.0,0.0,0.0) Delta=(0.0,0.0,0.0) CellSizeUU=200 MissingVoxelManager=true"),
+				VoxelCoord.X, VoxelCoord.Y, VoxelCoord.Z);
+			return FTransform(FRotator::ZeroRotator, FVector::ZeroVector, ResolveMineOverlayScale(OverlayMesh));
+		}
+
+		const FVector OverlayCenter(RenderedCenter.X, RenderedCenter.Y, TerrainZ + ZOffset);
+		const FVector Delta = OverlayCenter - RenderedCenter;
+
+		static int32 AlignLogCount = 0;
+		if (AlignLogCount < 128)
+		{
+			UE_LOG(LogGridOverlay, Log,
+				TEXT("[CUBE-MINING-ALIGN] Voxel=(%d,%d,%d) RenderedCenter=(%.1f,%.1f,%.1f) OverlayCenter=(%.1f,%.1f,%.1f) Delta=(%.1f,%.1f,%.1f) CellSizeUU=%.0f"),
+				VoxelCoord.X, VoxelCoord.Y, VoxelCoord.Z,
+				RenderedCenter.X, RenderedCenter.Y, RenderedCenter.Z,
+				OverlayCenter.X, OverlayCenter.Y, OverlayCenter.Z,
+				Delta.X, Delta.Y, Delta.Z,
+				RenderCellSizeUU);
+			++AlignLogCount;
+		}
+
+		return FTransform(FRotator::ZeroRotator, OverlayCenter, ResolveMineOverlayScale(OverlayMesh));
+	}
 }
 
 
@@ -392,6 +503,13 @@ void ATileGridOverlayActor::SetCellSizeUU(float InSize)
 	RebuildAllInstances();
 }
 
+void ATileGridOverlayActor::SetVoxelZStepUU(float InStep)
+{
+	if (FMath::IsNearlyEqual(VoxelZStepUU, InStep)) return;
+	VoxelZStepUU = InStep;
+	RebuildAllInstances();
+}
+
 // ─────────────────────────────────────────────────────────────
 // Hover
 // ─────────────────────────────────────────────────────────────
@@ -403,7 +521,9 @@ void ATileGridOverlayActor::SetHoveredCell(const FIntVector& VoxelCoord, float T
 
 	// Do not rebuild the base grid here. The base grid is static per tool session
 	// and should not swim/flicker while the mouse moves.
-	const FTransform CellXform = MakeCellTransform(VoxelCoord, TerrainZ);
+	const FTransform CellXform = (CurrentMode == EBuildToolMode::Mine)
+		? MakeMineOverlayTransform(this, VoxelCoord, TerrainZ, OverlayVisualZOffset, CellPlaneMesh)
+		: MakeCellTransform(VoxelCoord, TerrainZ);
 	HoverMeshComp->SetWorldTransform(CellXform);
 	HoverMeshComp->SetVisibility(bOverlayVisible);
 
@@ -598,15 +718,8 @@ void ATileGridOverlayActor::SetMiningVolumeCells(const TArray<FIntVector>& Voxel
 
 	auto MakeFlatOverlayTransform = [this](const FIntVector& VoxelCoord) -> FTransform
 		{
-			const float WorldX = VoxelWorldOrigin.X + (static_cast<float>(VoxelCoord.X) + 0.5f) * CellSizeUU;
-			const float WorldY = VoxelWorldOrigin.Y + (static_cast<float>(VoxelCoord.Y) + 0.5f) * CellSizeUU;
-			const float WorldZ = VoxelWorldOrigin.Z + (static_cast<float>(VoxelCoord.Z) + 1.0f) * CellSizeUU + OverlayVisualZOffset;
-			const float MeshScale = CellSizeUU / 100.0f;
-
-			return FTransform(
-				FRotator::ZeroRotator,
-				FVector(WorldX, WorldY, WorldZ),
-				FVector(MeshScale, MeshScale, 1.0f));
+			const float WorldZ = VoxelWorldOrigin.Z + (static_cast<float>(VoxelCoord.Z) + 1.0f) * GetVoxelZStepUU();
+			return MakeMineOverlayTransform(this, VoxelCoord, WorldZ, OverlayVisualZOffset, CellPlaneMesh);
 		};
 
 	FIntVector ProofCoord = VoxelCoords.Num() > 0
@@ -714,15 +827,8 @@ void ATileGridOverlayActor::SetMiningVolumeCellsTinted(const TArray<FIntVector>&
 
 	auto MakeFlatOverlayTransform = [this](const FIntVector& VoxelCoord) -> FTransform
 		{
-			const float WorldX = VoxelWorldOrigin.X + (static_cast<float>(VoxelCoord.X) + 0.5f) * CellSizeUU;
-			const float WorldY = VoxelWorldOrigin.Y + (static_cast<float>(VoxelCoord.Y) + 0.5f) * CellSizeUU;
-			const float WorldZ = VoxelWorldOrigin.Z + (static_cast<float>(VoxelCoord.Z) + 1.0f) * CellSizeUU + OverlayVisualZOffset;
-			const float MeshScale = CellSizeUU / 100.0f;
-
-			return FTransform(
-				FRotator::ZeroRotator,
-				FVector(WorldX, WorldY, WorldZ),
-				FVector(MeshScale, MeshScale, 1.0f));
+			const float WorldZ = VoxelWorldOrigin.Z + (static_cast<float>(VoxelCoord.Z) + 1.0f) * GetVoxelZStepUU();
+			return MakeMineOverlayTransform(this, VoxelCoord, WorldZ, OverlayVisualZOffset, CellPlaneMesh);
 		};
 
 	FIntVector ProofCoord = VoxelCoords.Num() > 0 ? VoxelCoords[0] : FIntVector::ZeroValue;
@@ -1182,10 +1288,11 @@ void ATileGridOverlayActor::CommitSelectedCellsAsConfirmed(EGridDesignationType 
 
 	for (const TPair<FIntVector, int32>& Pair : SelectedCells)
 	{
-		// Dig/legacy index-only selections store INDEX_NONE. Use voxel top face Z.
+		// Dig/legacy index-only selections store INDEX_NONE. Use voxel top face Z
+		// (OPTION-D: the key's Z is a 200uu voxel layer index, never macro-scaled).
 		if (Pair.Value == INDEX_NONE)
 		{
-			Snapshot.Add(Pair.Key, static_cast<float>(Pair.Key.Z + 1) * CellSizeUU);
+			Snapshot.Add(Pair.Key, static_cast<float>(Pair.Key.Z + 1) * GetVoxelZStepUU());
 			continue;
 		}
 		FTransform Xform;
@@ -1233,6 +1340,23 @@ void ATileGridOverlayActor::ClearAllConfirmedDesignationCells()
 	ConfirmedDesignationCells.Empty();
 	ConfirmedCellTerrainZ.Empty();
 	RebuildAllInstances();
+}
+
+bool ATileGridOverlayActor::FindConfirmedDesignationCellAtXY(
+	const FIntPoint& CellXY,
+	EGridDesignationType DesignationType,
+	FIntVector& OutVoxelCoord) const
+{
+	for (const TPair<FIntVector, FGridDesignationCellVisual>& Pair : ConfirmedDesignationCells)
+	{
+		if (Pair.Key.X == CellXY.X && Pair.Key.Y == CellXY.Y &&
+			Pair.Value.DesignationType == DesignationType)
+		{
+			OutVoxelCoord = Pair.Key;
+			return true;
+		}
+	}
+	return false;
 }
 
 bool ATileGridOverlayActor::RemoveConfirmedDesignationCell(const FIntVector& VoxelCoord, EGridDesignationType DesignationType)
@@ -1346,7 +1470,9 @@ void ATileGridOverlayActor::AddConfirmedVisualInstance(const FGridDesignationCel
 	}
 
 	const FGridOverlayStyle Style = GetStyleForDesignation(CellVisual.DesignationType);
-	const FTransform CellXform = MakeCellTransform(CellVisual.VoxelCoord, CellVisual.TerrainZ);
+	const FTransform CellXform = (CellVisual.DesignationType == EGridDesignationType::Mine)
+		? MakeMineOverlayTransform(this, CellVisual.VoxelCoord, CellVisual.TerrainZ, OverlayVisualZOffset, CellPlaneMesh)
+		: MakeCellTransform(CellVisual.VoxelCoord, CellVisual.TerrainZ);
 	const int32 TileIdx = ConfirmedTileMeshHISM->AddInstance(CellXform, true);
 	SetInstanceColor(ConfirmedTileMeshHISM, TileIdx, Style.TileColor);
 	ConfirmedTileMeshHISM->SetCustomDataValue(TileIdx, 4, Style.BorderColor.A, true);
@@ -1365,9 +1491,24 @@ void ATileGridOverlayActor::AddConfirmedVisualInstance(const FGridDesignationCel
 	{
 		if (UHierarchicalInstancedStaticMeshComponent* IconHISM = GetOrCreateIconHISM(CellVisual.DesignationType, Style))
 		{
-			const float WorldX = VoxelWorldOrigin.X + (static_cast<float>(CellVisual.VoxelCoord.X) + 0.5f) * CellSizeUU;
-			const float WorldY = VoxelWorldOrigin.Y + (static_cast<float>(CellVisual.VoxelCoord.Y) + 0.5f) * CellSizeUU;
+			float WorldX = 0.0f;
+			float WorldY = 0.0f;
 			const float WorldZ = CellVisual.TerrainZ + OverlayVisualZOffset + IconZOffset;
+			if (CellVisual.DesignationType == EGridDesignationType::Mine)
+			{
+				FVector RenderedCenter = FVector::ZeroVector;
+				float RenderCellSizeUU = WF_MineOverlayFootprintUU;
+				if (TryGetRenderedVoxelCenterForMine(this, CellVisual.VoxelCoord, RenderedCenter, RenderCellSizeUU))
+				{
+					WorldX = RenderedCenter.X;
+					WorldY = RenderedCenter.Y;
+				}
+			}
+			else
+			{
+				WorldX = VoxelWorldOrigin.X + (static_cast<float>(CellVisual.VoxelCoord.X) + 0.5f) * CellSizeUU;
+				WorldY = VoxelWorldOrigin.Y + (static_cast<float>(CellVisual.VoxelCoord.Y) + 0.5f) * CellSizeUU;
+			}
 			const float IconWorldSize = CellSizeUU * FMath::Clamp(Style.IconScale, 0.05f, 1.0f);
 			const float MeshScale = IconWorldSize / 100.0f;
 
@@ -1528,7 +1669,15 @@ void ATileGridOverlayActor::RebuildBaseGridLines(const TMap<FIntVector, float>& 
 	const float HeightUU = bUndergroundWhite ? 2.0f : 2.0f;
 	const float LineZOffset = bUndergroundWhite ? OverlayVisualZOffset + 3.0f : OverlayVisualZOffset;
 
-	const float LengthScale = CellSizeUU / 100.0f;
+	const bool bMineLayer = CurrentMode == EBuildToolMode::Mine;
+	float RenderLineCellSizeUU = CellSizeUU;
+	if (bMineLayer)
+	{
+		FVector RenderedCenter = FVector::ZeroVector;
+		TryGetRenderedVoxelCenterForMine(this, FIntVector::ZeroValue, RenderedCenter, RenderLineCellSizeUU);
+	}
+
+	const float LengthScale = RenderLineCellSizeUU / 100.0f;
 	const float ThicknessScale = ThicknessUU / 100.0f;
 	const float HeightScale = HeightUU / 100.0f;
 
@@ -1544,12 +1693,37 @@ void ATileGridOverlayActor::RebuildBaseGridLines(const TMap<FIntVector, float>& 
 		const FIntVector& VoxelCoord = Pair.Key;
 		const float Z = Pair.Value + LineZOffset;
 
-		const float MinX = VoxelWorldOrigin.X + static_cast<float>(VoxelCoord.X) * CellSizeUU;
-		const float MaxX = VoxelWorldOrigin.X + static_cast<float>(VoxelCoord.X + 1) * CellSizeUU;
-		const float MinY = VoxelWorldOrigin.Y + static_cast<float>(VoxelCoord.Y) * CellSizeUU;
-		const float MaxY = VoxelWorldOrigin.Y + static_cast<float>(VoxelCoord.Y + 1) * CellSizeUU;
-		const float CenterX = (MinX + MaxX) * 0.5f;
-		const float CenterY = (MinY + MaxY) * 0.5f;
+		float MinX = 0.0f;
+		float MaxX = 0.0f;
+		float MinY = 0.0f;
+		float MaxY = 0.0f;
+		float CenterX = 0.0f;
+		float CenterY = 0.0f;
+		if (bMineLayer)
+		{
+			FVector RenderedCenter = FVector::ZeroVector;
+			float RenderCellSizeUU = RenderLineCellSizeUU;
+			if (!TryGetRenderedVoxelCenterForMine(this, VoxelCoord, RenderedCenter, RenderCellSizeUU))
+			{
+				continue;
+			}
+			const float HalfCell = RenderCellSizeUU * 0.5f;
+			CenterX = RenderedCenter.X;
+			CenterY = RenderedCenter.Y;
+			MinX = RenderedCenter.X - HalfCell;
+			MaxX = RenderedCenter.X + HalfCell;
+			MinY = RenderedCenter.Y - HalfCell;
+			MaxY = RenderedCenter.Y + HalfCell;
+		}
+		else
+		{
+			MinX = VoxelWorldOrigin.X + static_cast<float>(VoxelCoord.X) * CellSizeUU;
+			MaxX = VoxelWorldOrigin.X + static_cast<float>(VoxelCoord.X + 1) * CellSizeUU;
+			MinY = VoxelWorldOrigin.Y + static_cast<float>(VoxelCoord.Y) * CellSizeUU;
+			MaxY = VoxelWorldOrigin.Y + static_cast<float>(VoxelCoord.Y + 1) * CellSizeUU;
+			CenterX = (MinX + MaxX) * 0.5f;
+			CenterY = (MinY + MaxY) * 0.5f;
+		}
 
 		// Four border strips per cell. Duplicates are intentional: they make the grid readable
 		// over bright terrain and over the black underground cutaway void.
@@ -1897,8 +2071,25 @@ void ATileGridOverlayActor::RebuildBaseGridLineBatch(const TMap<FIntVector, floa
 			return Count > 0 ? (Sum / static_cast<float>(Count)) : FallbackZ;
 		};
 
+	const bool bMineLineLayer = CurrentMode == EBuildToolMode::Mine;
+	const int32 MineLineVoxelZ = CellsWithTerrainZ.Num() > 0 ? CellsWithTerrainZ.CreateConstIterator()->Key.Z : 0;
+
 	auto MakeCornerPoint = [&](const FIntPoint& Corner) -> FVector
 		{
+			if (bMineLineLayer)
+			{
+				FVector RenderedCenter = FVector::ZeroVector;
+				float RenderCellSizeUU = WF_MineOverlayFootprintUU;
+				if (TryGetRenderedVoxelCenterForMine(this, FIntVector(Corner.X, Corner.Y, MineLineVoxelZ), RenderedCenter, RenderCellSizeUU))
+				{
+					return FVector(
+						RenderedCenter.X - RenderCellSizeUU * 0.5f,
+						RenderedCenter.Y - RenderCellSizeUU * 0.5f,
+						GetCornerZ(Corner) + LineZOffset);
+				}
+				return FVector(0.0f, 0.0f, GetCornerZ(Corner) + LineZOffset);
+			}
+
 			return FVector(
 				VoxelWorldOrigin.X + static_cast<float>(Corner.X) * CellSizeUU,
 				VoxelWorldOrigin.Y + static_cast<float>(Corner.Y) * CellSizeUU,
@@ -1957,6 +2148,17 @@ void ATileGridOverlayActor::RebuildBaseGridLineBatch(const TMap<FIntVector, floa
 
 FVector ATileGridOverlayActor::MakeGridLinePoint(const FIntVector& VoxelCoord, float TerrainZ, float ExtraZOffset) const
 {
+	if (CurrentMode == EBuildToolMode::Mine)
+	{
+		FVector RenderedCenter = FVector::ZeroVector;
+		float RenderCellSizeUU = WF_MineOverlayFootprintUU;
+		if (TryGetRenderedVoxelCenterForMine(this, VoxelCoord, RenderedCenter, RenderCellSizeUU))
+		{
+			return FVector(RenderedCenter.X, RenderedCenter.Y, TerrainZ + OverlayVisualZOffset + ExtraZOffset);
+		}
+		return FVector(0.0f, 0.0f, TerrainZ + OverlayVisualZOffset + ExtraZOffset);
+	}
+
 	return FVector(
 		VoxelWorldOrigin.X + (static_cast<float>(VoxelCoord.X) + 0.5f) * CellSizeUU,
 		VoxelWorldOrigin.Y + (static_cast<float>(VoxelCoord.Y) + 0.5f) * CellSizeUU,
@@ -1988,9 +2190,25 @@ FTransform ATileGridOverlayActor::MakeCellTransform(const FIntVector& VoxelCoord
 
 FTransform ATileGridOverlayActor::MakeIconTransform(const FIntVector& VoxelCoord, float TerrainZ) const
 {
-	const float WorldX = VoxelWorldOrigin.X + (static_cast<float>(VoxelCoord.X) + 0.5f) * CellSizeUU;
-	const float WorldY = VoxelWorldOrigin.Y + (static_cast<float>(VoxelCoord.Y) + 0.5f) * CellSizeUU;
+	float WorldX = 0.0f;
+	float WorldY = 0.0f;
 	const float WorldZ = TerrainZ + OverlayVisualZOffset + IconZOffset;
+
+	if (CurrentMode == EBuildToolMode::Mine)
+	{
+		FVector RenderedCenter = FVector::ZeroVector;
+		float RenderCellSizeUU = WF_MineOverlayFootprintUU;
+		if (TryGetRenderedVoxelCenterForMine(this, VoxelCoord, RenderedCenter, RenderCellSizeUU))
+		{
+			WorldX = RenderedCenter.X;
+			WorldY = RenderedCenter.Y;
+		}
+	}
+	else
+	{
+		WorldX = VoxelWorldOrigin.X + (static_cast<float>(VoxelCoord.X) + 0.5f) * CellSizeUU;
+		WorldY = VoxelWorldOrigin.Y + (static_cast<float>(VoxelCoord.Y) + 0.5f) * CellSizeUU;
+	}
 
 	// Icons are scaled smaller than the full cell
 	const float IconWorldSize = CellSizeUU * ActiveStyle.IconScale;
@@ -2005,6 +2223,17 @@ FTransform ATileGridOverlayActor::MakeIconTransform(const FIntVector& VoxelCoord
 
 FVector ATileGridOverlayActor::MakeTerrainCellWorldLocation(const FIntVector& VoxelCoord, float WorldZ) const
 {
+	if (CurrentMode == EBuildToolMode::Mine)
+	{
+		FVector RenderedCenter = FVector::ZeroVector;
+		float RenderCellSizeUU = WF_MineOverlayFootprintUU;
+		if (TryGetRenderedVoxelCenterForMine(this, VoxelCoord, RenderedCenter, RenderCellSizeUU))
+		{
+			return FVector(RenderedCenter.X, RenderedCenter.Y, WorldZ);
+		}
+		return FVector(0.0f, 0.0f, WorldZ);
+	}
+
 	const FIntPoint TerrainCell(VoxelCoord.X, VoxelCoord.Y);
 	const UWorld* World = GetWorld();
 	const UVoxelWorldManager* VM = World ? World->GetSubsystem<UVoxelWorldManager>() : nullptr;
@@ -2082,18 +2311,21 @@ void ATileGridOverlayActor::RebuildMiningDesignationLines(const TArray<FIntVecto
 
 FTransform ATileGridOverlayActor::MakeMiningVolumeTransform(const FIntVector& VoxelCoord) const
 {
-	// Match AMiningGhostActor::VoxelToWorldCenter(): integer voxel coord -> centre of cell.
-	// The grid is edge-aligned; the cube is centred inside those edges.
-	const float WorldX = VoxelWorldOrigin.X + (static_cast<float>(VoxelCoord.X) + 0.5f) * CellSizeUU;
-	const float WorldY = VoxelWorldOrigin.Y + (static_cast<float>(VoxelCoord.Y) + 0.5f) * CellSizeUU;
-	const float WorldZ = VoxelWorldOrigin.Z + (static_cast<float>(VoxelCoord.Z) + 0.5f) * CellSizeUU;
+	FVector RenderedCenter = FVector::ZeroVector;
+	float RenderCellSizeUU = WF_MineOverlayFootprintUU;
+	if (!TryGetRenderedVoxelCenterForMine(this, VoxelCoord, RenderedCenter, RenderCellSizeUU))
+	{
+		UE_LOG(LogGridOverlay, Warning,
+			TEXT("[CUBE-MINING-ALIGN] Voxel=(%d,%d,%d) RenderedCenter=(0.0,0.0,0.0) OverlayCenter=(0.0,0.0,0.0) Delta=(0.0,0.0,0.0) CellSizeUU=200 MissingVoxelManager=true"),
+			VoxelCoord.X, VoxelCoord.Y, VoxelCoord.Z);
+		return FTransform(FRotator::ZeroRotator, FVector::ZeroVector, FVector::OneVector);
+	}
 
-	const float Scale = (CellSizeUU / 100.0f) * FMath::Clamp(MiningVolumeScale, 0.1f, 1.0f);
-
+	const float DesiredSizeUU = RenderCellSizeUU * FMath::Clamp(MiningVolumeScale, 0.1f, 1.0f);
 	return FTransform(
 		FRotator::ZeroRotator,
-		FVector(WorldX, WorldY, WorldZ),
-		FVector(Scale, Scale, Scale)
+		RenderedCenter,
+		ResolveMineCubeScale(MiningVolumeCubeMesh, DesiredSizeUU)
 	);
 }
 
@@ -2134,9 +2366,11 @@ int32 ATileGridOverlayActor::AddCellToHISM(
 		return INDEX_NONE;
 	}
 
-	// Surface Mine uses the exact same Build/Farm transform path: MakeCellTransform(VoxelCoord, TerrainZ).
-	// No Mine-specific Z override, no voxel-space fallback.
-	const FTransform CellXform = MakeCellTransform(VoxelCoord, TerrainZ);
+	const bool bMineFlatCell = CurrentMode == EBuildToolMode::Mine &&
+		(&TrackingMap == &SelectedCells || &TrackingMap == &DragCells);
+	const FTransform CellXform = bMineFlatCell
+		? MakeMineOverlayTransform(this, VoxelCoord, TerrainZ, OverlayVisualZOffset, CellPlaneMesh)
+		: MakeCellTransform(VoxelCoord, TerrainZ);
 
 	if (CurrentMode == EBuildToolMode::Mine &&
 		(&TrackingMap == &SelectedCells || &TrackingMap == &DragCells))
@@ -2336,7 +2570,9 @@ void ATileGridOverlayActor::RebuildBaseGridAround(const FIntVector& CenterCoord,
 		for (int32 Y = CenterCoord.Y - VisibleGridRadius; Y <= CenterCoord.Y + VisibleGridRadius; ++Y)
 		{
 			const FIntVector GridCoord(X, Y, CenterCoord.Z);
-			const FTransform CellXform = MakeCellTransform(GridCoord, TerrainZ);
+			const FTransform CellXform = (CurrentMode == EBuildToolMode::Mine)
+				? MakeMineOverlayTransform(this, GridCoord, TerrainZ, OverlayVisualZOffset, CellPlaneMesh)
+				: MakeCellTransform(GridCoord, TerrainZ);
 			const int32 Idx = BaseGridHISM->AddInstance(CellXform, true);
 			SetInstanceColor(BaseGridHISM, Idx, VisibleNeutralGridColor);
 			BaseGridHISM->SetCustomDataValue(Idx, 4, VisibleBorderAlpha, true);

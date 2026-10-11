@@ -8,6 +8,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "CubeTerrainTypes.h"
+#include "WorldForgeCubeMeshBuilder.h"
 #include "WorldForgeCubeTerrainActor.generated.h"
 
 class UHierarchicalInstancedStaticMeshComponent;
@@ -16,7 +17,6 @@ class UMaterialInstanceDynamic;
 class UProceduralMeshComponent;
 class UCubeTerrainRuntime;
 class UVoxelWorldManager;
-struct FWorldForgeCubePatchMeshSettings;
 
 UCLASS()
 class WORLDFORGE_API AWFCubeTerrainActor : public AActor
@@ -32,6 +32,12 @@ public:
 
     // Clear all HISM instances without destroying the actor.
     void ClearPatch();
+
+    // CUBE-BLOCKGRID-01: Re-mesh the chunk containing GridCell (and any neighbor
+    // chunk whose boundary faces it touches) from the runtime's patch volume.
+    // Call after UCubeTerrainRuntime::RemoveGridBlock / RestoreGridBlock.
+    // Returns false when the chunk-mesh path is not active (e.g. HISM fallback).
+    bool RebuildChunksForGridCell(UCubeTerrainRuntime* Runtime, const FIntVector& GridCell);
 
     // Patch half-radius in tiles. Full patch = PatchHalfRadius*2 x PatchHalfRadius*2 world tiles.
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "CubeTerrain")
@@ -128,8 +134,23 @@ private:
     // CUBE-TERRAIN-04N: Returns the mapped material for BlockType, or nullptr if unmapped.
     UMaterialInterface* GetMaterialForBlockType(EWorldForgeCubeBlockType BlockType) const;
 
+    // CUBE-BLOCKGRID-01: chunk mesh component helpers shared by BuildPatch and chunk rebuilds.
+    UProceduralMeshComponent* CreateChunkMeshComponent(const FIntPoint& ChunkCoord);
+    void ApplyChunkMeshData(
+        UProceduralMeshComponent* ChunkMeshComponent,
+        const FWorldForgeCubeChunkMeshData& ChunkData,
+        TSet<EWorldForgeCubeBlockType>* LoggedBlockMatTypes,
+        int32& OutAssignedCount,
+        int32& OutDebugFallbackCount);
+
     UPROPERTY(Transient)
     TArray<TObjectPtr<UProceduralMeshComponent>> ChunkMeshComponents;
+
+    // CUBE-BLOCKGRID-01: index into ChunkMeshComponents per chunk coord, and the
+    // settings the patch was built with, so single chunks can be re-meshed.
+    TMap<FIntPoint, int32> ChunkComponentIndexByCoord;
+    FWorldForgeCubePatchMeshSettings LastMeshSettings;
+    bool bHasLastMeshSettings = false;
 
     // One HISM per non-Air block type. Created in constructor; mesh/instances set in BuildPatch.
     UPROPERTY(VisibleAnywhere, Category = "CubeTerrain")

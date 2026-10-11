@@ -95,6 +95,69 @@ static EWorldForgeCubeBlockType ClassifyTopBlock(
 }
 
 // ─────────────────────────────────────────────────────────────────
+// CUBE-INLANDWATER-01 helpers
+//
+// Land tiles map Elevation (0–1) to a surface block Z with quantization.
+// Inland water (Lake/River biome) must reuse the SAME mapping so river beds
+// and lake shores line up with neighbouring land columns instead of being
+// forced down to the ocean water level (the pre-01 behavior, which punched
+// sea-level slots through mountains wherever a river or lake crossed them).
+// ─────────────────────────────────────────────────────────────────
+
+static int32 CubeLandSurfaceZFromElevation(float Elevation01, int32 BlockHeightStep)
+{
+    const float NormElev = FMath::Clamp(Elevation01, 0.f, 1.f);
+    int32 RawZ = FMath::RoundToInt(NormElev * float(Cube01C_MaxSurfaceBlocks));
+    RawZ = (RawZ / BlockHeightStep) * BlockHeightStep;
+    RawZ = FMath::Max(RawZ, BlockHeightStep);
+    return FMath::Clamp(RawZ, 1, Cube01C_MaxSurfaceBlocks);
+}
+
+// River water depth (0–1 from the pipeline, typically 0.05–0.25) → blocks of
+// water above the carved bed. At least 1 block so the channel always shows water.
+static int32 CubeInlandWaterDepthBlocks(float WaterDepth01)
+{
+    return FMath::Clamp(FMath::RoundToInt(WaterDepth01 * 8.0f), 1, 3);
+}
+
+// Returns the accepted lake basin whose tile bounds contain (TileX, TileY),
+// or nullptr. Basins only store bounds, so biome confirmation stays with the caller.
+static const FLakeBasinData* FindContainingLakeBasin(
+    const TArray<FLakeBasinData>* LakeBasins, int32 TileX, int32 TileY)
+{
+    if (!LakeBasins) return nullptr;
+    for (const FLakeBasinData& Basin : *LakeBasins)
+    {
+        if (TileX >= Basin.MinTileX && TileX <= Basin.MaxTileX &&
+            TileY >= Basin.MinTileY && TileY <= Basin.MaxTileY)
+        {
+            return &Basin;
+        }
+    }
+    return nullptr;
+}
+
+// CUBE-VOLCANO-01: true when the tile sits inside a volcano's crater bowl.
+// Step03 already bakes cone height and crater carve into Tile.Elevation; this
+// only decides the surface block (molten crater vs basalt slopes).
+static bool IsTileInVolcanoCrater(
+    const TArray<FVolcanoData>* Volcanoes, int32 TileX, int32 TileY)
+{
+    if (!Volcanoes) return false;
+    const FVector2D TilePos(static_cast<float>(TileX), static_cast<float>(TileY));
+    for (const FVolcanoData& V : *Volcanoes)
+    {
+        if (!V.bActive) continue;
+        const float CraterRadius = V.ConeRadius * FMath::Max(0.05f, V.CraterRadiusFraction);
+        if (FVector2D::Distance(TilePos, V.Center) <= CraterRadius)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+// ─────────────────────────────────────────────────────────────────
 // CubeBlockTypeToTerrainTag — maps block type to WorldForge.Terrain.* tags.
 // ─────────────────────────────────────────────────────────────────
 
@@ -147,6 +210,7 @@ void UCubeTerrainRuntime::InitializeRuntime()
     MinSurfaceZ   = 0;
     MaxSurfaceZ   = 0;
     ChunkCount    = 0;
+    ClearPatchBlockVolume();
 
     UE_LOG(LogTemp, Log, TEXT("[CubeTerrain] Runtime initialized."));
 }
@@ -169,8 +233,13 @@ void UCubeTerrainRuntime::BuildFromTiles(
     int32 GridHeight,
     int32 InBlockHeightStep,
     int32 InBlocksPerWorldTile,
-    float InTileWorldSizeUU)
+    float InTileWorldSizeUU,
+    const TArray<FLakeBasinData>* InLakeBasins,
+    const TArray<FVolcanoData>* InVolcanoes)
 {
+    const bool bHasLakeBasinData = (InLakeBasins && InLakeBasins->Num() > 0);
+    const bool bHasVolcanoData = (InVolcanoes && InVolcanoes->Num() > 0);
+
     // CUBE-TERRAIN-02A: store block resolution before any early-out.
     BlocksPerWorldTile = FMath::Max(1, InBlocksPerWorldTile);
     // CUBE-VOXEL-SCALE: store the true tile world size for GetChunkWorldSize().
@@ -190,6 +259,14 @@ void UCubeTerrainRuntime::BuildFromTiles(
         TEXT("[CubeTerrainRender] BlockGrid mode enabled. BlocksPerTile=%d TileWorldSizeUU=%.1f EffectiveBlockSizeUU=%.1f"),
         BlocksPerWorldTile, TileWorldSizeUU, EffectiveBlockSizeUU);
 
+    // CUBE-INLANDWATER-01 / CUBE-VOLCANO-01: pipeline feature data availability.
+    UE_LOG(LogTemp, Log,
+        TEXT("[CubeTerrain] Pipeline features. LakeBasins=%d Volcanoes=%d (inland water elevation=%s, crater lava=%s)"),
+        InLakeBasins ? InLakeBasins->Num() : 0,
+        InVolcanoes ? InVolcanoes->Num() : 0,
+        bHasLakeBasinData ? TEXT("basin-aware") : TEXT("per-tile"),
+        bHasVolcanoData ? TEXT("crater-only") : TEXT("legacy biome-wide"));
+
     if (GridWidth <= 0 || GridHeight <= 0 || WorldTiles.Num() == 0)
     {
         UE_LOG(LogTemp, Warning,
@@ -207,6 +284,9 @@ void UCubeTerrainRuntime::BuildFromTiles(
     }
 
     // ── Reset and size all storage ──────────────────────────────
+    // CUBE-BLOCKGRID-01: the patch volume belongs to the previous build.
+    ClearPatchBlockVolume();
+
     CachedGridWidth  = GridWidth;
     CachedGridHeight = GridHeight;
     BlockHeightStep  = FMath::Max(1, InBlockHeightStep);
@@ -244,8 +324,17 @@ void UCubeTerrainRuntime::BuildFromTiles(
             const int32 TileIdx = TileY * GridWidth + TileX;
             const FWorldTileData& Tile = WorldTiles[TileIdx];
 
-            const EWorldForgeCubeBlockType TopBlock =
+            EWorldForgeCubeBlockType TopBlock =
                 ClassifyTopBlock(Tile.BiomeType, Tile.Elevation, Tile.WaterDepth);
+
+            // CUBE-VOLCANO-01: molten surface only inside the crater bowl.
+            // Volcanic-biome slopes become basalt. Without volcano data the
+            // legacy biome-wide lava behavior is preserved.
+            if (TopBlock == EWorldForgeCubeBlockType::Lava && bHasVolcanoData &&
+                !IsTileInVolcanoCrater(InVolcanoes, TileX, TileY))
+            {
+                TopBlock = EWorldForgeCubeBlockType::Basalt;
+            }
 
             const FString BiomeAuditName = Tile.BiomeType.IsValid()
                 ? Tile.BiomeType.GetTagName().ToString()
@@ -288,10 +377,46 @@ void UCubeTerrainRuntime::BuildFromTiles(
             const bool bIsWaterTile = (TopBlock == EWorldForgeCubeBlockType::Water);
             const bool bIsLavaTile  = (TopBlock == EWorldForgeCubeBlockType::Lava);
 
+            // CUBE-INLANDWATER-01: Lake/River tiles are inland water — their
+            // water surface follows world-map elevation instead of the global
+            // ocean level. Ocean/Sea/Coastal water keeps the flat ocean plane.
+            const bool bIsInlandWaterTile = bIsWaterTile &&
+                BiomeMatchesAny(Tile.BiomeType, { TEXT("Lake"), TEXT("River") });
+
             int32 SurfaceZ = 0;
             int32 SeabedZ  = 0;
 
-            if (bIsWaterTile)
+            if (bIsInlandWaterTile)
+            {
+                // Bed uses the same elevation mapping as land so channel walls
+                // and lake shores meet neighbouring land columns cleanly.
+                // Step03 already carved river/lake floors into Tile.Elevation.
+                SeabedZ = CubeLandSurfaceZFromElevation(Tile.Elevation, BlockHeightStep);
+
+                // Basin bounds are rectangles, so gate on the Lake biome to keep
+                // rivers that merely cross a basin's bounding box on their own slope.
+                int32 WaterSurfZ;
+                const FLakeBasinData* Basin =
+                    (bHasLakeBasinData && BiomeMatchesAny(Tile.BiomeType, { TEXT("Lake") }))
+                        ? FindContainingLakeBasin(InLakeBasins, TileX, TileY)
+                        : nullptr;
+                if (Basin)
+                {
+                    // Lakes are flat: one shared surface per basin.
+                    WaterSurfZ = CubeLandSurfaceZFromElevation(
+                        Basin->WaterSurfaceElevation01, BlockHeightStep);
+                }
+                else
+                {
+                    // Rivers (and basin-less lake tiles) slope with the terrain.
+                    WaterSurfZ = SeabedZ + CubeInlandWaterDepthBlocks(Tile.WaterDepth);
+                }
+
+                SurfaceZ = FMath::Clamp(
+                    FMath::Max(WaterSurfZ, SeabedZ + 1), 2, Cube01C_MaxSurfaceBlocks);
+                SeabedZ = FMath::Clamp(SeabedZ, 1, SurfaceZ - 1);
+            }
+            else if (bIsWaterTile)
             {
                 SurfaceZ = Cube01C_WaterLevelBlock;
                 SeabedZ  = FMath::Clamp(
@@ -300,11 +425,7 @@ void UCubeTerrainRuntime::BuildFromTiles(
             }
             else
             {
-                const float NormElev = FMath::Clamp(Tile.Elevation, 0.f, 1.f);
-                int32 RawZ = FMath::RoundToInt(NormElev * float(Cube01C_MaxSurfaceBlocks));
-                RawZ = (RawZ / BlockHeightStep) * BlockHeightStep;
-                RawZ = FMath::Max(RawZ, BlockHeightStep);
-                SurfaceZ = FMath::Clamp(RawZ, 1, Cube01C_MaxSurfaceBlocks);
+                SurfaceZ = CubeLandSurfaceZFromElevation(Tile.Elevation, BlockHeightStep);
             }
 
             FWorldForgeCubeChunkKey Key;
@@ -323,11 +444,13 @@ void UCubeTerrainRuntime::BuildFromTiles(
 
                 if (bIsWaterTile)
                 {
-                    if (Z > Cube01C_WaterLevelBlock)
+                    // CUBE-INLANDWATER-01: fill to SurfaceZ — the ocean plane for
+                    // ocean tiles, the elevation-derived surface for inland water.
+                    if (Z > SurfaceZ)
                     {
                         BlockType = EWorldForgeCubeBlockType::Air;
                     }
-                    else if (Z >= SeabedZ && Z <= Cube01C_WaterLevelBlock)
+                    else if (Z >= SeabedZ && Z <= SurfaceZ)
                     {
                         BlockType = (Z == SeabedZ)
                             ? EWorldForgeCubeBlockType::Sand
@@ -377,6 +500,9 @@ void UCubeTerrainRuntime::BuildFromTiles(
                             SubSurface = EWorldForgeCubeBlockType::Rock;
                         else if (TopBlock == EWorldForgeCubeBlockType::Sand)
                             SubSurface = EWorldForgeCubeBlockType::Sand;
+                        // CUBE-VOLCANO-01: basalt slopes are basalt underneath.
+                        else if (TopBlock == EWorldForgeCubeBlockType::Basalt)
+                            SubSurface = EWorldForgeCubeBlockType::Basalt;
                         else
                             SubSurface = EWorldForgeCubeBlockType::Dirt;
 
@@ -483,6 +609,7 @@ void UCubeTerrainRuntime::Reset()
     CachedGridHeight   = 0;
     BlockHeightStep    = 4;
     BlocksPerWorldTile = 8;
+    TileWorldSizeUU    = 3200.0f;
     CubeChunks.Empty();
     SurfaceZCache.Empty();
     TerrainDepthCache.Empty();
@@ -492,6 +619,7 @@ void UCubeTerrainRuntime::Reset()
     MinSurfaceZ   = 0;
     MaxSurfaceZ   = 0;
     ChunkCount    = 0;
+    ClearPatchBlockVolume();
 
     UE_LOG(LogTemp, Log, TEXT("[CubeTerrain] Reset."));
 }
@@ -572,7 +700,12 @@ bool UCubeTerrainRuntime::RemoveBlockAt(const FIntVector& GridPos)
     Cell->bRemoved = true;
 
     const int32 TileIdx = GridPos.Y * CachedGridWidth + GridPos.X;
-    if (SurfaceZCache.IsValidIndex(TileIdx) && SurfaceZCache[TileIdx] == GridPos.Z)
+    if (!SurfaceZCache.IsValidIndex(TileIdx))
+    {
+        return true;
+    }
+
+    if (SurfaceZCache[TileIdx] == GridPos.Z)
     {
         int32 NewSurfaceZ = 0;
         for (int32 Z = GridPos.Z - 1; Z >= 0; --Z)
@@ -586,18 +719,20 @@ bool UCubeTerrainRuntime::RemoveBlockAt(const FIntVector& GridPos)
             }
         }
         SurfaceZCache[TileIdx] = NewSurfaceZ;
-
-        int32 NewDepth = 0;
-        for (int32 Z = NewSurfaceZ; Z >= 0; --Z)
-        {
-            const FWorldForgeCubeCell* Below = Chunk->GetCell(0, 0, Z);
-            if (!Below || Below->bRemoved ||
-                Below->BlockType == EWorldForgeCubeBlockType::Air) break;
-            ++NewDepth;
-        }
-        if (TerrainDepthCache.IsValidIndex(TileIdx))
-            TerrainDepthCache[TileIdx] = NewDepth;
     }
+
+    // Removing any block in the column (not only the surface one) can shorten
+    // the contiguous depth, so always recompute it.
+    int32 NewDepth = 0;
+    for (int32 Z = SurfaceZCache[TileIdx]; Z >= 0; --Z)
+    {
+        const FWorldForgeCubeCell* Below = Chunk->GetCell(0, 0, Z);
+        if (!Below || Below->bRemoved ||
+            Below->BlockType == EWorldForgeCubeBlockType::Air) break;
+        ++NewDepth;
+    }
+    if (TerrainDepthCache.IsValidIndex(TileIdx))
+        TerrainDepthCache[TileIdx] = NewDepth;
 
     return true;
 }
@@ -623,4 +758,271 @@ EWorldForgeCubeBlockType UCubeTerrainRuntime::GetRawBlockTypeAt(const FIntVector
     if (!Cell || Cell->bRemoved) return EWorldForgeCubeBlockType::Air;
 
     return Cell->BlockType;
+}
+
+// ─────────────────────────────────────────────────────────────────
+// CUBE-BLOCKGRID-01: per-block patch volume
+// ─────────────────────────────────────────────────────────────────
+
+static int32 CubeFloorDiv(int32 Value, int32 Divisor)
+{
+    return (Value >= 0) ? (Value / Divisor) : -((-Value + Divisor - 1) / Divisor);
+}
+
+int32 UCubeTerrainRuntime::GetSeaLevelBlockZ()
+{
+    return Cube01C_WaterLevelBlock;
+}
+
+void UCubeTerrainRuntime::SetPatchBlockVolume(
+    const FIntPoint& InPatchMinGlobalBlock,
+    int32 InBlocksX,
+    int32 InBlocksY,
+    int32 InMaxZ,
+    TArray<uint8>&& InVolume)
+{
+    const int32 ExpectedNum = InBlocksX * InBlocksY * (InMaxZ + 1);
+    if (InBlocksX <= 0 || InBlocksY <= 0 || InMaxZ < 0 || InVolume.Num() != ExpectedNum)
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[CubeBlockGrid] SetPatchBlockVolume rejected. Blocks=%dx%d MaxZ=%d VolumeNum=%d Expected=%d"),
+            InBlocksX, InBlocksY, InMaxZ, InVolume.Num(), ExpectedNum);
+        ClearPatchBlockVolume();
+        return;
+    }
+
+    PatchMinGlobalBlock = InPatchMinGlobalBlock;
+    PatchBlocksX = InBlocksX;
+    PatchBlocksY = InBlocksY;
+    PatchMaxZ = InMaxZ;
+    PatchVolume = MoveTemp(InVolume);
+    RemovedPatchBlocks.Empty();
+
+    PatchSurfaceZ.SetNumUninitialized(PatchBlocksX * PatchBlocksY);
+    for (int32 LocalY = 0; LocalY < PatchBlocksY; ++LocalY)
+    {
+        for (int32 LocalX = 0; LocalX < PatchBlocksX; ++LocalX)
+        {
+            RecomputePatchColumnSurface(LocalX, LocalY);
+        }
+    }
+
+    const int32 BPT = FMath::Max(1, BlocksPerWorldTile);
+    if (((CachedGridWidth * BPT) % 2) != 0 || ((CachedGridHeight * BPT) % 2) != 0)
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[CubeBlockGrid] Grid=%dx%d BlocksPerTile=%d gives an odd block count; render blocks are offset half a cell from the selection grid."),
+            CachedGridWidth, CachedGridHeight, BPT);
+    }
+
+    const FIntPoint MinCell = PatchMinGlobalBlock - GetGridCellOffset();
+    UE_LOG(LogTemp, Log,
+        TEXT("[CubeBlockGrid] Patch volume stored. Blocks=%dx%d MaxZ=%d MinGlobalBlock=(%d,%d) GridCells=(%d,%d)->(%d,%d)"),
+        PatchBlocksX, PatchBlocksY, PatchMaxZ,
+        PatchMinGlobalBlock.X, PatchMinGlobalBlock.Y,
+        MinCell.X, MinCell.Y,
+        MinCell.X + PatchBlocksX - 1, MinCell.Y + PatchBlocksY - 1);
+}
+
+void UCubeTerrainRuntime::ClearPatchBlockVolume()
+{
+    PatchMinGlobalBlock = FIntPoint::ZeroValue;
+    PatchBlocksX = 0;
+    PatchBlocksY = 0;
+    PatchMaxZ = 0;
+    PatchVolume.Empty();
+    PatchSurfaceZ.Empty();
+    RemovedPatchBlocks.Empty();
+}
+
+void UCubeTerrainRuntime::RecomputePatchColumnSurface(int32 LocalX, int32 LocalY)
+{
+    int32 TopZ = INDEX_NONE;
+    for (int32 Z = PatchMaxZ; Z >= 0; --Z)
+    {
+        if (PatchVolume[PatchVolumeIndex(LocalX, LocalY, Z)] != static_cast<uint8>(EWorldForgeCubeBlockType::Air))
+        {
+            TopZ = Z;
+            break;
+        }
+    }
+    PatchSurfaceZ[(LocalY * PatchBlocksX) + LocalX] = static_cast<int16>(TopZ);
+}
+
+FIntPoint UCubeTerrainRuntime::GetGridCellOffset() const
+{
+    const int32 BPT = FMath::Max(1, BlocksPerWorldTile);
+    return FIntPoint((CachedGridWidth * BPT) / 2, (CachedGridHeight * BPT) / 2);
+}
+
+FIntPoint UCubeTerrainRuntime::GridCellToTile(const FIntPoint& GridCell) const
+{
+    const int32 BPT = FMath::Max(1, BlocksPerWorldTile);
+    const FIntPoint GlobalBlock = GridCell + GetGridCellOffset();
+    return FIntPoint(CubeFloorDiv(GlobalBlock.X, BPT), CubeFloorDiv(GlobalBlock.Y, BPT));
+}
+
+FIntPoint UCubeTerrainRuntime::TileToCenterGridCell(const FIntPoint& TileXY) const
+{
+    const int32 BPT = FMath::Max(1, BlocksPerWorldTile);
+    const FIntPoint GlobalBlock(TileXY.X * BPT + BPT / 2, TileXY.Y * BPT + BPT / 2);
+    return GlobalBlock - GetGridCellOffset();
+}
+
+bool UCubeTerrainRuntime::GridCellToPatchLocal(const FIntPoint& GridCell, FIntPoint& OutPatchLocal) const
+{
+    if (!HasPatchBlockVolume())
+    {
+        return false;
+    }
+
+    OutPatchLocal = GridCell + GetGridCellOffset() - PatchMinGlobalBlock;
+    return OutPatchLocal.X >= 0 && OutPatchLocal.Y >= 0 &&
+           OutPatchLocal.X < PatchBlocksX && OutPatchLocal.Y < PatchBlocksY;
+}
+
+EWorldForgeCubeBlockType UCubeTerrainRuntime::GetGridBlockRaw(const FIntVector& GridCell) const
+{
+    if (!bRuntimeValid || GridCell.Z < 0)
+    {
+        return EWorldForgeCubeBlockType::Air;
+    }
+
+    FIntPoint Local;
+    if (GridCellToPatchLocal(FIntPoint(GridCell.X, GridCell.Y), Local))
+    {
+        if (GridCell.Z > PatchMaxZ)
+        {
+            return EWorldForgeCubeBlockType::Air;
+        }
+        return static_cast<EWorldForgeCubeBlockType>(PatchVolume[PatchVolumeIndex(Local.X, Local.Y, GridCell.Z)]);
+    }
+
+    const FIntPoint Tile = GridCellToTile(FIntPoint(GridCell.X, GridCell.Y));
+    return GetRawBlockTypeAt(FIntVector(Tile.X, Tile.Y, GridCell.Z));
+}
+
+FGameplayTag UCubeTerrainRuntime::GetGridBlockTag(const FIntVector& GridCell) const
+{
+    return CubeBlockTypeToTerrainTag(GetGridBlockRaw(GridCell));
+}
+
+bool UCubeTerrainRuntime::TryGetGridSurfaceZ(const FIntPoint& GridCell, int32& OutSurfaceZ) const
+{
+    OutSurfaceZ = 0;
+    if (!bRuntimeValid)
+    {
+        return false;
+    }
+
+    int32 SurfaceZ = INDEX_NONE;
+    EWorldForgeCubeBlockType TopType = EWorldForgeCubeBlockType::Air;
+
+    FIntPoint Local;
+    if (GridCellToPatchLocal(GridCell, Local))
+    {
+        SurfaceZ = PatchSurfaceZ[(Local.Y * PatchBlocksX) + Local.X];
+        if (SurfaceZ == INDEX_NONE)
+        {
+            return false;
+        }
+        TopType = static_cast<EWorldForgeCubeBlockType>(PatchVolume[PatchVolumeIndex(Local.X, Local.Y, SurfaceZ)]);
+    }
+    else
+    {
+        const FIntPoint Tile = GridCellToTile(GridCell);
+        if (Tile.X < 0 || Tile.Y < 0 || Tile.X >= CachedGridWidth || Tile.Y >= CachedGridHeight)
+        {
+            return false;
+        }
+        SurfaceZ = GetSurfaceZAt(Tile);
+        TopType = GetRawBlockTypeAt(FIntVector(Tile.X, Tile.Y, SurfaceZ));
+    }
+
+    if (TopType == EWorldForgeCubeBlockType::Air ||
+        TopType == EWorldForgeCubeBlockType::Water ||
+        TopType == EWorldForgeCubeBlockType::Lava)
+    {
+        return false;
+    }
+
+    OutSurfaceZ = SurfaceZ;
+    return true;
+}
+
+int32 UCubeTerrainRuntime::GetGridTerrainDepth(const FIntPoint& GridCell) const
+{
+    int32 SurfaceZ = 0;
+    if (!TryGetGridSurfaceZ(GridCell, SurfaceZ))
+    {
+        return 0;
+    }
+
+    int32 Depth = 0;
+    for (int32 Z = SurfaceZ; Z >= 0; --Z)
+    {
+        const EWorldForgeCubeBlockType Type = GetGridBlockRaw(FIntVector(GridCell.X, GridCell.Y, Z));
+        if (Type == EWorldForgeCubeBlockType::Air ||
+            Type == EWorldForgeCubeBlockType::Water ||
+            Type == EWorldForgeCubeBlockType::Lava)
+        {
+            break;
+        }
+        ++Depth;
+    }
+    return Depth;
+}
+
+bool UCubeTerrainRuntime::RemoveGridBlock(const FIntVector& GridCell)
+{
+    if (!bRuntimeValid || GridCell.Z <= 0 || GridCell.Z > PatchMaxZ)
+    {
+        return false;
+    }
+
+    FIntPoint Local;
+    if (!GridCellToPatchLocal(FIntPoint(GridCell.X, GridCell.Y), Local))
+    {
+        return false;
+    }
+
+    const int32 Index = PatchVolumeIndex(Local.X, Local.Y, GridCell.Z);
+    const EWorldForgeCubeBlockType Type = static_cast<EWorldForgeCubeBlockType>(PatchVolume[Index]);
+    if (Type == EWorldForgeCubeBlockType::Air ||
+        Type == EWorldForgeCubeBlockType::Water ||
+        Type == EWorldForgeCubeBlockType::Lava)
+    {
+        return false;
+    }
+
+    RemovedPatchBlocks.Add(GridCell, PatchVolume[Index]);
+    PatchVolume[Index] = static_cast<uint8>(EWorldForgeCubeBlockType::Air);
+    RecomputePatchColumnSurface(Local.X, Local.Y);
+    return true;
+}
+
+bool UCubeTerrainRuntime::RestoreGridBlock(const FIntVector& GridCell)
+{
+    const uint8* OriginalType = RemovedPatchBlocks.Find(GridCell);
+    if (!OriginalType || GridCell.Z < 0 || GridCell.Z > PatchMaxZ)
+    {
+        return false;
+    }
+
+    FIntPoint Local;
+    if (!GridCellToPatchLocal(FIntPoint(GridCell.X, GridCell.Y), Local))
+    {
+        return false;
+    }
+
+    const int32 Index = PatchVolumeIndex(Local.X, Local.Y, GridCell.Z);
+    if (PatchVolume[Index] != static_cast<uint8>(EWorldForgeCubeBlockType::Air))
+    {
+        return false;
+    }
+
+    PatchVolume[Index] = *OriginalType;
+    RemovedPatchBlocks.Remove(GridCell);
+    RecomputePatchColumnSurface(Local.X, Local.Y);
+    return true;
 }

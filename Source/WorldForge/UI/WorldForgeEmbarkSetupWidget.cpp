@@ -83,7 +83,7 @@ const TCHAR* ColonyModeToLogString(EWorldForgeColonyMode ColonyMode)
 		: TEXT("Mixed");
 }
 
-const TCHAR* BindingStatus(const UObject* Widget)
+const TCHAR* EmbarkSetupBindingStatus(const UObject* Widget)
 {
 	return Widget ? TEXT("OK") : TEXT("NULL");
 }
@@ -872,28 +872,28 @@ void UWorldForgeEmbarkSetupWidget::BindControls()
 
 void UWorldForgeEmbarkSetupWidget::LogBindingStatus() const
 {
-	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] WorldNameInput=%s"), BindingStatus(WorldNameInput));
-	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] SeedInput=%s"), BindingStatus(SeedInput));
-	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] BTN_RandomizeSeed=%s"), BindingStatus(BTN_RandomizeSeed));
-	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] WorldSizeDropdown=%s"), BindingStatus(WorldSizeDropdown));
-	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] BTN_TabWorld=%s"), BindingStatus(BTN_TabWorld));
-	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] BTN_TabColony=%s"), BindingStatus(BTN_TabColony));
-	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] BTN_TabColonists=%s"), BindingStatus(BTN_TabColonists));
-	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] PNL_TabWorld=%s"), BindingStatus(PNL_TabWorld));
-	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] PNL_TabColony=%s"), BindingStatus(PNL_TabColony));
-	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] PNL_TabColonists=%s"), BindingStatus(PNL_TabColonists));
-	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] PNL_StartingColonists=%s"), BindingStatus(PNL_StartingColonists));
-	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] PNL_ColonistList=%s"), BindingStatus(PNL_ColonistList));
-	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] VB_ColonistList=%s"), BindingStatus(VB_ColonistList));
-	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] BTN_ColonistPlaceholder_01=%s"), BindingStatus(BTN_ColonistPlaceholder_01));
-	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] BTN_ColonistPlaceholder_02=%s"), BindingStatus(BTN_ColonistPlaceholder_02));
-	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] BTN_ColonistPlaceholder_03=%s"), BindingStatus(BTN_ColonistPlaceholder_03));
-	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] BTN_RerollSelectedColonist=%s"), BindingStatus(BTN_RerollSelectedColonist));
-	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] PNL_RaceDetails=%s"), BindingStatus(PNL_RaceDetails));
-	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] BTN_MixedColony=%s"), BindingStatus(BTN_MixedColony));
-	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] BTN_SingleRaceColony=%s"), BindingStatus(BTN_SingleRaceColony));
-	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] BTN_Back=%s"), BindingStatus(BTN_Back));
-	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] BTN_Continue=%s"), BindingStatus(BTN_Continue));
+	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] WorldNameInput=%s"), EmbarkSetupBindingStatus(WorldNameInput));
+	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] SeedInput=%s"), EmbarkSetupBindingStatus(SeedInput));
+	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] BTN_RandomizeSeed=%s"), EmbarkSetupBindingStatus(BTN_RandomizeSeed));
+	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] WorldSizeDropdown=%s"), EmbarkSetupBindingStatus(WorldSizeDropdown));
+	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] BTN_TabWorld=%s"), EmbarkSetupBindingStatus(BTN_TabWorld));
+	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] BTN_TabColony=%s"), EmbarkSetupBindingStatus(BTN_TabColony));
+	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] BTN_TabColonists=%s"), EmbarkSetupBindingStatus(BTN_TabColonists));
+	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] PNL_TabWorld=%s"), EmbarkSetupBindingStatus(PNL_TabWorld));
+	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] PNL_TabColony=%s"), EmbarkSetupBindingStatus(PNL_TabColony));
+	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] PNL_TabColonists=%s"), EmbarkSetupBindingStatus(PNL_TabColonists));
+	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] PNL_StartingColonists=%s"), EmbarkSetupBindingStatus(PNL_StartingColonists));
+	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] PNL_ColonistList=%s"), EmbarkSetupBindingStatus(PNL_ColonistList));
+	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] VB_ColonistList=%s"), EmbarkSetupBindingStatus(VB_ColonistList));
+	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] BTN_ColonistPlaceholder_01=%s"), EmbarkSetupBindingStatus(BTN_ColonistPlaceholder_01));
+	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] BTN_ColonistPlaceholder_02=%s"), EmbarkSetupBindingStatus(BTN_ColonistPlaceholder_02));
+	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] BTN_ColonistPlaceholder_03=%s"), EmbarkSetupBindingStatus(BTN_ColonistPlaceholder_03));
+	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] BTN_RerollSelectedColonist=%s"), EmbarkSetupBindingStatus(BTN_RerollSelectedColonist));
+	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] PNL_RaceDetails=%s"), EmbarkSetupBindingStatus(PNL_RaceDetails));
+	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] BTN_MixedColony=%s"), EmbarkSetupBindingStatus(BTN_MixedColony));
+	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] BTN_SingleRaceColony=%s"), EmbarkSetupBindingStatus(BTN_SingleRaceColony));
+	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] BTN_Back=%s"), EmbarkSetupBindingStatus(BTN_Back));
+	UE_LOG(LogTemp, Log, TEXT("[EmbarkSetup] BTN_Continue=%s"), EmbarkSetupBindingStatus(BTN_Continue));
 }
 
 void UWorldForgeEmbarkSetupWidget::DisableLegacyNextButton()
@@ -1796,7 +1796,7 @@ void UWorldForgeEmbarkSetupWidget::UpdateRacePreviewForTag(FGameplayTag RaceTag)
 		PlaceholderBrush.SetResourceObject(nullptr);
 		PlaceholderBrush.ImageSize = FVector2D(220.0f, 180.0f);
 		IMG_RacePreview->SetBrush(PlaceholderBrush);
-		IMG_RacePreview->SetBrushSize(FVector2D(220.0f, 180.0f));
+		IMG_RacePreview->SetDesiredSizeOverride(FVector2D(220.0f, 180.0f));
 		IMG_RacePreview->SetColorAndOpacity(FLinearColor(0.08f, 0.09f, 0.105f, 1.0f));
 		IMG_RacePreview->SetVisibility(ESlateVisibility::Visible);
 	}
@@ -1892,7 +1892,7 @@ bool UWorldForgeEmbarkSetupWidget::ApplyStaticFlipbookPreview(UPaperFlipbook* Fl
 	AtlasInterface.SetInterface(AtlasInterfaceObject);
 
 	IMG_RacePreview->SetBrushFromAtlasInterface(AtlasInterface, false);
-	IMG_RacePreview->SetBrushSize(FVector2D(220.0f, 180.0f));
+	IMG_RacePreview->SetDesiredSizeOverride(FVector2D(220.0f, 180.0f));
 	IMG_RacePreview->SetColorAndOpacity(FLinearColor::White);
 	IMG_RacePreview->SetVisibility(ESlateVisibility::Visible);
 	return true;

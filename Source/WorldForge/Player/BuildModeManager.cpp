@@ -1037,9 +1037,13 @@ void UBuildModeManager::HandlePrimaryClick()
             }
         }
 
-        if (SelectedCells3D.Contains(CurrentHoveredVoxel) || SelectedCells.Contains(CurrentHoveredCell))
+        const bool bUseVoxelSelectionState = CurrentToolMode != EBuildToolMode::Mine;
+        if ((bUseVoxelSelectionState && SelectedCells3D.Contains(CurrentHoveredVoxel)) || SelectedCells.Contains(CurrentHoveredCell))
         {
-            SelectedCells3D.Remove(CurrentHoveredVoxel);
+            if (bUseVoxelSelectionState)
+            {
+                SelectedCells3D.Remove(CurrentHoveredVoxel);
+            }
             SelectedCells.Remove(CurrentHoveredCell);
 
             if (CurrentToolMode == EBuildToolMode::Farm)
@@ -1138,7 +1142,10 @@ void UBuildModeManager::HandlePrimaryClick()
             return;
         }
 
-        SelectedCells3D.Add(CurrentHoveredVoxel);
+        if (CurrentToolMode != EBuildToolMode::Mine)
+        {
+            SelectedCells3D.Add(CurrentHoveredVoxel);
+        }
         SelectedCells.Add(CurrentHoveredCell);
 
         if (GridOverlay)
@@ -2204,33 +2211,39 @@ void UBuildModeManager::UpdateFromMouse(APlayerController* PC)
                 if (CurrentToolMode == EBuildToolMode::Mine)
                 {
                     ULayerViewSubsystem* LV_Hover = GetLayerViewSubsystem();
-                    if (LV_Hover && LV_Hover->HasActiveVoxelLayer() && LV_Hover->GetRelativeLayerOffset() < 0)
-                    {
-                        // Underground: authoritative Z comes from LayerView, not locked surface ActiveMiningZ.
-                        NewGridHover.Z = LV_Hover->GetActiveVoxelLayerZ();
-                    }
-                    else
-                    {
-                        if (UVoxelWorldManager* VM = GetVoxelManager())
-                        {
-                            int32 SurfaceZ = INDEX_NONE;
-                            if (VM->TryGetTerrainSurfaceVoxelZ(FIntPoint(NewGridHover.X, NewGridHover.Y), SurfaceZ))
-                            {
-                                if (ActiveMiningZ == INDEX_NONE)
-                                {
-                                    ActiveMiningZ = SurfaceZ;
-                                    UE_LOG(LogTemp, Log,
-                                        TEXT("[CUBE-MINING-01] ActiveMiningZ resolved. SurfaceZ=%d HoveredVoxel=(%d,%d,%d)"),
-                                        SurfaceZ,
-                                        NewGridHover.X,
-                                        NewGridHover.Y,
-                                        ActiveMiningZ);
-                                }
+                    int32 AuthoritativeHoverZ = NewGridHover.Z;
+                    int32 LayerViewZ = INDEX_NONE;
 
-                                NewGridHover.Z = ActiveMiningZ;
-                            }
+                    if (LV_Hover && LV_Hover->HasActiveVoxelLayer())
+                    {
+                        LayerViewZ = LV_Hover->GetActiveVoxelLayerZ();
+                        AuthoritativeHoverZ = LayerViewZ;
+                    }
+                    else if (UVoxelWorldManager* VM = GetVoxelManager())
+                    {
+                        int32 SurfaceZ = INDEX_NONE;
+                        if (VM->TryGetTerrainSurfaceVoxelZ(FIntPoint(NewGridHover.X, NewGridHover.Y), SurfaceZ))
+                        {
+                            AuthoritativeHoverZ = SurfaceZ;
+                            LayerViewZ = SurfaceZ;
+                            UE_LOG(LogTemp, Log,
+                                TEXT("[CUBE-MINING-01] ActiveMiningZ resolved. SurfaceZ=%d HoveredVoxel=(%d,%d,%d)"),
+                                SurfaceZ,
+                                NewGridHover.X,
+                                NewGridHover.Y,
+                                AuthoritativeHoverZ);
                         }
                     }
+
+                    NewGridHover.Z = AuthoritativeHoverZ;
+                    ActiveMiningZ = AuthoritativeHoverZ;
+
+                    UE_LOG(LogTemp, Log,
+                        TEXT("[CUBE-MINING-Z] LayerViewZ=%d HoverZ=%d ActiveMiningZ=%d RendererZ=%d"),
+                        (LayerViewZ != INDEX_NONE) ? LayerViewZ : AuthoritativeHoverZ,
+                        NewGridHover.Z,
+                        ActiveMiningZ,
+                        NewGridHover.Z);
                 }
 
                 const bool bChanged = (NewGridHover != CurrentHoveredVoxel) || !bHoveredCellValid;
@@ -4089,28 +4102,36 @@ void UBuildModeManager::UpdateMiningLayerRenderer()
     TArray<FIntVector> SelectedPreviewCells;
     if (UGridSelectionSubsystem* GridSelection = GetGridSelectionSubsystem())
     {
-        // Selected Mine cells are already true 200uu voxels. Filter to the active
-        // layer for this frame before handing them to the renderer.
-        TArray<FIntVector> SelectedVoxels;
-        GridSelection->GetSelectedVoxelsForRender(SelectedVoxels);
-        SelectedPreviewCells.Reserve(SelectedVoxels.Num() + SelectedCells3D.Num());
+        TArray<FGridSelectionCell> MinePreviewCells;
+        GridSelection->GetMineCommitCells(MinePreviewCells);
+        SelectedPreviewCells.Reserve(MinePreviewCells.Num());
 
-        for (const FIntVector& V : SelectedVoxels)
+        for (const FGridSelectionCell& Cell : MinePreviewCells)
         {
-            if (V.Z == ActiveZ)
+            if (Cell.VoxelCoord.Z == ActiveZ)
             {
-                SelectedPreviewCells.AddUnique(V);
+                SelectedPreviewCells.AddUnique(Cell.VoxelCoord);
             }
         }
     }
 
-    for (const FIntVector& SelectedCell : SelectedCells3D)
+    int32 ActiveConfirmedVoxels = 0;
+    for (const FIntVector& ConfirmedCell : ConfirmedMineCells)
     {
-        if (SelectedCell.Z == ActiveZ)
+        if (ConfirmedCell.Z == ActiveZ)
         {
-            SelectedPreviewCells.AddUnique(SelectedCell);
+            ++ActiveConfirmedVoxels;
         }
     }
+
+    UE_LOG(LogTemp, Log,
+        TEXT("[CUBE-MINING-RENDER-SEAM] ActiveZ=%d Center=(%d,%d,%d) SelectedPreviewVoxels=%d ConfirmedVoxels=%d"),
+        ActiveZ,
+        CenterVoxel.X,
+        CenterVoxel.Y,
+        CenterVoxel.Z,
+        SelectedPreviewCells.Num(),
+        ActiveConfirmedVoxels);
 
     UpdateMiningPresentationVisibility(CenterVoxel, ActiveZ, bUnderground);
 
@@ -4174,35 +4195,81 @@ void UBuildModeManager::UpdateMiningLayerRenderer()
 
 void UBuildModeManager::ClampCameraToMineRegion()
 {
-    if (!MiningLayerRenderer || !bMiningLayerAnchorValid) { return; }
-
     UWorld* World = GetWorld();
-    if (!World) { return; }
+    const double Now = World ? World->GetTimeSeconds() : 0.0;
+    static double LastCameraDecisionLogTime = -1000.0;
+    auto LogCameraDecision = [&](const TCHAR* Reason)
+    {
+        if (Now - LastCameraDecisionLogTime > 0.75)
+        {
+            UE_LOG(LogTemp, Log,
+                TEXT("[CUBE-MINING-CAMERA] ClampEnabled=false Reason=%s"),
+                Reason ? Reason : TEXT("Unknown"));
+            LastCameraDecisionLogTime = Now;
+        }
+    };
+
+    // Temporarily disabled for the Voxel200 mine-selection restore. The previous
+    // underground clamp could fight hover/anchor changes and shake the camera hard.
+    static constexpr bool bEnableUndergroundMineCameraClamp = false;
+    if (!bEnableUndergroundMineCameraClamp)
+    {
+        LogCameraDecision(TEXT("DisabledForVoxel200Restore"));
+        return;
+    }
+
+    if (!MiningLayerRenderer || !bMiningLayerAnchorValid)
+    {
+        LogCameraDecision(TEXT("NoRendererOrAnchor"));
+        return;
+    }
+
+    if (!World)
+    {
+        LogCameraDecision(TEXT("NoWorld"));
+        return;
+    }
 
     APlayerController* PC = World->GetFirstPlayerController();
-    if (!PC) { return; }
+    if (!PC)
+    {
+        LogCameraDecision(TEXT("NoPlayerController"));
+        return;
+    }
 
     APawn* CamPawn = PC->GetPawn();
-    if (!CamPawn) { return; }
-
-    // Allow the camera pawn to sit at most VisibleRadius/2+1 voxels from the anchor
-    // in XY.  The tighter radius ensures that even at max pitch -45° the spring arm
-    // tip (camera eye) stays inside or at most in the extended dark-earth floor ring,
-    // never in the visible grass terrain beyond radius 25.
-    // Z is unconstrained — pitch/zoom govern vertical perspective.
-    // Option V: VisibleRadius is in true voxels now; use the live 200uu voxel size so the
-    // camera bound matches the voxel-space diorama (was a stale 100).
-    float CellSizeUU = 200.0f;
-    if (UWorld* CW = GetWorld())
+    if (!CamPawn)
     {
-        if (const UVoxelWorldManager* VM = CW->GetSubsystem<UVoxelWorldManager>())
+        LogCameraDecision(TEXT("NoPawn"));
+        return;
+    }
+
+    if (bHoveredCellValid)
+    {
+        const int32 HoverDX = FMath::Abs(CurrentHoveredVoxel.X - MiningLayerAnchorVoxel.X);
+        const int32 HoverDY = FMath::Abs(CurrentHoveredVoxel.Y - MiningLayerAnchorVoxel.Y);
+        const bool bHoverAgreesWithAnchor =
+            CurrentHoveredVoxel.Z == MiningLayerAnchorZ &&
+            HoverDX <= MiningLayerRenderer->VisibleRadius &&
+            HoverDY <= MiningLayerRenderer->VisibleRadius;
+        if (!bHoverAgreesWithAnchor)
         {
-            const float RVS = VM->GetRenderVoxelSize();
-            if (RVS > KINDA_SMALL_NUMBER) { CellSizeUU = RVS; }
+            LogCameraDecision(TEXT("AnchorHoverMismatch"));
+            return;
         }
     }
-    const float HalfBound = static_cast<float>(MiningLayerRenderer->VisibleRadius / 2 + 1) * CellSizeUU;
 
+    float CellSizeUU = 200.0f;
+    if (const UVoxelWorldManager* VM = World->GetSubsystem<UVoxelWorldManager>())
+    {
+        const float RVS = VM->GetRenderVoxelSize();
+        if (RVS > KINDA_SMALL_NUMBER)
+        {
+            CellSizeUU = RVS;
+        }
+    }
+
+    const float HalfBound = static_cast<float>(MiningLayerRenderer->VisibleRadius / 2 + 1) * CellSizeUU;
     const float AnchorWorldX = MiningLayerAnchorWorldXY.X;
     const float AnchorWorldY = MiningLayerAnchorWorldXY.Y;
 
@@ -4217,18 +4284,17 @@ void UBuildModeManager::ClampCameraToMineRegion()
         Loc.X = ClampedX;
         Loc.Y = ClampedY;
         CamPawn->SetActorLocation(Loc, false, nullptr, ETeleportType::TeleportPhysics);
+
+        UE_LOG(LogTemp, Warning,
+            TEXT("[CUBE-MINING-CAMERA] ClampEnabled=true Reason=Applied PawnBefore=(%.1f,%.1f) AnchorWorld=(%.1f,%.1f) PawnAfter=(%.1f,%.1f)"),
+            OriginalX,
+            OriginalY,
+            AnchorWorldX,
+            AnchorWorldY,
+            ClampedX,
+            ClampedY);
     }
-
-    UE_LOG(LogTemp, Warning,
-        TEXT("[MineModeCameraAudit] CameraClamp PawnBefore=(%.1f,%.1f) AnchorWorld=(%.1f,%.1f) PawnAfter=(%.1f,%.1f)"),
-        OriginalX,
-        OriginalY,
-        AnchorWorldX,
-        AnchorWorldY,
-        ClampedX,
-        ClampedY);
 }
-
 void UBuildModeManager::InitializeGridOverlay()
 {
     if (GridOverlay)
@@ -4625,7 +4691,7 @@ void UBuildModeManager::SyncSelectionFromGridSelection()
     UVoxelWorldManager* VM = GetVoxelManager();
     TSet<FIntVector> FarmClaimedSelectionVoxels;
     int32 FarmUnclaimedPreviewCount = 0;
-    const int32 ActiveMineZ = (ActiveMiningZ != INDEX_NONE) ? ActiveMiningZ : GetActiveVoxelLayerZ();
+    const int32 ActiveMineZ = GetActiveVoxelLayerZ();
 
     ULayerViewSubsystem* LayerView = GetLayerViewSubsystem();
     const bool bIsUGMine = (CurrentToolMode == EBuildToolMode::Mine) &&
@@ -4674,18 +4740,7 @@ void UBuildModeManager::SyncSelectionFromGridSelection()
             }
         }
 
-        if (CurrentToolMode == EBuildToolMode::Mine)
-        {
-            if (bIsUGMine)
-            {
-                SelectedCells3D.AddUnique(GridCell.VoxelCoord);
-            }
-            else
-            {
-                SelectedCells3D.AddUnique(FIntVector(GridCell.VoxelCoord.X, GridCell.VoxelCoord.Y, ActiveMineZ));
-            }
-        }
-        else
+        if (CurrentToolMode != EBuildToolMode::Mine)
         {
             SelectedCells3D.AddUnique(GridCell.VoxelCoord);
         }
@@ -4708,6 +4763,25 @@ void UBuildModeManager::SyncSelectionFromGridSelection()
             FarmUnclaimedPreviewCount);
     }
 
+    if (CurrentToolMode == EBuildToolMode::Mine)
+    {
+        // Mine selection is voxel-keyed again. Rebuild SelectedCells3D from the
+        // commit source so renderer/backend paths only receive real 200uu voxels.
+        TArray<FGridSelectionCell> MinePreviewCells;
+        GridSelection->GetMineCommitCells(MinePreviewCells);
+        const int32 ActiveMineLayerZ = (LayerView && LayerView->HasActiveVoxelLayer())
+            ? LayerView->GetActiveVoxelLayerZ()
+            : ActiveMineZ;
+
+        for (const FGridSelectionCell& MineCell : MinePreviewCells)
+        {
+            if (MineCell.VoxelCoord.Z == ActiveMineLayerZ)
+            {
+                SelectedCells3D.AddUnique(MineCell.VoxelCoord);
+            }
+        }
+    }
+
     const int32 Count = CurrentToolMode == EBuildToolMode::Farm
         ? FarmPaintedWorldCells.Num()
         : SelectedCells3D.Num();
@@ -4719,8 +4793,6 @@ void UBuildModeManager::SyncSelectionFromGridSelection()
         if (bIsUGMine)
         {
             ActiveMiningZ = LayerView->GetActiveVoxelLayerZ();
-            GridSelection->SetMiningVolumePreviewCells(SelectedCells3D);
-
             const FIntVector FirstGrid = GridCells.Num() > 0 ? GridCells[0].VoxelCoord : FIntVector::ZeroValue;
             const FIntVector FirstManager = SelectedCells3D.Num() > 0 ? SelectedCells3D[0] : FIntVector::ZeroValue;
             UE_LOG(LogTemp, Log,
@@ -4821,7 +4893,10 @@ void UBuildModeManager::AddOrToggleCurrentTileSelection(bool bToggleExisting)
     if (bWillRemoveExisting)
     {
         SelectedCells.Remove(CurrentHoveredCell);
-        SelectedCells3D.Remove(CurrentHoveredVoxel);
+        if (CurrentToolMode != EBuildToolMode::Mine)
+        {
+            SelectedCells3D.Remove(CurrentHoveredVoxel);
+        }
         FarmPaintedWorldCells.Remove(CurrentHoveredCell);
 
         if (GridOverlay)
@@ -4832,7 +4907,10 @@ void UBuildModeManager::AddOrToggleCurrentTileSelection(bool bToggleExisting)
     else
     {
         SelectedCells.AddUnique(CurrentHoveredCell);
-        SelectedCells3D.AddUnique(CurrentHoveredVoxel);
+        if (CurrentToolMode != EBuildToolMode::Mine)
+        {
+            SelectedCells3D.AddUnique(CurrentHoveredVoxel);
+        }
 
         if (CurrentToolMode == EBuildToolMode::Farm)
         {
@@ -4886,50 +4964,19 @@ bool UBuildModeManager::CommitMineDesignations()
 
     TArray<FGridSelectionCell> GridCells;
 
-    // CUBE-MINING-V3-FLOOD: confirm the FULL persistent multi-layer plan, not just the
-    // current active layer's SelectedCells. GetSelectedCells returns only the layer the
-    // player is viewing, which is wiped on every layer change — so committing it created
-    // designations for one layer only (the Z=16 surface cells seen in the logs) and the
-    // painted Z=15/Z=14/Z=13 stack was silently dropped. The persistent plan carries
-    // every committed cell across all layers. Fall back to the active-layer selection
-    // only if the persistent plan is empty (e.g. a pure single-layer surface mine that
-    // never crossed a layer boundary and so never populated the persistent set).
-    GridSelection->GetPersistentMinePlanCells(GridCells);
-    const int32 PersistentPlanCount = GridCells.Num();
-
-    int32 ActiveLayerSelectedCount = 0;
-    {
-        TArray<FGridSelectionCell> ActiveLayerCells;
-        GridSelection->GetSelectedCells(ActiveLayerCells);
-        ActiveLayerSelectedCount = ActiveLayerCells.Num();
-
-        if (GridCells.Num() == 0)
-        {
-            GridCells = MoveTemp(ActiveLayerCells);
-        }
-        else
-        {
-            // Merge any current-layer cells the player just painted but that have not yet
-            // been folded into the persistent set. De-duplicated by voxel coordinate.
-            TSet<FIntVector> Seen;
-            Seen.Reserve(GridCells.Num());
-            for (const FGridSelectionCell& C : GridCells)
-            {
-                Seen.Add(C.VoxelCoord);
-            }
-            for (const FGridSelectionCell& C : ActiveLayerCells)
-            {
-                if (!Seen.Contains(C.VoxelCoord))
-                {
-                    GridCells.Add(C);
-                    Seen.Add(C.VoxelCoord);
-                }
-            }
-        }
-    }
+    // OPTION-D: GetMineCommitCells is the ONLY commit source. It returns real 200uu
+    // voxels exclusively: the persistent multi-layer plan (expanded/filtered at the
+    // drag seam) plus the surface macro selection expanded macro -> voxels inside
+    // GridSelectionSubsystem. The old "merge GetSelectedCells" fallback is GONE —
+    // SelectedCells now hold 1600uu MACRO indices, and merging them here would have
+    // fed macro keys straight into CreateMiningDesignationEx/GridToWorld (mining the
+    // wrong world positions, 8x toward the origin).
+    GridSelection->GetMineCommitCells(GridCells);
+    const int32 PersistentPlanCount = GridSelection->GetTotalMinePlanCount();
+    const int32 ActiveLayerSelectedCount = GridSelection->GetSelectedCount(); // 200uu voxels, log-only
 
     UE_LOG(LogTemp, Log,
-        TEXT("[CUBE-MINING-V3-FLOOD] CommitSource PersistentPlanCells=%d CurrentLayerSelected=%d TotalToCommit=%d"),
+        TEXT("[CUBE-MINING-V3-FLOOD] CommitSource PlanVoxels=%d SelectedVoxels=%d TotalToCommit=%d"),
         PersistentPlanCount, ActiveLayerSelectedCount, GridCells.Num());
 
     {
@@ -5155,9 +5202,17 @@ bool UBuildModeManager::CommitMineDesignations()
 
     if (GridOverlay && CreatedOverlayCells.Num() > 0)
     {
+        TArray<FIntVector> CreatedVoxels;
+        CreatedVoxels.Reserve(CreatedOverlayCells.Num());
+        for (const TPair<FIntVector, float>& Created : CreatedOverlayCells)
+        {
+            CreatedVoxels.Add(Created.Key);
+        }
+
+        GridSelection->RegisterConfirmedMineVoxels(CreatedVoxels);
         GridOverlay->SetConfirmedDesignationCells(EGridDesignationType::Mine, CreatedOverlayCells);
         UE_LOG(LogTemp, Log,
-            TEXT("[CUBE-MINING-01] Overlay confirmed. ConfirmedCells=%d"),
+            TEXT("[CUBE-MINING-01] Overlay confirmed. Mode=Voxel200 CreatedVoxels=%d"),
             CreatedOverlayCells.Num());
     }
 

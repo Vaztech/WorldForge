@@ -616,6 +616,16 @@ void AMiningLayerRenderer::SetLayerState(
     const int32 DeepRock = LayerCounts.IsValidIndex(8) ? LayerCounts[8] : 0;
 
     UE_LOG(LogMiningLayerRenderer, Log,
+        TEXT("[CUBE-MINING-CAP] ActiveZ=%d Terrain=%d Empty=%d Dirt=%d Rock=%d Sand=%d Water=%d"),
+        ActiveVoxelZ,
+        TerrainInstances,
+        EmptyCount,
+        Dirt,
+        Rock,
+        Sand,
+        Water);
+
+    UE_LOG(LogMiningLayerRenderer, Log,
         TEXT("MiningCap built. Center=(%d,%d,%d) ActiveZ=%d RelOffset=%+d Radius=%d CapThickness=%.1f "
              "Bias[Terrain=%.2f,Sel=%.2f,Conf=%.2f] DebugMat=%s "
              "Terrain=%d SelectedGhost=%d ConfirmedGhost=%d Empty=%d Buckets=%d "
@@ -995,20 +1005,44 @@ FTransform AMiningLayerRenderer::MakeCapTileTransform(
     float TopZBiasUU,
     float XYScaleMultiplier) const
 {
-    const float SafeXYScale    = FMath::Clamp(XYScaleMultiplier, 0.05f, 1.0f);
-    const float CellMeshScale  = CellSizeUU / WF_BaseCubeMeshSizeUU;
-    const float SafeThickness  = FMath::Max(CapThicknessUU, 1.0f);
+    const float SafeXYScale = FMath::Clamp(XYScaleMultiplier, 0.05f, 1.0f);
+    const float SafeThickness = FMath::Max(CapThicknessUU, 1.0f);
+
+    FVector RenderedCenter = FVector::ZeroVector;
+    float RenderCellSizeUU = FMath::Max(1.0f, CellSizeUU);
+    if (const UWorld* World = GetWorld())
+    {
+        if (const UVoxelWorldManager* VM = World->GetSubsystem<UVoxelWorldManager>())
+        {
+            RenderedCenter = VM->GridToRenderedVoxelCenter(VoxelCoord);
+            RenderCellSizeUU = FMath::Max(1.0f, VM->GetRenderVoxelSize());
+        }
+    }
+
+    const float CellMeshScale = RenderCellSizeUU / WF_BaseCubeMeshSizeUU;
     const float ThicknessScale = SafeThickness / WF_BaseCubeMeshSizeUU;
+    const FVector OverlayCenter(
+        RenderedCenter.X,
+        RenderedCenter.Y,
+        RenderedCenter.Z + TopZBiasUU - (SafeThickness * 0.5f));
+    const FVector Delta = OverlayCenter - RenderedCenter;
 
-    const float TopWorldZ    = static_cast<float>(VoxelCoord.Z) * CellSizeUU + TopZBiasUU;
-    const float CenterWorldZ = TopWorldZ - (SafeThickness * 0.5f);
-
-    const float CenterWorldX = (static_cast<float>(VoxelCoord.X) + 0.5f) * CellSizeUU;
-    const float CenterWorldY = (static_cast<float>(VoxelCoord.Y) + 0.5f) * CellSizeUU;
+    static int32 AlignLogCount = 0;
+    if (AlignLogCount < 128)
+    {
+        UE_LOG(LogMiningLayerRenderer, Log,
+            TEXT("[CUBE-MINING-ALIGN] Voxel=(%d,%d,%d) RenderedCenter=(%.1f,%.1f,%.1f) OverlayCenter=(%.1f,%.1f,%.1f) Delta=(%.1f,%.1f,%.1f) CellSizeUU=%.0f"),
+            VoxelCoord.X, VoxelCoord.Y, VoxelCoord.Z,
+            RenderedCenter.X, RenderedCenter.Y, RenderedCenter.Z,
+            OverlayCenter.X, OverlayCenter.Y, OverlayCenter.Z,
+            Delta.X, Delta.Y, Delta.Z,
+            RenderCellSizeUU);
+        ++AlignLogCount;
+    }
 
     return FTransform(
         FRotator::ZeroRotator,
-        FVector(CenterWorldX, CenterWorldY, CenterWorldZ),
+        OverlayCenter,
         FVector(CellMeshScale * SafeXYScale, CellMeshScale * SafeXYScale, ThicknessScale));
 }
 
@@ -1069,7 +1103,8 @@ void AMiningLayerRenderer::AddUndergroundBackdropInstances(const FIntVector& Cen
 
     const int32 SafeRadius = FMath::Clamp(VisibleRadius, 1, 96);
     const int32 WallLayers = FMath::Clamp(DioramaWallHeightLayers, 1, 32);
-    const float MeshScale  = CellSizeUU / WF_BaseCubeMeshSizeUU;
+    const float RenderCellSizeUU = VM ? FMath::Max(1.0f, VM->GetRenderVoxelSize()) : FMath::Max(1.0f, CellSizeUU);
+    const float MeshScale  = RenderCellSizeUU / WF_BaseCubeMeshSizeUU;
 
     // ─── Per-voxel helper ────────────────────────────────────────────────────
     //
@@ -1099,11 +1134,13 @@ void AMiningLayerRenderer::AddUndergroundBackdropInstances(const FIntVector& Cen
 
         const FLinearColor Color = GetTerrainColorForLayer(MaterialLayer) * 0.50f;
 
-        const float WorldX = (static_cast<float>(X) + 0.5f) * CellSizeUU;
-        const float WorldY = (static_cast<float>(Y) + 0.5f) * CellSizeUU;
-        const float WorldZ = (static_cast<float>(Z) + 0.5f) * CellSizeUU;
+        if (!VM)
+        {
+            return;
+        }
 
-        const FTransform T(FRotator::ZeroRotator, FVector(WorldX, WorldY, WorldZ), FVector(MeshScale));
+        const FVector RenderedCenter = VM->GridToRenderedVoxelCenter(FIntVector(X, Y, Z));
+        const FTransform T(FRotator::ZeroRotator, RenderedCenter, FVector(MeshScale));
         const int32 Idx = UndergroundBackdropHISM->AddInstance(T, true);
         SetInstanceColor(UndergroundBackdropHISM, Idx, Color);
     };
@@ -1156,21 +1193,29 @@ FTransform AMiningLayerRenderer::MakeUndergroundBackdropTransform(
     int32 ActiveVoxelZ) const
 {
     const int32 SafeRadius = FMath::Clamp(UndergroundBackdropRadius, VisibleRadius, 256);
-    const float DiameterUU = static_cast<float>((SafeRadius * 2) + 1) * CellSizeUU;
+    float RenderCellSizeUU = FMath::Max(1.0f, CellSizeUU);
+    FVector RenderedCenter = FVector::ZeroVector;
+    if (const UWorld* World = GetWorld())
+    {
+        if (const UVoxelWorldManager* VM = World->GetSubsystem<UVoxelWorldManager>())
+        {
+            RenderCellSizeUU = FMath::Max(1.0f, VM->GetRenderVoxelSize());
+            RenderedCenter = VM->GridToRenderedVoxelCenter(FIntVector(CenterVoxel.X, CenterVoxel.Y, ActiveVoxelZ));
+        }
+    }
+
+    const float DiameterUU = static_cast<float>((SafeRadius * 2) + 1) * RenderCellSizeUU;
     const float MeshScaleXY = DiameterUU / WF_BaseCubeMeshSizeUU;
     const float SafeThickness = FMath::Max(UndergroundBackdropThicknessUU, 1.0f);
     const float MeshScaleZ = SafeThickness / WF_BaseCubeMeshSizeUU;
 
-    const float CenterWorldX = (static_cast<float>(CenterVoxel.X) + 0.5f) * CellSizeUU;
-    const float CenterWorldY = (static_cast<float>(CenterVoxel.Y) + 0.5f) * CellSizeUU;
-
     // Put the backdrop below the cap layer so cap tiles and mining ghosts draw in front,
     // while the view beyond the cut reads as dark underground instead of sky/water.
-    const float CenterWorldZ = static_cast<float>(ActiveVoxelZ) * CellSizeUU - CapThicknessUU - (SafeThickness * 0.5f) - 4.0f;
+    const float CenterWorldZ = RenderedCenter.Z - CapThicknessUU - (SafeThickness * 0.5f) - 4.0f;
 
     return FTransform(
         FRotator::ZeroRotator,
-        FVector(CenterWorldX, CenterWorldY, CenterWorldZ),
+        FVector(RenderedCenter.X, RenderedCenter.Y, CenterWorldZ),
         FVector(MeshScaleXY, MeshScaleXY, MeshScaleZ));
 }
 

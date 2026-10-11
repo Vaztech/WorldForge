@@ -1202,12 +1202,11 @@ void UFarmingSubsystem::OnPlantCompleted(int32 ZoneID, FIntPoint TilePos)
             SurfaceVoxelZ,
             bHasSurfaceZ ? TEXT("true") : TEXT("false"));
 
-        const FVector CellCenterXY = bHasSurfaceZ
-            ? VoxelWorldManager->GridToWorld(WorldGridCell, SurfaceVoxelZ)
-            : FVector(
-                (static_cast<float>(WorldGridCell.X) + 0.5f) * 100.0f,
-                (static_cast<float>(WorldGridCell.Y) + 0.5f) * 100.0f,
-                0.0f);
+        // WorldGridCell is in the manager's grid (200uu cells in CubePrototype), so the
+        // fallback must use GridToWorld too rather than assuming 100uu cells.
+        const FVector CellCenterXY = VoxelWorldManager->GridToWorld(
+            WorldGridCell,
+            bHasSurfaceZ ? SurfaceVoxelZ : 0);
 
         const FVector TraceStart = CellCenterXY + FVector(0.0f, 0.0f, 100000.0f);
         const FVector TraceEnd = CellCenterXY - FVector(0.0f, 0.0f, 100000.0f);

@@ -147,12 +147,34 @@ public:
     UFUNCTION(BlueprintCallable, Category = "WorldForge|GridSelection")
     void GetSelectedCells(TArray<FGridSelectionCell>& OutCells) const;
 
-    // Mine selection is stored in true 200uu voxel space and is passed directly
-    // to the MiningLayerRenderer. Legacy non-mine callers return selected cells as-is.
+    // Mine selection keys are real 200uu voxels again. Legacy non-mine callers still
+    // receive selected keys as-is.
     void GetSelectedVoxelsForRender(TArray<FIntVector>& OutVoxels) const;
 
-    // Legacy helper for older macro-index callers. Mine no longer uses this path.
+    // Macro INDEX -> the real voxel at the center of that macro cell. This is the
+    // bridge for sampling VoxelWorldManager (GridToWorld / surface queries), which
+    // accept ONLY true voxel coordinates.
     FIntVector MacroIndexToCenterVoxel(const FIntVector& MacroIndex) const;
+
+    /**
+     * OPTION-D: the single commit source for Mine Confirm.
+     * Returns REAL 200uu voxel cells only:
+     *   - the persistent multi-layer plan (already expanded/filtered at the drag seam),
+     *   - plus, on the surface layer, the live macro selection expanded macro -> 64
+     *     voxels and validity-filtered HERE (the surface macro->voxel seam).
+     * BuildModeManager::CommitMineDesignations must consume this instead of merging
+     * GetSelectedCells (whose keys are macro indices, not voxels).
+     */
+    void GetMineCommitCells(TArray<FGridSelectionCell>& OutCells) const;
+
+    /**
+     * OPTION-D: track which real voxels back each confirmed macro overlay square.
+     * Called by BuildModeManager after CreateMiningDesignationEx succeeds. When
+     * MiningSubsystem later completes a designation and calls
+     * RemoveConfirmedDesignationCell with the voxel coord, the macro square is only
+     * cleared once EVERY tracked voxel inside it has completed.
+     */
+    void RegisterConfirmedMineVoxels(const TArray<FIntVector>& CreatedVoxels);
 
     UFUNCTION(BlueprintCallable, Category = "WorldForge|GridSelection")
     void ClearSelectedCells();
@@ -275,53 +297,19 @@ public:
     UFUNCTION(BlueprintPure, Category = "WorldForge|GridSelection|Overlay")
     bool IsStaticBaseGridEnabled() const { return bStaticBaseGridEnabled; }
 
-private:
-    UPROPERTY(Transient)
-    TObjectPtr<ATileGridOverlayActor> GridOverlay = nullptr;
+    // ---------------------------------------------------------------------
+    // OPTION-D macro grid (player-facing 1600uu mining squares)
+    // ---------------------------------------------------------------------
+    // Two coordinate spaces coexist:
+    //   MACRO index space (UI):   HoveredVoxel, DragStartVoxel, DragPreviewCells,
+    //                             SelectedCells, every TileGridOverlayActor channel.
+    //   REAL voxel space (game):  PersistentMineAnchorVoxels, connectivity/surface/
+    //                             liquid checks, MiningSubsystem, GridToWorld.
+    // One macro cell = MacroCellVoxelSpan^2 (8x8 = 64) real voxels on one Z layer.
+    // Macro keys must NEVER enter voxel-space functions; expansion happens at the
+    // commit seams (EndDragSelection / ToggleHoveredSelection / GetMineCommitCells).
+    // Public/static so BuildModeManager can map confirm results voxel -> macro.
 
-    bool bSelectionActive = false;
-    bool bDraggingSelection = false;
-    bool bHasValidHover = false;
-
-    /** Controls whether the static base grid layer is drawn while a grid-selection tool is active. */
-    bool bStaticBaseGridEnabled = true;
-
-    EBuildToolMode ActiveToolMode = EBuildToolMode::None;
-    EGridSelectionShape ActiveShape = EGridSelectionShape::Rectangle;
-
-    FIntVector HoveredVoxel = FIntVector::ZeroValue;
-    FIntVector DragStartVoxel = FIntVector::ZeroValue;
-    FIntVector LastPreviewEndVoxel = FIntVector(INT32_MIN);
-
-    float HoveredTerrainZ = 0.0f;
-    float DragStartTerrainZ = 0.0f;
-
-    // Tool-relative Z layer offsets. Surface is 0. Positive builds upward; negative mines downward.
-    int32 BuildLayerOffset = 0;
-    int32 MineLayerOffset = 0;
-
-    /** Settlement used when checking existing/completed mining designations for connectivity. */
-    int32 ActiveMineSettlementID = INDEX_NONE;
-
-    int32 ActiveToolLayerOffset = 0;
-    int32 ActiveViewLayerOffset = 0;
-
-    /** Confirmed selection cells: voxel coord -> terrain Z. */
-    TMap<FIntVector, float> SelectedCells;
-
-    /** Temporary selection while mouse is held: voxel coord -> terrain Z. */
-    TMap<FIntVector, float> DragPreviewCells;
-
-    // CUBE-VOXEL-SCALE: fallback only. The live cell size comes from GetCellSizeUU(),
-    // which reads the VoxelWorldManager's VoxelSize so selection aligns with the
-    // configured grid (200uu by default). This constant is used only when the manager
-    // is unavailable (early init) and as the WorldToVoxel default-arg fallback.
-    static constexpr float CellSizeUUFallback = 200.0f;
-    static constexpr float TraceDistance = 1000000.0f;
-
-    // ── Legacy macro-cell helpers ─────────────────────────────────────────────
-    // Non-mine legacy paths may still use 1600uu macro cells. Mine selection/hover/drag
-    // now stays in true 200uu voxel space at every layer.
     static constexpr int32 MacroCellVoxelSpan = 8; // 1600uu / 200uu
 
     // Floored division — REQUIRED: world is origin-centered, voxel coords go negative,
@@ -354,27 +342,95 @@ private:
                 OutVoxels.Emplace(BaseX + dx, BaseY + dy, VoxelZ);
     }
 
+private:
+    UPROPERTY(Transient)
+    TObjectPtr<ATileGridOverlayActor> GridOverlay = nullptr;
+
+    bool bSelectionActive = false;
+    bool bDraggingSelection = false;
+    bool bHasValidHover = false;
+
+    /** Controls whether the static base grid layer is drawn while a grid-selection tool is active. */
+    bool bStaticBaseGridEnabled = true;
+
+    EBuildToolMode ActiveToolMode = EBuildToolMode::None;
+    EGridSelectionShape ActiveShape = EGridSelectionShape::Rectangle;
+
+    // Selection keys. Mine mode stores real 200uu voxel coordinates here; non-mine
+    // tools may still use the legacy macro key path through MakeSelectionKeyFromVoxel.
+    FIntVector HoveredVoxel = FIntVector::ZeroValue;
+    FIntVector DragStartVoxel = FIntVector::ZeroValue;
+    FIntVector LastPreviewEndVoxel = FIntVector(INT32_MIN);
+
+    float HoveredTerrainZ = 0.0f;
+    float DragStartTerrainZ = 0.0f;
+
+    // Tool-relative Z layer offsets. Surface is 0. Positive builds upward; negative mines downward.
+    int32 BuildLayerOffset = 0;
+    int32 MineLayerOffset = 0;
+
+    /** Settlement used when checking existing/completed mining designations for connectivity. */
+    int32 ActiveMineSettlementID = INDEX_NONE;
+
+    int32 ActiveToolLayerOffset = 0;
+    int32 ActiveViewLayerOffset = 0;
+
+    /** OPTION-D: confirmed selection cells, MACRO key -> terrain Z. UI/overlay only —
+     *  this is no longer the mining plan; the plan is PersistentMineAnchorVoxels. */
+    TMap<FIntVector, float> SelectedCells;
+
+    /** OPTION-D: temporary selection while mouse is held, MACRO key -> terrain Z. */
+    TMap<FIntVector, float> DragPreviewCells;
+
+    // CUBE-VOXEL-SCALE: fallback only. The live cell size comes from GetCellSizeUU(),
+    // which reads the VoxelWorldManager's VoxelSize so selection aligns with the
+    // configured grid (200uu by default). This constant is used only when the manager
+    // is unavailable (early init) and as the WorldToVoxel default-arg fallback.
+    static constexpr float CellSizeUUFallback = 200.0f;
+    static constexpr float TraceDistance = 1000000.0f;
+
     // Player-facing macro cell size (1600uu). Gameplay grid stays GetCellSizeUU() (200uu).
     float GetMacroCellSizeUU() const;
 
-    // Converts true voxel coords to the active selection key space. Mine stays in
-    // voxel space at every layer; legacy non-mine paths keep the macro key path.
+    // Converts true voxel coords to the active selection key space. Mine returns the
+    // input voxel unchanged; legacy non-mine tools may map to macro keys.
     FIntVector MakeSelectionKeyFromVoxel(const FIntVector& Voxel) const;
 
-    // Per-macro validity tint for the drag preview (decision: NoneValid -> red). Built in
-    // RebuildDragPreview, consumed by PushPreviewToOverlay. Keyed by macro index, parallel
-    // to DragPreviewCells. Harmless if the overlay tinted path is not yet wired.
+    // OPTION-D: per-macro validity tint for the drag preview (AllValid=blue,
+    // Partial=amber, NoneValid=red — fully blocked macros stay VISIBLE and tint red,
+    // they are not dropped). Built in RebuildDragPreview, consumed by
+    // PushPreviewToOverlay. Keyed by macro index, parallel to DragPreviewCells.
     TMap<FIntVector, FLinearColor> PreviewMacroTints;
 
-    // Legacy macro expansion/filter helper retained for non-mine callers.
+    // OPTION-D: the macro -> voxel seam helpers shared by the drag commit, click
+    // toggle, live preview tints and the surface commit path. Candidates handed to
+    // the voxel-space filters are always real voxels by construction.
+    //
+    // The BATCH form expands EVERY macro in one set and runs ONE
+    // FilterMineSelectionByConnectivity pass over the combined voxels. This is not
+    // an optimization detail: the connectivity flood-fill lets candidate cells chain
+    // off other candidates in the same selection, so filtering macro-by-macro would
+    // wrongly reject macros whose access path runs through a neighbouring macro of
+    // the same drag.
     enum class EMacroValidity : uint8 { AllValid, Partial, NoneValid };
+    void ExpandMacroSetAndFilter(
+        const TMap<FIntVector, float>& MacroCells,
+        TMap<FIntVector, float>& OutValidVoxels,
+        TMap<FIntVector, int32>& OutValidCountByMacro) const;
+    // Single-macro convenience wrapper over the batch form.
     void ExpandMacroAndFilter(
         const FIntVector& MacroIndex, int32 VoxelZ, float CellTerrainZ,
         TMap<FIntVector, float>& OutValidVoxels,
         int32& OutValidCount, int32& OutTotalCount) const;
     EMacroValidity SummarizeMacroValidity(int32 ValidCount, int32 TotalCount) const;
+    static FLinearColor MakeMacroValidityTint(EMacroValidity Validity);
     static constexpr int32 SurfaceStaticBaseGridRadius = 96;
     static constexpr int32 MineStaticBaseGridRadius = 28;
+
+    // OPTION-D: Mine base-grid radius in MACRO cells. Legacy Mine drew radius 28 in
+    // 200uu voxel cells (~5600uu); 4 macro cells (~6400uu) keeps a similar footprint
+    // with 1/64th of the instances. Dig still uses MineStaticBaseGridRadius.
+    static constexpr int32 MineMacroStaticBaseGridRadius = 4;
     static constexpr int32 MaxMinePreviewDepthBelowSurface = 3;
     static constexpr int32 MineLayerStepSize = 3;
 
@@ -403,7 +459,7 @@ private:
     bool IsMineLikeTool() const;
 
     // True when Mine tool is active at surface layer (offset == 0).
-    // Surface Mine uses true 200uu voxel keys for hover/selection/preview.
+    // Surface Mine now keys hover/selection/preview directly by 200uu voxel coord.
     bool IsSurfaceMineMode() const;
 
     // CUBE-MINING-V3-FLOOD: true only when the active layer is an UNDERGROUND mine layer
@@ -445,15 +501,23 @@ private:
     // mutable: refreshed inside const connectivity/depth queries.
     mutable TSet<FIntVector> CompletedMineVoxels;
 
-    // CUBE-MINING-V3-ANCHOR-PERSIST
-    // Confirmed mine cells, in the SAME per-voxel grid space as SelectedCells
-    // (WorldToGrid3D / 100uu). Unlike SelectedCells this set is NOT cleared on a
-    // layer change, so a Z=N cell the player confirmed continues to act as the
-    // "Above" access anchor when planning Z=N-1 — even before the MiningSubsystem
-    // designation round-trips and regardless of whether ActiveMineSettlementID was
-    // ever set. Stored as voxel coord only; Z is meaningful. Populated at confirm
-    // time and cleared when the whole mine session ends.
+    // CUBE-MINING-V3-ANCHOR-PERSIST / OPTION-D
+    // The REAL mining plan, in true 200uu VOXEL space — never macro indices.
+    // Populated at the macro->voxel commit seams (EndDragSelection /
+    // ToggleHoveredSelection) with validity-filtered expanded voxels. Unlike
+    // SelectedCells this set is NOT cleared on a layer change, so a Z=N cell the
+    // player committed continues to act as the "Above" access anchor when planning
+    // Z=N-1 — even before the MiningSubsystem designation round-trips and regardless
+    // of whether ActiveMineSettlementID was ever set. Cleared when the whole mine
+    // session ends or after a successful Confirm.
     TSet<FIntVector> PersistentMineAnchorVoxels;
+
+    // OPTION-D: confirmed-overlay bookkeeping. For each confirmed MACRO square,
+    // the set of real voxels whose designations are still pending. The macro tile
+    // is removed from the overlay only when its last voxel completes. Keyed by
+    // macro index (Z = voxel layer Z). Survives tool sessions (designations keep
+    // mining while the tool is closed); cleared per-macro as voxels complete.
+    TMap<FIntVector, TSet<FIntVector>> ConfirmedMineMacroPending;
 
     // CUBE-MINING-V3-ANCHOR-PERSIST
     // Push faint above-layer anchor markers to the overlay while underground so the

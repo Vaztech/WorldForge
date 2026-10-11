@@ -13,6 +13,7 @@
 #include "Engine/StaticMesh.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "ProceduralMeshComponent.h"
+#include "AI/NavigationSystemBase.h"
 #include "../UI/WorldForgeEmbarkationManager.h"
 
 // Primary cube mesh: 1M_Cube (100 UU, clean faces, no chamfer).
@@ -31,7 +32,7 @@ static const TCHAR* const Cube01E_DebugMatPath =
 
 namespace
 {
-    FVector BuildTileCenterWorld(const FWorldForgeCubePatchMeshSettings& MeshSettings, int32 TileX, int32 TileY)
+    FVector BuildTerrainActorTileCenterWorld(const FWorldForgeCubePatchMeshSettings& MeshSettings, int32 TileX, int32 TileY)
     {
         const float HalfGridWidth = static_cast<float>(MeshSettings.TerrainGridSize.X) * 0.5f;
         const float HalfGridHeight = static_cast<float>(MeshSettings.TerrainGridSize.Y) * 0.5f;
@@ -177,6 +178,193 @@ void AWFCubeTerrainActor::DestroyChunkMeshComponents()
     }
 
     ChunkMeshComponents.Reset();
+    ChunkComponentIndexByCoord.Reset();
+    bHasLastMeshSettings = false;
+}
+
+UProceduralMeshComponent* AWFCubeTerrainActor::CreateChunkMeshComponent(const FIntPoint& ChunkCoord)
+{
+    UProceduralMeshComponent* ChunkMeshComponent = NewObject<UProceduralMeshComponent>(
+        this,
+        *FString::Printf(TEXT("CubeChunkMesh_%d_%d"), ChunkCoord.X, ChunkCoord.Y));
+    if (!ChunkMeshComponent)
+    {
+        return nullptr;
+    }
+
+    ChunkMeshComponent->SetupAttachment(RootComponent);
+    ChunkMeshComponent->SetMobility(EComponentMobility::Movable);
+    ChunkMeshComponent->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+    ChunkMeshComponent->SetCollisionObjectType(ECC_WorldStatic);
+    ChunkMeshComponent->SetCollisionResponseToAllChannels(ECR_Block);
+    ChunkMeshComponent->SetGenerateOverlapEvents(false);
+    ChunkMeshComponent->SetCanEverAffectNavigation(true);
+    ChunkMeshComponent->SetCastShadow(true);
+    ChunkMeshComponent->bUseAsyncCooking = true;
+    AddInstanceComponent(ChunkMeshComponent);
+    ChunkMeshComponent->RegisterComponent();
+
+    const int32 ComponentIndex = ChunkMeshComponents.Add(ChunkMeshComponent);
+    ChunkComponentIndexByCoord.Add(ChunkCoord, ComponentIndex);
+    return ChunkMeshComponent;
+}
+
+void AWFCubeTerrainActor::ApplyChunkMeshData(
+    UProceduralMeshComponent* ChunkMeshComponent,
+    const FWorldForgeCubeChunkMeshData& ChunkData,
+    TSet<EWorldForgeCubeBlockType>* LoggedBlockMatTypes,
+    int32& OutAssignedCount,
+    int32& OutDebugFallbackCount)
+{
+    OutAssignedCount = 0;
+    OutDebugFallbackCount = 0;
+
+    if (!ChunkMeshComponent)
+    {
+        return;
+    }
+
+    ChunkMeshComponent->ClearAllMeshSections();
+
+    int32 SectionIndex = 0;
+    for (const FWorldForgeCubeMeshSectionData& SectionData : ChunkData.SectionData)
+    {
+        if (!SectionData.HasGeometry())
+        {
+            continue;
+        }
+
+        ChunkMeshComponent->CreateMeshSection_LinearColor(
+            SectionIndex,
+            SectionData.Vertices,
+            SectionData.Triangles,
+            SectionData.Normals,
+            SectionData.UV0,
+            SectionData.VertexColors,
+            SectionData.Tangents,
+            true);
+
+        // CUBE-TERRAIN-04N: Material now resolved via BlockTypeMaterials map.
+        // Mapped overrides are assigned directly; unmapped/null entries fall back
+        // to the legacy debug-color MID so existing visuals are preserved.
+        const TObjectPtr<UMaterialInterface>* MappedEntry =
+            BlockTypeMaterials.Find(SectionData.BlockType);
+        const bool bUsingOverride = (MappedEntry && MappedEntry->Get() != nullptr);
+
+        UMaterialInterface* SectionMat = GetMaterialForBlockType(SectionData.BlockType);
+        if (bUsingOverride)
+        {
+            ChunkMeshComponent->SetMaterial(SectionIndex, SectionMat);
+        }
+        else if (UMaterialInstanceDynamic* MID =
+                    CreateDebugMaterialInstance(SectionMat, SectionData.BlockType))
+        {
+            ChunkMeshComponent->SetMaterial(SectionIndex, MID);
+        }
+
+        // CUBE-TERRAIN-04O-STEP1: Tally assigned vs fallback for the patch summary.
+        if (bUsingOverride)
+        {
+            ++OutAssignedCount;
+        }
+        else
+        {
+            ++OutDebugFallbackCount;
+        }
+
+        if (LoggedBlockMatTypes && !LoggedBlockMatTypes->Contains(SectionData.BlockType))
+        {
+            LoggedBlockMatTypes->Add(SectionData.BlockType);
+            UE_LOG(LogTemp, Log,
+                TEXT("[CubeTerrainMaterial] BlockType=%d Source=%s Material=%s"),
+                static_cast<int32>(SectionData.BlockType),
+                bUsingOverride ? TEXT("Assigned") : TEXT("DebugFallback"),
+                SectionMat ? *SectionMat->GetName() : TEXT("<null>"));
+        }
+
+        ++SectionIndex;
+    }
+}
+
+bool AWFCubeTerrainActor::RebuildChunksForGridCell(UCubeTerrainRuntime* Runtime, const FIntVector& GridCell)
+{
+    if (!bHasLastMeshSettings || ChunkMeshComponents.Num() == 0 ||
+        !IsValid(Runtime) || !Runtime->HasPatchBlockVolume())
+    {
+        UE_LOG(LogTemp, Warning,
+            TEXT("[CubeBlockGrid] RebuildChunksForGridCell skipped. Grid=(%d,%d,%d) ChunkMesh=%s Volume=%s"),
+            GridCell.X, GridCell.Y, GridCell.Z,
+            (bHasLastMeshSettings && ChunkMeshComponents.Num() > 0) ? TEXT("true") : TEXT("false"),
+            (IsValid(Runtime) && Runtime->HasPatchBlockVolume()) ? TEXT("true") : TEXT("false"));
+        return false;
+    }
+
+    FIntPoint Local;
+    if (!Runtime->GridCellToPatchLocal(FIntPoint(GridCell.X, GridCell.Y), Local))
+    {
+        return false;
+    }
+
+    const int32 ChunkSize = FMath::Max(1, LastMeshSettings.ChunkSizeInBlocks);
+    const FIntPoint BaseChunk(Local.X / ChunkSize, Local.Y / ChunkSize);
+
+    // A block on a chunk edge also changes the exposed faces of the neighbor chunk.
+    TArray<FIntPoint, TInlineAllocator<4>> ChunksToRebuild;
+    ChunksToRebuild.Add(BaseChunk);
+    const int32 LocalInChunkX = Local.X % ChunkSize;
+    const int32 LocalInChunkY = Local.Y % ChunkSize;
+    if (LocalInChunkX == 0)             ChunksToRebuild.AddUnique(FIntPoint(BaseChunk.X - 1, BaseChunk.Y));
+    if (LocalInChunkX == ChunkSize - 1) ChunksToRebuild.AddUnique(FIntPoint(BaseChunk.X + 1, BaseChunk.Y));
+    if (LocalInChunkY == 0)             ChunksToRebuild.AddUnique(FIntPoint(BaseChunk.X, BaseChunk.Y - 1));
+    if (LocalInChunkY == ChunkSize - 1) ChunksToRebuild.AddUnique(FIntPoint(BaseChunk.X, BaseChunk.Y + 1));
+
+    bool bRebuiltAny = false;
+    for (const FIntPoint& ChunkCoord : ChunksToRebuild)
+    {
+        FWorldForgeCubeChunkMeshData ChunkData;
+        if (!FWorldForgeCubeMeshBuilder::BuildChunkMesh(Runtime, LastMeshSettings, ChunkCoord, ChunkData))
+        {
+            continue;
+        }
+
+        UProceduralMeshComponent* ChunkMeshComponent = nullptr;
+        if (const int32* ComponentIndex = ChunkComponentIndexByCoord.Find(ChunkCoord))
+        {
+            if (ChunkMeshComponents.IsValidIndex(*ComponentIndex))
+            {
+                ChunkMeshComponent = ChunkMeshComponents[*ComponentIndex];
+            }
+        }
+
+        if (!ChunkMeshComponent)
+        {
+            if (!ChunkData.HasGeometry())
+            {
+                continue;
+            }
+            ChunkMeshComponent = CreateChunkMeshComponent(ChunkCoord);
+            if (!ChunkMeshComponent)
+            {
+                continue;
+            }
+        }
+
+        // Update the existing component in place so collision stays registered
+        // while the new body cooks.
+        int32 AssignedCount = 0;
+        int32 DebugFallbackCount = 0;
+        ApplyChunkMeshData(ChunkMeshComponent, ChunkData, nullptr, AssignedCount, DebugFallbackCount);
+        FNavigationSystem::UpdateComponentData(*ChunkMeshComponent);
+        bRebuiltAny = true;
+
+        UE_LOG(LogTemp, Log,
+            TEXT("[CubeBlockGrid] Chunk rebuilt. Chunk=(%d,%d) Grid=(%d,%d,%d) Faces=%d Sections=%d"),
+            ChunkCoord.X, ChunkCoord.Y,
+            GridCell.X, GridCell.Y, GridCell.Z,
+            ChunkData.Faces, ChunkData.Sections);
+    }
+
+    return bRebuiltAny;
 }
 
 void AWFCubeTerrainActor::ClearPatch()
@@ -327,7 +515,7 @@ void AWFCubeTerrainActor::BuildPatchWithHISM(
             const bool bIsFluid = TileSurfaceType == EWorldForgeCubeBlockType::Water
                 || TileSurfaceType == EWorldForgeCubeBlockType::Lava;
 
-            const FVector TileWorldCenter = BuildTileCenterWorld(MeshSettings, TileX, TileY);
+            const FVector TileWorldCenter = BuildTerrainActorTileCenterWorld(MeshSettings, TileX, TileY);
 
             const float Z00 = static_cast<float>(TileSurfaceZ);
             const float Z10 = static_cast<float>(Runtime->GetSurfaceZAt(
@@ -567,9 +755,8 @@ void AWFCubeTerrainActor::BuildPatch(UCubeTerrainRuntime* Runtime, UVoxelWorldMa
     MeshSettings.bDebugSuppressOuterPatchBorderFaces = bDebugSuppressOuterPatchBorderFaces;
 
     // CUBE-TERRAIN-04M: Shoreline edge skirt.
-    // Sea level target matches Runtime's internal Cube01C_WaterLevelBlock (=8). No public
-    // accessor exists, so we use the same constant the runtime uses for ocean tile SurfaceZ.
-    MeshSettings.SeaLevelZ = 8;
+    // Sea level target matches the runtime's ocean tile SurfaceZ.
+    MeshSettings.SeaLevelZ = UCubeTerrainRuntime::GetSeaLevelBlockZ();
     MeshSettings.EdgeSkirtTiles = FMath::Max(0, EdgeSkirtTiles);
 
     // CUBE-TERRAIN-04M-FIX3: Proof log that the actor's EdgeSkirtTiles value reaches MeshSettings.
@@ -638,92 +825,30 @@ void AWFCubeTerrainActor::BuildPatch(UCubeTerrainRuntime* Runtime, UVoxelWorldMa
 
             for (const FWorldForgeCubeChunkMeshData& ChunkData : PatchMeshData.Chunks)
             {
-                UProceduralMeshComponent* ChunkMeshComponent = NewObject<UProceduralMeshComponent>(
-                    this,
-                    *FString::Printf(TEXT("CubeChunkMesh_%d_%d"), ChunkData.ChunkCoord.X, ChunkData.ChunkCoord.Y));
+                UProceduralMeshComponent* ChunkMeshComponent = CreateChunkMeshComponent(ChunkData.ChunkCoord);
                 if (!ChunkMeshComponent)
                 {
                     bChunkComponentFailure = true;
                     break;
                 }
 
-                ChunkMeshComponent->SetupAttachment(RootComponent);
-                ChunkMeshComponent->SetMobility(EComponentMobility::Movable);
-                ChunkMeshComponent->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
-                ChunkMeshComponent->SetCollisionObjectType(ECC_WorldStatic);
-                ChunkMeshComponent->SetCollisionResponseToAllChannels(ECR_Block);
-                ChunkMeshComponent->SetGenerateOverlapEvents(false);
-                ChunkMeshComponent->SetCanEverAffectNavigation(true);
-                ChunkMeshComponent->SetCastShadow(true);
-                ChunkMeshComponent->bUseAsyncCooking = true;
-                AddInstanceComponent(ChunkMeshComponent);
-                ChunkMeshComponent->RegisterComponent();
-
                 UE_LOG(LogTemp, Log,
                     TEXT("[CubeTerrainCollision] Procedural chunk collision enabled. Mode=QueryOnly Sections=%d"),
                     ChunkData.Sections);
 
-                int32 SectionIndex = 0;
-                for (const FWorldForgeCubeMeshSectionData& SectionData : ChunkData.SectionData)
-                {
-                    if (!SectionData.HasGeometry())
-                    {
-                        continue;
-                    }
+                int32 ChunkAssignedCount = 0;
+                int32 ChunkDebugFallbackCount = 0;
+                ApplyChunkMeshData(
+                    ChunkMeshComponent,
+                    ChunkData,
+                    &LoggedBlockMatTypes,
+                    ChunkAssignedCount,
+                    ChunkDebugFallbackCount);
 
-                    ChunkMeshComponent->CreateMeshSection_LinearColor(
-                        SectionIndex,
-                        SectionData.Vertices,
-                        SectionData.Triangles,
-                        SectionData.Normals,
-                        SectionData.UV0,
-                        SectionData.VertexColors,
-                        SectionData.Tangents,
-                        true);
-
-                    // CUBE-TERRAIN-04N: Material now resolved via BlockTypeMaterials map.
-                    // Mapped overrides are assigned directly; unmapped/null entries fall back
-                    // to the legacy debug-color MID so existing visuals are preserved.
-                    const TObjectPtr<UMaterialInterface>* MappedEntry =
-                        BlockTypeMaterials.Find(SectionData.BlockType);
-                    const bool bUsingOverride = (MappedEntry && MappedEntry->Get() != nullptr);
-
-                    UMaterialInterface* SectionMat = GetMaterialForBlockType(SectionData.BlockType);
-                    if (bUsingOverride)
-                    {
-                        ChunkMeshComponent->SetMaterial(SectionIndex, SectionMat);
-                    }
-                    else if (UMaterialInstanceDynamic* MID =
-                                CreateDebugMaterialInstance(SectionMat, SectionData.BlockType))
-                    {
-                        ChunkMeshComponent->SetMaterial(SectionIndex, MID);
-                    }
-
-                    // CUBE-TERRAIN-04O-STEP1: Tally assigned vs fallback for the patch summary.
-                    ++AuditTotalSections;
-                    if (bUsingOverride)
-                    {
-                        ++AuditAssignedCount;
-                    }
-                    else
-                    {
-                        ++AuditDebugFallbackCount;
-                    }
-
-                    if (!LoggedBlockMatTypes.Contains(SectionData.BlockType))
-                    {
-                        LoggedBlockMatTypes.Add(SectionData.BlockType);
-                        UE_LOG(LogTemp, Log,
-                            TEXT("[CubeTerrainMaterial] BlockType=%d Source=%s Material=%s"),
-                            static_cast<int32>(SectionData.BlockType),
-                            bUsingOverride ? TEXT("Assigned") : TEXT("DebugFallback"),
-                            SectionMat ? *SectionMat->GetName() : TEXT("<null>"));
-                    }
-
-                    ++SectionIndex;
-                }
-
-                ChunkMeshComponents.Add(ChunkMeshComponent);
+                // CUBE-TERRAIN-04O-STEP1: Tally assigned vs fallback for the patch summary.
+                AuditAssignedCount += ChunkAssignedCount;
+                AuditDebugFallbackCount += ChunkDebugFallbackCount;
+                AuditTotalSections += ChunkAssignedCount + ChunkDebugFallbackCount;
 
                 UE_LOG(LogTemp, Log,
                     TEXT("[CubeTerrainMesh] Chunk built. Chunk=(%d,%d) Blocks=%d Faces=%d Sections=%d"),
@@ -750,6 +875,10 @@ void AWFCubeTerrainActor::BuildPatch(UCubeTerrainRuntime* Runtime, UVoxelWorldMa
                     AuditTotalSections,
                     AuditAssignedCount,
                     AuditDebugFallbackCount);
+
+                // CUBE-BLOCKGRID-01: keep the settings so mining can re-mesh single chunks.
+                LastMeshSettings = MeshSettings;
+                bHasLastMeshSettings = true;
 
                 bPatchBuilt = true;
             }

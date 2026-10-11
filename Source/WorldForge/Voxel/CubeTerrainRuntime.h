@@ -60,13 +60,19 @@ public:
     // ETerrainMode::CubePrototype is selected. Populates CubeChunks from
     // tile data and caches surface/depth lookup arrays.
     // InBlocksPerWorldTile: local block resolution per world tile (default 8 for 02A).
+    // CUBE-INLANDWATER-01 / CUBE-VOLCANO-01: optional pipeline feature data.
+    //   InLakeBasins — accepted lake basins (flat per-basin water surface elevation).
+    //   InVolcanoes  — volcano descriptors (crater lava cap vs basalt slopes).
+    // Null/empty inputs preserve the previous behavior exactly.
     void BuildFromTiles(
         const TArray<FWorldTileData>& WorldTiles,
         int32 GridWidth,
         int32 GridHeight,
         int32 InBlockHeightStep,
         int32 InBlocksPerWorldTile = 8,
-        float InTileWorldSizeUU = 3200.0f);
+        float InTileWorldSizeUU = 3200.0f,
+        const TArray<FLakeBasinData>* InLakeBasins = nullptr,
+        const TArray<FVolcanoData>* InVolcanoes = nullptr);
 
     // Tear down all runtime state. Safe to call at any time.
     void Reset();
@@ -132,7 +138,72 @@ public:
     int32 GetMaxSurfaceZ()   const { return MaxSurfaceZ; }
     int32 GetChunkCount()    const { return ChunkCount; }
 
+    // Ocean surface block Z used for ocean tiles. Shared with the render actor's edge skirt.
+    static int32 GetSeaLevelBlockZ();
+
+    // ── CUBE-BLOCKGRID-01: per-block patch volume ────────────────
+    //
+    // The tile columns above are one cell per 32m world tile. The render actor
+    // expands each tile into BlocksPerWorldTile x BlocksPerWorldTile blocks with
+    // blended heights. The resulting block volume for the rendered patch is
+    // stored here and is the authoritative data for everything inside the patch:
+    // mining, block queries, surface queries, and chunk mesh rebuilds.
+    //
+    // Grid cells are the coordinates used by selection/mining/farming
+    // (UVoxelWorldManager::WorldToGrid3D in CubePrototype mode). They are
+    // origin-centered: GridCell = GlobalBlock - (GridWidth * BlocksPerWorldTile / 2).
+    // Z is the block layer, identical to the tile column Z.
+
+    // Called by FWorldForgeCubeMeshBuilder after it builds the patch volume.
+    // Volume layout: Index = Z * BlocksX * BlocksY + LocalY * BlocksX + LocalX.
+    void SetPatchBlockVolume(
+        const FIntPoint& InPatchMinGlobalBlock,
+        int32 InBlocksX,
+        int32 InBlocksY,
+        int32 InMaxZ,
+        TArray<uint8>&& InVolume);
+
+    void ClearPatchBlockVolume();
+
+    bool HasPatchBlockVolume() const { return PatchBlocksX > 0 && PatchBlocksY > 0 && PatchVolume.Num() > 0; }
+    const TArray<uint8>& GetPatchBlockVolume() const { return PatchVolume; }
+    FIntPoint GetPatchMinGlobalBlock() const { return PatchMinGlobalBlock; }
+    int32 GetPatchBlocksX() const { return PatchBlocksX; }
+    int32 GetPatchBlocksY() const { return PatchBlocksY; }
+    int32 GetPatchMaxZ() const { return PatchMaxZ; }
+
+    // Grid cell <-> global block / world tile conversions.
+    FIntPoint GetGridCellOffset() const;
+    FIntPoint GridCellToTile(const FIntPoint& GridCell) const;
+    FIntPoint TileToCenterGridCell(const FIntPoint& TileXY) const;
+    bool GridCellToPatchLocal(const FIntPoint& GridCell, FIntPoint& OutPatchLocal) const;
+
+    // Block queries in grid cells. Inside the patch they read the block volume;
+    // outside it they fall back to the tile column that contains the cell.
+    EWorldForgeCubeBlockType GetGridBlockRaw(const FIntVector& GridCell) const;
+    FGameplayTag GetGridBlockTag(const FIntVector& GridCell) const;
+
+    // Topmost non-air block Z of the column. Returns false for out-of-bounds
+    // columns and for columns whose top block is Water or Lava.
+    bool TryGetGridSurfaceZ(const FIntPoint& GridCell, int32& OutSurfaceZ) const;
+
+    // Contiguous solid blocks from the column surface downward.
+    int32 GetGridTerrainDepth(const FIntPoint& GridCell) const;
+
+    // Removes one block inside the patch. Air, Water, Lava and the Z=0 floor cannot be removed.
+    bool RemoveGridBlock(const FIntVector& GridCell);
+
+    // Restores a block previously removed by RemoveGridBlock.
+    bool RestoreGridBlock(const FIntVector& GridCell);
+
 private:
+    int32 PatchVolumeIndex(int32 LocalX, int32 LocalY, int32 Z) const
+    {
+        return (Z * PatchBlocksY * PatchBlocksX) + (LocalY * PatchBlocksX) + LocalX;
+    }
+
+    void RecomputePatchColumnSurface(int32 LocalX, int32 LocalY);
+
     bool  bRuntimeValid = false;
     int32 BlockHeightStep = 4;
     int32 CachedGridWidth = 0;
@@ -159,4 +230,17 @@ private:
     int32 MinSurfaceZ = 0;
     int32 MaxSurfaceZ = 0;
     int32 ChunkCount = 0;
+
+    // CUBE-BLOCKGRID-01: per-block patch volume (see SetPatchBlockVolume).
+    FIntPoint PatchMinGlobalBlock = FIntPoint::ZeroValue;
+    int32 PatchBlocksX = 0;
+    int32 PatchBlocksY = 0;
+    int32 PatchMaxZ = 0;
+    TArray<uint8> PatchVolume;
+
+    // Topmost non-air Z per patch column, INDEX_NONE when the column is empty.
+    TArray<int16> PatchSurfaceZ;
+
+    // Original block type of every block removed by RemoveGridBlock, for restore.
+    TMap<FIntVector, uint8> RemovedPatchBlocks;
 };
